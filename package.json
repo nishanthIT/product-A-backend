@@ -1,0 +1,28 @@
+{
+  "name": "wholesale-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node ./src/routes/authroutes.js"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@prisma/client": "^6.2.1",
+    "cors": "^2.8.5",
+    "date-fns-tz": "^3.2.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "luxon": "^3.5.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "prisma": "^6.2.1"
+  }
+}

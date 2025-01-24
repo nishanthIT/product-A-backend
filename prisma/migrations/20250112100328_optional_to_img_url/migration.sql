@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Product" ALTER COLUMN "barcode" DROP NOT NULL,
+ALTER COLUMN "img" DROP NOT NULL;
