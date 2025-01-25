@@ -11,6 +11,7 @@ import {
 import {
   addEmployee,
   deleteEmployee,
+  getAllEmployees,
   getEmployee,
   updateEmployee,
 } from "../controller/employee.js";
@@ -54,7 +55,7 @@ router.get("/productAtShop/:shopId",getProductAtShop);
 
 /* <!-- Employee Routes --> */
 router.post("/addEmployee", addEmployee);
-router.put("/updateEmployee", updateEmployee);
+router.put("/updateEmployee/:id", updateEmployee);
 router.delete("/deleteEmployee/:id", deleteEmployee);
 router.get("/getEmployee/:id", getEmployee);
 
@@ -63,6 +64,7 @@ router.post("/addCustomer", addCustomer);
 router.put("/updateCustomer", updateCustomer);
 router.delete("/deleteCustomer/:id", deleteCustomer);
 router.get("/getCustomer/:id", getCustomer);
+router.get("/getallemploy", getAllEmployees);
 
 /* <!-- Action Log Routes --> */
 router.get("/getHourlyProductAdds/:employeeId", getHourlyProductAdds);
