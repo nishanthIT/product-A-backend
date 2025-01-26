@@ -1,7 +1,7 @@
 import express from "express";
 import { filterProducts } from "../controller/filterProducts.js";
 import { addProduct, editProduct } from "../controller/addProduct.js";
-import { addShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
+import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
 import {
   addProductAtShop,
   addProductAtShopifExistAtProduct,
@@ -43,6 +43,7 @@ router.post("/addShop", addShop);
 router.put("/editShop/:id", editShop);
 router.get("/getAllshop", getAllShops);
 router.get("/getshop/:id", getShopById);
+router.delete("/shops/:id", deleteShop); // Add the delete route
 
 /* <!-- ProductAtShop Routes --> */
 router.post("/addProductAtShop/:employeeId", addProductAtShop);

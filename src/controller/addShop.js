@@ -76,25 +76,43 @@ const addShop = async (req, res) => {
   }
 };
 
+// const editShop = async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { name, address, mobile } = req.body;
+//     const shop = {
+//       name,
+//       address,
+//       mobile,
+//     };
+
+//     console.log(name, address, mobile);
+
+//     const updatedShop = await prisma.shop.update({
+//       where: {
+//         id,
+//       },
+//       data: shop,
+//     });
+//     console.log(name, address, mobile);
+
+//     res.status(200).json(updatedShop);
+//   } catch (error) {
+//     console.error(error);
+//     res.status(500).json({ error: "Something went wrong" });
+//   }
+// };
+
+
 const editShop = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id } = req.params; // Prisma expects `id` to be a string
     const { name, address, mobile } = req.body;
-    const shop = {
-      name,
-      address,
-      mobile,
-    };
-
-    console.log(name, address, mobile);
 
     const updatedShop = await prisma.shop.update({
-      where: {
-        id,
-      },
-      data: shop,
+      where: { id: String(id) },  // Ensure the id is treated as a string
+      data: { name, address, mobile },
     });
-    console.log(name, address, mobile);
 
     res.status(200).json(updatedShop);
   } catch (error) {
@@ -102,6 +120,7 @@ const editShop = async (req, res) => {
     res.status(500).json({ error: "Something went wrong" });
   }
 };
+
 
 
 
@@ -153,6 +172,28 @@ const getAllShops = async (req, res) => {
   }
 };
 
+const deleteShop = async (req, res) => {
+  try {
+    const { id } = req.params;
 
-export { addShop, editShop,getAllShops,getShopById };
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({ error: "Invalid or missing ID" });
+    }
+
+    // Perform the deletion
+    const deletedShop = await prisma.shop.delete({
+      where: {
+        id, // Use the `id` directly since it's a string
+      },
+    });
+
+    res.status(200).json(deletedShop);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+};
+
+
+export { addShop, editShop,getAllShops,getShopById,deleteShop };
 
