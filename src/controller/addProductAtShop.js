@@ -2,7 +2,7 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 const addProductAtShop = async (req, res) => {
-  const { employeeId } = req.params; // Params for identifying product and shop
+  
   const {
     shopId,
     title,
@@ -14,6 +14,8 @@ const addProductAtShop = async (req, res) => {
     barcode,
     caseBarcode,
     price,
+    employeeId,
+    aiel
   } = req.body;
 
   try {
@@ -34,13 +36,15 @@ const addProductAtShop = async (req, res) => {
     const newProduct = await prisma.product.create({
       data: {
         title,
-        productUrl,
-        caseSize,
-        packetSize,
-        retailSize,
-        img,
+        productUrl: productUrl || null,
+        caseSize: String(caseSize) ,
+        packetSize:String(packetSize),
+        retailSize: String(retailSize),
+        img:img || null,
         barcode: barcode || null, // Ensure barcode can be nullable
         caseBarcode: caseBarcode || null, // Ensure caseBarcode can be nullable
+        
+
       },
     });
 
@@ -51,8 +55,11 @@ const addProductAtShop = async (req, res) => {
         productId: newProduct.id, // Use the generated product ID
         price,
         employeeId: parseInt(employeeId, 10),
+        card_aiel_number: aiel || null,
       },
     });
+ 
+ 
 
     const actionLog = await prisma.actionLog.create({
       data: {
@@ -122,8 +129,10 @@ const updateProductPriceAtShop = async (req, res) => {
 };
 
 const addProductAtShopifExistAtProduct = async (req, res) => {
-  const { employeeId } = req.params;
-  const { shopId, id, price } = req.body;
+  
+  const { shopId, id, price,employeeId, casebarcode,aiel } = req.body;
+
+  console.log(shopId, id, price,employeeId, casebarcode,aiel)
 
   try {
     const shopExists = await prisma.shop.findUnique({ where: { id: shopId } });
@@ -151,8 +160,18 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         where: {
           shopId_productId: { shopId, productId: product.id },
         },
-        data: { price, updatedAt: new Date() },
+        data: { price, updatedAt: new Date(),card_aiel_number: aiel },
       });
+
+      const updateProduct = await prisma.product.update({
+        where: {
+          id: id,
+        },
+        data: {
+          caseBarcode: casebarcode,
+          },
+      })
+      
       console.log("productAtShop updated");
 
       res.status(200).json({

@@ -46,9 +46,9 @@ router.get("/getshop/:id", getShopById);
 router.delete("/shops/:id", deleteShop); // Add the delete route
 
 /* <!-- ProductAtShop Routes --> */
-router.post("/addProductAtShop/:employeeId", addProductAtShop);
+router.post("/addProductAtShop", addProductAtShop);
 router.post(
-  "/addProductAtShopifExistAtProduct/:employeeId",
+  "/addProductAtShopifExistAtProduct",
   addProductAtShopifExistAtProduct
 );
 router.put("/updateProductPriceAtShop/:shopId", updateProductPriceAtShop);

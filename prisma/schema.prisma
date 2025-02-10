@@ -35,7 +35,7 @@ model Customer {
 model Product {
   id          String @id @default(cuid()) // Unique identifier  //321
   title       String
-  productUrl  String
+  productUrl  String?
   caseSize    String
   packetSize  String
   img         Json?     
@@ -70,6 +70,7 @@ model ProductAtShop {
   customer    Customer?  @relation(fields: [userId], references: [id])
   employee    Empolyee?  @relation(fields: [employeeId], references: [id])
   lists       ListProduct[]
+  card_aiel_number  String?
   
   @@unique([shopId, productId])
   @@index([employeeId, updatedAt]) 
