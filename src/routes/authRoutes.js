@@ -1,6 +1,6 @@
 import express from "express";
 import { filterProducts } from "../controller/filterProducts.js";
-import { addProduct, editProduct } from "../controller/addProduct.js";
+import { addProduct, editProduct, getProductByBarcode, getProductById } from "../controller/addProduct.js";
 import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
 import {
   addProductAtShop,
@@ -36,6 +36,8 @@ router.get("/filterProducts", filterProducts); // given in query
 /* <!-- Product Routes --> */
 router.post("/addProduct", addProduct);
 router.put("/editProduct/:id", editProduct);
+router.get("/getProductByBarcode/:barcode", getProductByBarcode);
+router.get("/getProductById/:id", getProductById);
 
 
 /* <!-- Shop Routes --> */

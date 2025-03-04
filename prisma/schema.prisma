@@ -42,6 +42,7 @@ model Product {
   barcode     String?    @unique
   caseBarcode String?
   retailSize  String
+  rrp         Decimal?
   shops       ProductAtShop[] // Many-to-many relationship with Shop through ProductAtShop
   actionLog   ActionLog[]
 }
