@@ -76,7 +76,7 @@ const addProduct = async (req, res) => {
             const image = await Jimp.read(req.file.path);
             await image.writeAsync(outputPath);
             fs.unlinkSync(req.file.path);
-            imgPath = `localhost:3000/images/${outputFilename}`;
+            imgPath = `https://backend.h7tex.com/api/image/${outputFilename}`;
           } catch (jimpError) {
             console.error("Fallback failed:", jimpError);
             return res.status(500).json({ error: "Image processing failed" });
@@ -304,7 +304,7 @@ const editProduct = async (req, res) => {
             const image = await Jimp.read(req.file.path);
             await image.writeAsync(outputPath);
             fs.unlinkSync(req.file.path);
-            const imagePath = `localhost:3000/images/${outputFilename}`;
+            const imagePath = `https://backend.h7tex.com/api/image/${outputFilename}`;
             dataToUpdate.img = imagePath;
           } catch (jimpError) {
             console.error("Fallback failed:", jimpError);
