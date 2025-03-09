@@ -1,8 +1,12 @@
+
+
+
+
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
+// Add a product at a shop
 const addProductAtShop = async (req, res) => {
-  
   const {
     shopId,
     title,
@@ -10,51 +14,66 @@ const addProductAtShop = async (req, res) => {
     packetSize,
     retailSize,
     barcode,
-    caseBarcode,
+    casebarcode,
     price,
     employeeId,
     aiel,
     rrp
   } = req.body;
 
-  // Check for other missing values
-  const requiredFields = { shopId, title, caseSize, packetSize, retailSize, barcode, caseBarcode, employeeId, aiel, rrp };
-  const missingFields = Object.keys(requiredFields).filter(key => requiredFields[key] === null || requiredFields[key] === undefined);
-
-  if (missingFields.length > 0) {
+  // Check for required fields
+  if (!shopId || !title || !employeeId) {
     return res.status(400).json({ 
-      error: `Missing required fields: ${missingFields.join(", ")}. Try to fill all.` 
+      error: "Missing required fields: shopId, title, and employeeId are required." 
     });
   }
 
   try {
+    // Check if shop exists
     const shopExists = await prisma.shop.findUnique({ where: { id: shopId } });
     if (!shopExists) {
       return res.status(404).json({ error: "Shop not found." });
     }
-    // Use findFirst instead of findUnique to search for non-unique fields
-    const existingProduct = await prisma.product.findFirst({
-      where: { caseBarcode }, // caseBarcode can be non-unique
-    });
 
-    if (existingProduct) {
-      return res.status(409).json({ error: "Product already exists." });
+    // Check if product with case barcode already exists
+    if (casebarcode) {
+      const existingProduct = await prisma.product.findFirst({
+        where: { caseBarcode:casebarcode },
+      });
+
+      if (existingProduct) {
+        return res.status(409).json({ error: "Product with this case barcode already exists." });
+      }
     }
+
+    // Check if product with barcode already exists
+    if (barcode) {
+      const existingProductWithBarcode = await prisma.product.findUnique({
+        where: { barcode },
+      });
+
+      if (existingProductWithBarcode) {
+        return res.status(409).json({ error: "Product with this barcode already exists." });
+      }
+    }
+
+    // Set default values
+    const finalCaseSize = caseSize || "1";
+    const finalPacketSize = packetSize || "1";
+    const finalRrp = rrp || price;
 
     // Create the product in the database
     const newProduct = await prisma.product.create({
       data: {
         title,
-        productUrl: productUrl || null,
-        caseSize: String(caseSize) ,
-        packetSize:String(packetSize),
-        retailSize: String(retailSize),
-        img:img || null,
-        barcode: barcode || null, // Ensure barcode can be nullable
-        caseBarcode: caseBarcode || null, // Ensure caseBarcode can be nullable
-        rrp: rrp || null,
-        
-
+        productUrl: null,
+        caseSize: String(finalCaseSize),
+        packetSize: String(finalPacketSize),
+        retailSize: retailSize ? String(retailSize) : null,
+        img: null,
+        barcode: barcode || null,
+        caseBarcode: casebarcode || null,
+        rrp: finalRrp ? parseFloat(finalRrp) : null,
       },
     });
 
@@ -62,15 +81,14 @@ const addProductAtShop = async (req, res) => {
     const addedProductAtShop = await prisma.productAtShop.create({
       data: {
         shopId,
-        productId: newProduct.id, // Use the generated product ID
-        price,
+        productId: newProduct.id,
+        price: parseFloat(price),
         employeeId: parseInt(employeeId, 10),
         card_aiel_number: aiel || null,
       },
     });
- 
- 
 
+    // Log the action
     const actionLog = await prisma.actionLog.create({
       data: {
         employeeId: parseInt(employeeId, 10),
@@ -80,9 +98,10 @@ const addProductAtShop = async (req, res) => {
       },
     });
 
-    res.status(201).json({ message: "Product added to shop successfully." });
-    console.log("Created ProductAtShop:", addedProductAtShop);
-    console.log("Created ActionLog:", actionLog);
+    res.status(201).json({ 
+      message: "Product added to shop successfully.",
+      productId: newProduct.id
+    });
   } catch (error) {
     console.error("Error adding product at shop:", error);
     res
@@ -91,9 +110,16 @@ const addProductAtShop = async (req, res) => {
   }
 };
 
+// Update product price at a shop
 const updateProductPriceAtShop = async (req, res) => {
-  const { shopId } = req.params; // Params for identifying product and shop
-  const { productId, price, employeeId } = req.body; // Updated price and employee performing the action
+  const { shopId } = req.params;
+  const { productId, price, employeeId } = req.body;
+
+  if (!shopId || !productId || price === undefined || !employeeId) {
+    return res.status(400).json({ 
+      error: "Missing required fields: shopId, productId, price, and employeeId are required." 
+    });
+  }
 
   try {
     // Check if the product exists in ProductAtShop
@@ -114,7 +140,10 @@ const updateProductPriceAtShop = async (req, res) => {
       where: {
         shopId_productId: { shopId, productId },
       },
-      data: { price, updatedAt: new Date() },
+      data: { 
+        price: parseFloat(price), 
+        updatedAt: new Date() 
+      },
     });
 
     // Log the action
@@ -138,150 +167,64 @@ const updateProductPriceAtShop = async (req, res) => {
   }
 };
 
-// const addProductAtShopifExistAtProduct = async (req, res) => {
-  
-//   const { shopId, id, price,employeeId, casebarcode,aiel,rrp } = req.body;
-
-//   console.log(shopId, id, price,employeeId, casebarcode,aiel,rrp);
-
-//   try {
-//     const shopExists = await prisma.shop.findUnique({ where: { id: shopId } });
-//     if (!shopExists) return res.status(404).json({ error: "Shop not found." });
-
-//     const product = await prisma.product.findUnique({
-//       where: { id: id },
-//     });
-
-//     if (!product) {
-//       return res
-//         .status(404)
-//         .json({ error: "Product not found in Products database." });
-//     }
-
-//     // Check if the product already exists in productAtShop
-//     const productAtShopExists = await prisma.productAtShop.findUnique({
-//       where: {
-//         shopId_productId: { shopId, productId: product.id },
-//       },
-//     });
-
-//     if (productAtShopExists) {
-//       const updatedProductAtShop = await prisma.productAtShop.update({
-//         where: {
-//           shopId_productId: { shopId, productId: product.id },
-//         },
-//         data: { price, updatedAt: new Date(),card_aiel_number: aiel },
-//       });
-
-//       const updateProduct = await prisma.product.update({
-//         where: {
-//           id: id,
-//         },
-//         data: {
-//           caseBarcode: casebarcode,
-//           rrp: rrp,
-          
-//           },
-//       })
-      
-//       console.log("productAtShop updated");
-
-//       res.status(200).json({
-//         success: true,
-//         message: "Product price updated successfully.",
-//         data: updatedProductAtShop,
-//       });
-//     } else {
-//       // Add the product to productAtShop
-//       await prisma.productAtShop.create({
-//         data: {
-//           shopId,
-//           productId: product.id,
-//           price,
-//           employeeId: parseInt(employeeId, 10),
-//         },
-//       });
-
-//       const actionLog = await prisma.actionLog.create({
-//         data: {
-//           employeeId: parseInt(employeeId, 10),
-//           shopId,
-//           productId: product.id,
-//           actionType: "ADD",
-//         },
-//       });
-//       console.log("productAtShop created");
-
-//       res.status(201).json({ message: "Product added to shop successfully." });
-//     }
-//   } catch (error) {
-//     console.error("Error:", error);
-//     res.status(500).json({
-//       error: "An error occurred while adding the product to the shop.",
-//     });
-//   }
-// };
+// Add an existing product to a shop
 const addProductAtShopifExistAtProduct = async (req, res) => {
-  const { shopId, id, price, employeeId, casebarcode, aiel, rrp } = req.body;
-
+  const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize } = req.body;
+ 
   
-
-  const requiredFields = { shopId, id, price, employeeId, casebarcode, aiel, rrp };
-  const missingFields = Object.keys(requiredFields).filter(key => requiredFields[key] === null || requiredFields[key] === undefined ||requiredFields[key] === '');
-
-  if (missingFields.length > 0) {
-    return res.status(400).json({ 
-      error: `Missing required fields: ${missingFields.join(", ")}. Try to fill all.` 
+  // Validate required fields
+  if (!shopId || !id || price === undefined ||price == ''|| aiel === undefined ||aiel == ''|| casebarcode === undefined ||casebarcode == ''|| packetSize === undefined ||packetSize == ''  || !employeeId) {
+    return res.status(400).json({
+      error: "Missing required fields: shopId, id, price, and employeeId are required."
     });
   }
   
-  // Validate required fields
-  if (!shopId || !id || !price) {
-    return res.status(400).json({ error: "Missing required fields (shopId, id, price)" });
-  }
-
   try {
     // Check if shop exists
-    const shopExists = await prisma.shop.findUnique({ 
-      where: { id: shopId } 
+    const shopExists = await prisma.shop.findUnique({
+      where: { id: shopId }
     });
     
     if (!shopExists) {
       return res.status(404).json({ error: "Shop not found." });
     }
-
+    
     // Check if product exists
     const product = await prisma.product.findUnique({
-      where: { id: id },
+      where: { id },
     });
     
     if (!product) {
-      return res.status(404).json({ 
-        error: "Product not found in Products database." 
+      return res.status(404).json({
+        error: "Product not found in Products database."
       });
     }
-
+    
     // Parse numeric values
     const parsedPrice = parseFloat(price);
     const parsedRrp = rrp ? parseFloat(rrp) : null;
-    const parsedEmployeeId = employeeId ? parseInt(employeeId, 10) : null;
-
-    // First, update the product record with caseBarcode and rrp
-    const updatedProduct = await prisma.product.update({
-      where: { id: id },
-      data: {
-        caseBarcode: casebarcode || undefined,
-        rrp: parsedRrp || undefined
-      },
-    });
-
+    const parsedEmployeeId = parseInt(employeeId, 10);
+    
+    // First, update the product record with caseBarcode, rrp, caseSize, and packetSize if provided
+    if (casebarcode || parsedRrp !== null || caseSize || packetSize) {
+      await prisma.product.update({
+        where: { id },
+        data: {
+          ...(casebarcode ? { caseBarcode: casebarcode } : {}),
+          ...(parsedRrp !== null ? { rrp: parsedRrp } : {}),
+          ...(caseSize ? { caseSize: caseSize } : {}),
+          ...(packetSize ? { packetSize: packetSize } : {})
+        },
+      });
+    }
+    
     // Check if the product already exists in productAtShop
     const productAtShopExists = await prisma.productAtShop.findUnique({
       where: {
         shopId_productId: { shopId, productId: id },
       },
     });
-
+    
     let result;
     
     if (productAtShopExists) {
@@ -290,14 +233,14 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         where: {
           shopId_productId: { shopId, productId: id },
         },
-        data: { 
+        data: {
           price: parsedPrice,
-          card_aiel_number: aiel || undefined,
+          ...(aiel ? { card_aiel_number: aiel } : {}),
           updatedAt: new Date(),
-          employeeId: parsedEmployeeId || undefined
+          employeeId: parsedEmployeeId
         },
       });
-
+      
       // Log the update action
       await prisma.actionLog.create({
         data: {
@@ -307,8 +250,6 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           actionType: "UPDATE",
         },
       });
-
-      console.log("ProductAtShop updated:", result);
       
       res.status(200).json({
         success: true,
@@ -323,10 +264,10 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           productId: id,
           price: parsedPrice,
           employeeId: parsedEmployeeId,
-          card_aiel_number: aiel || undefined
+          ...(aiel ? { card_aiel_number: aiel } : {})
         },
       });
-
+      
       // Log the add action
       await prisma.actionLog.create({
         data: {
@@ -336,10 +277,8 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           actionType: "ADD",
         },
       });
-
-      console.log("ProductAtShop created:", result);
       
-      res.status(201).json({ 
+      res.status(201).json({
         success: true,
         message: "Product added to shop successfully.",
         data: result
@@ -354,59 +293,200 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
   }
 };
 
-async function getProductAtShop(req, res) {
-  const { shopId } = req.params;  // Assuming it's in the body
-
+// Get products at a shop with pagination and search
+const getProductsAtShop = async (req, res) => {
+  const { shopId } = req.params;
+  const { page = 1,  search = "" } = req.query;
+  const limit = 100
+  
   if (!shopId) {
     return res.status(400).json({ error: "Shop ID is required" });
   }
 
+  const pageNumber = parseInt(page);
+  const limitNumber = parseInt(limit);
+  const offset = (pageNumber - 1) * limitNumber;
+
   try {
-    const productsAtShop = await prisma.shop.findUnique({
-      where: {
-        id: shopId,
-      },
-      include: {
-        products: {
-          select: {
-            product: {  // Accessing the related 'Product' model
-              select: {
-                title: true,  // Fetch the title from Product model
-                retailSize: true,  // Fetch the retailSize from Product model
-                caseSize: true,  // Fetch the caseSize from Product model
-                img: true, // Fetch the img from Product model
-              },
-            },
-            price: true,  // Fetch the price from ProductAtShop model
-            productId: true,  // Fetch the productId from ProductAtShop model
-          },
-        },
-      },
+    // Check if shop exists
+    const shopExists = await prisma.shop.findUnique({
+      where: { id: shopId },
     });
 
-    if (!productsAtShop) {
+    if (!shopExists) {
       return res.status(404).json({ error: "Shop not found" });
     }
 
-    // Flatten the results to return only the product details
-    const productDetails = productsAtShop.products.map(productAtShop => ({
-      title: productAtShop.product.title,
-      retailSize: productAtShop.product.retailSize,
-      price: productAtShop.price,  // Price from ProductAtShop
-      productId: productAtShop.productId,  // productId from ProductAtShop
-      caseSize: productAtShop.product.caseSize,  // caseSize from Product model
-      img: productAtShop.product.img, //
+    // Get total count of products that match the search
+    const totalCount = await prisma.productAtShop.count({
+      where: {
+        shopId,
+        product: {
+          title: {
+            contains: search,
+            mode: "insensitive"
+          }
+        }
+      }
+    });
+
+    // Get products with pagination and search
+    const productsAtShop = await prisma.productAtShop.findMany({
+      where: {
+        shopId,
+        product: {
+          title: {
+            contains: search,
+            mode: "insensitive"
+          }
+        }
+      },
+      include: {
+        product: {
+          select: {
+            title: true,
+            caseSize: true,
+            packetSize: true,
+            retailSize: true,
+            barcode: true,
+            caseBarcode: true,
+            img: true,
+            rrp: true
+          }
+        }
+      },
+      skip: offset,
+      take: limitNumber,
+      orderBy: {
+        updatedAt: 'desc' // Most recently updated first
+      }
+    });
+
+    // Map the data to a more frontend-friendly format
+    const formattedProducts = productsAtShop.map(item => ({
+      productId: item.productId,
+      shopId: item.shopId,
+      price: item.price,
+      title: item.product.title,
+      caseSize: item.product.caseSize,
+      packetSize: item.product.packetSize,
+      retailSize: item.product.retailSize,
+      barcode: item.product.barcode,
+      caseBarcode: item.product.caseBarcode,
+      img: item.product.img,
+      rrp: item.product.rrp,
+      aiel: item.card_aiel_number,
+      updatedAt: item.updatedAt
     }));
 
-    return res.json(productDetails);  // Return only the products data
+    res.status(200).json({
+      products: formattedProducts,
+      total: totalCount,
+      page: pageNumber,
+      limit: limitNumber,
+      totalPages: Math.ceil(totalCount / limitNumber)
+    });
   } catch (error) {
     console.error("Error fetching products at shop:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ error: "Internal server error" });
   }
-}
+};
 
+// Search for products not in a shop
+const searchProductsNotInShop = async (req, res) => {
+  const { query, shopId } = req.query;
+  
+  if (!query || !shopId) {
+    return res.status(400).json({ error: "Query and shopId parameters are required" });
+  }
+
+  try {
+    // Get products that match the search but are not in the shop
+    const products = await prisma.product.findMany({
+      where: {
+        title: {
+          contains: query,
+          mode: "insensitive"
+        },
+        NOT: {
+          shops: {  // Changed from productAtShop to shops
+            some: {
+              shopId: shopId
+            }
+          }
+        }
+      },
+      take: 20, // Limit results
+      orderBy: {
+        title: 'asc'
+      }
+    });
+
+    res.status(200).json(products);
+  } catch (error) {
+    console.error("Error searching products:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Remove a product from a shop
+const removeProductFromShop = async (req, res) => {
+  const { shopId } = req.params;
+  const { productId, employeeId } = req.body;
+
+  if (!shopId || !productId || !employeeId) {
+    return res.status(400).json({ 
+      error: "Missing required fields: shopId, productId, and employeeId are required." 
+    });
+  }
+
+  try {
+    // Check if the product exists in the shop
+    const productAtShop = await prisma.productAtShop.findUnique({
+      where: {
+        shopId_productId: { shopId, productId }
+      }
+    });
+
+    if (!productAtShop) {
+      return res.status(404).json({ 
+        error: "Product not found at the specified shop." 
+      });
+    }
+
+    // Delete the product from the shop
+    await prisma.productAtShop.delete({
+      where: {
+        shopId_productId: { shopId, productId }
+      }
+    });
+
+    // Log the removal action
+    await prisma.actionLog.create({
+      data: {
+        employeeId: parseInt(employeeId, 10),
+        shopId,
+        productId,
+        actionType: "REMOVE",
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Product removed from shop successfully."
+    });
+  } catch (error) {
+    console.error("Error removing product from shop:", error);
+    res.status(500).json({ error: "Internal server error." });
+  }
+};
+
+// Export all the handlers
 export {
   addProductAtShop,
   updateProductPriceAtShop,
-  addProductAtShopifExistAtProduct,getProductAtShop
+  addProductAtShopifExistAtProduct,
+  getProductsAtShop,
+  searchProductsNotInShop,
+  removeProductFromShop
 };

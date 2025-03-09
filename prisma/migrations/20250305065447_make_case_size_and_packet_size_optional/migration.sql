@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "Product" ALTER COLUMN "caseSize" DROP NOT NULL,
+ALTER COLUMN "packetSize" DROP NOT NULL,
+ALTER COLUMN "retailSize" DROP NOT NULL;

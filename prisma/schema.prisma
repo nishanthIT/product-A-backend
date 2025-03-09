@@ -16,7 +16,7 @@ datasource db {
 
 model Admin {
   id          Int @id @default(autoincrement())
-  email       String
+  email       String @unique
   password    String
   userType    UserType @default(ADMIN) // Adding userType for Admin
 }
@@ -36,12 +36,12 @@ model Product {
   id          String @id @default(cuid()) // Unique identifier  //321
   title       String
   productUrl  String?
-  caseSize    String
-  packetSize  String
+  caseSize    String?
+  packetSize  String?
   img         Json?     
   barcode     String?    @unique
   caseBarcode String?
-  retailSize  String
+  retailSize  String?
   rrp         Decimal?
   shops       ProductAtShop[] // Many-to-many relationship with Shop through ProductAtShop
   actionLog   ActionLog[]

@@ -83,9 +83,10 @@ const filterProducts = async (req, res) => {
       withoutCaseBarcode, 
       withoutRrp, 
       withoutImage,
-      page = "1",
-      limit = "10"
+      page = "10",
+     // limit = "100"
     } = req.query;
+const limit = 100
 
     // Convert page and limit to numbers
     const pageNum = parseInt(page);
