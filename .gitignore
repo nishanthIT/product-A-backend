@@ -1,3 +1,19 @@
 node_modules
 # Keep environment variables out of version control
 .env
+# Ignore node modules
+node_modules/
+
+# Ignore images directory
+images/
+
+# Ignore zip files
+*.zip
+
+# Optional: Ignore environment files
+.env
+
+# Optional: Logs
+logs
+*.log
+npm-debug.log*
