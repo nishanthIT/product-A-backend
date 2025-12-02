@@ -113,7 +113,18 @@ const addProductAtShop = async (req, res) => {
 // Update product price at a shop
 const updateProductPriceAtShop = async (req, res) => {
   const { shopId } = req.params;
-  const { productId, price, employeeId } = req.body;
+  const { productId, price, employeeId, offerPrice, offerExpiryDate } = req.body;
+
+  console.log('updateProductPriceAtShop received:', {
+    shopId,
+    productId,
+    price,
+    employeeId,
+    offerPrice,
+    offerExpiryDate,
+    offerPriceType: typeof offerPrice,
+    offerExpiryDateType: typeof offerExpiryDate
+  });
 
   if (!shopId || !productId || price === undefined || !employeeId) {
     return res.status(400).json({ 
@@ -135,15 +146,45 @@ const updateProductPriceAtShop = async (req, res) => {
         .json({ error: "Product not found at the specified shop." });
     }
 
-    // Update product price
+    // Parse offer data
+    const parsedOfferPrice = offerPrice && offerPrice !== '' && offerPrice !== 'null' ? parseFloat(offerPrice) : null;
+    const parsedOfferExpiryDate = offerExpiryDate && offerExpiryDate !== '' && offerExpiryDate !== 'null' ? new Date(offerExpiryDate) : null;
+
+    console.log('Parsed values:', {
+      originalPrice: price,
+      parsedPrice: parseFloat(price),
+      originalOfferPrice: offerPrice,
+      parsedOfferPrice,
+      originalOfferExpiryDate: offerExpiryDate,
+      parsedOfferExpiryDate
+    });
+
+    // Prepare update data
+    const updateData = {
+      price: parseFloat(price),
+      updatedAt: new Date()
+    };
+
+    // Always update offer fields to handle clearing offers
+    updateData.offerPrice = parsedOfferPrice;
+    updateData.offerExpiryDate = parsedOfferExpiryDate;
+
+    console.log('Update data:', updateData);
+
+    // Update product price and offer details
     const updatedProductAtShop = await prisma.productAtShop.update({
       where: {
         shopId_productId: { shopId, productId },
       },
-      data: { 
-        price: parseFloat(price), 
-        updatedAt: new Date() 
-      },
+      data: updateData,
+    });
+
+    console.log('Database update result:', {
+      id: updatedProductAtShop.id,
+      price: updatedProductAtShop.price,
+      offerPrice: updatedProductAtShop.offerPrice,
+      offerExpiryDate: updatedProductAtShop.offerExpiryDate,
+      updatedAt: updatedProductAtShop.updatedAt
     });
 
     // Log the action
@@ -158,7 +199,7 @@ const updateProductPriceAtShop = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: "Product price updated successfully.",
+      message: "Product price and offer updated successfully.",
       data: updatedProductAtShop,
     });
   } catch (error) {
@@ -169,7 +210,7 @@ const updateProductPriceAtShop = async (req, res) => {
 
 // Add an existing product to a shop
 const addProductAtShopifExistAtProduct = async (req, res) => {
-  const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize } = req.body;
+  const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize, offerPrice, offerExpiryDate } = req.body;
  
   
   // Validate required fields
@@ -204,6 +245,8 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
     const parsedPrice = parseFloat(price);
     const parsedRrp = rrp ? parseFloat(rrp) : null;
     const parsedEmployeeId = parseInt(employeeId, 10);
+    const parsedOfferPrice = offerPrice ? parseFloat(offerPrice) : null;
+    const parsedOfferExpiryDate = offerExpiryDate ? new Date(offerExpiryDate) : null;
     
     // First, update the product record with caseBarcode, rrp, caseSize, and packetSize if provided
     if (casebarcode || parsedRrp !== null || caseSize || packetSize) {
@@ -236,6 +279,8 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         data: {
           price: parsedPrice,
           ...(aiel ? { card_aiel_number: aiel } : {}),
+          ...(parsedOfferPrice !== null ? { offerPrice: parsedOfferPrice } : {}),
+          ...(parsedOfferExpiryDate ? { offerExpiryDate: parsedOfferExpiryDate } : {}),
           updatedAt: new Date(),
           employeeId: parsedEmployeeId
         },
@@ -264,7 +309,9 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           productId: id,
           price: parsedPrice,
           employeeId: parsedEmployeeId,
-          ...(aiel ? { card_aiel_number: aiel } : {})
+          ...(aiel ? { card_aiel_number: aiel } : {}),
+          ...(parsedOfferPrice !== null ? { offerPrice: parsedOfferPrice } : {}),
+          ...(parsedOfferExpiryDate ? { offerExpiryDate: parsedOfferExpiryDate } : {})
         },
       });
       
@@ -367,6 +414,8 @@ const getProductsAtShop = async (req, res) => {
       productId: item.productId,
       shopId: item.shopId,
       price: item.price,
+      offerPrice: item.offerPrice,
+      offerExpiryDate: item.offerExpiryDate,
       title: item.product.title,
       caseSize: item.product.caseSize,
       packetSize: item.product.packetSize,

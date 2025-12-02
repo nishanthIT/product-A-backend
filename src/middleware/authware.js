@@ -27,6 +27,8 @@ const isAuthenticated = async (req, res, next) => {
     // Verify the token
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
     
+    console.log('🔐 JWT Decoded:', { id: decoded.id, email: decoded.email, userType: decoded.userType });
+    
     // Attach the user info to the request object
     req.user = {
       id: decoded.id,

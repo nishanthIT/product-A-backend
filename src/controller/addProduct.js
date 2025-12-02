@@ -1,6 +1,22 @@
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
+// Helper function to get effective price (considering active offers)
+const getEffectivePrice = (productAtShop) => {
+  const currentDate = new Date();
+  const hasActiveOffer = productAtShop.offerPrice && 
+                        productAtShop.offerExpiryDate && 
+                        new Date(productAtShop.offerExpiryDate) > currentDate;
+  
+  const effectivePrice = hasActiveOffer ? productAtShop.offerPrice : productAtShop.price;
+  return {
+    price: parseFloat(effectivePrice),
+    originalPrice: parseFloat(productAtShop.price),
+    offerPrice: productAtShop.offerPrice ? parseFloat(productAtShop.offerPrice) : null,
+    hasActiveOffer,
+  };
+};
+
 import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
@@ -442,4 +458,67 @@ const getProductByBarcode = async (req, res) => {
   }
 };
 
-export { addProduct, editProduct, getProductById, getProductByBarcode  };
+// Search products by title/name (for customers adding to lists)
+const searchProducts = async (req, res) => {
+  try {
+    const { q, limit = 20 } = req.query;
+
+    if (!q || typeof q !== 'string' || q.trim().length < 2) {
+      return res.status(400).json({ error: "Search query must be at least 2 characters" });
+    }
+
+    const searchTerm = q.trim();
+
+    // Search products by title (case-insensitive)
+    const products = await prisma.product.findMany({
+      where: {
+        title: {
+          contains: searchTerm,
+          mode: 'insensitive',
+        },
+      },
+      include: {
+        shops: {
+          include: {
+            shop: true,
+          },
+        },
+      },
+      take: parseInt(limit),
+      orderBy: {
+        title: 'asc',
+      },
+    });
+
+    // Format response with offer price logic
+    const formattedProducts = products.map(product => {
+      const effectivePrices = product.shops.map(shop => getEffectivePrice(shop));
+      const lowestEffectivePrice = effectivePrices.length > 0 ? 
+        Math.min(...effectivePrices.map(ep => ep.price)) : null;
+      
+      return {
+        id: product.id,
+        title: product.title,
+        barcode: product.barcode,
+        rrp: product.rrp ? Number(product.rrp) : null,
+        img: product.img,
+        caseSize: product.caseSize,
+        packetSize: product.packetSize,
+        retailSize: product.retailSize,
+        availableInShops: product.shops.length,
+        lowestPrice: lowestEffectivePrice,
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      count: formattedProducts.length,
+      data: formattedProducts,
+    });
+  } catch (error) {
+    console.error("Error searching products:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+export { addProduct, editProduct, getProductById, getProductByBarcode, searchProducts };

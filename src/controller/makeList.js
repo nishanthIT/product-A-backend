@@ -1,27 +1,81 @@
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
+// Helper function to get effective price (considering active offers)
+const getEffectivePrice = (productAtShop) => {
+  const currentDate = new Date();
+  const hasActiveOffer = productAtShop.offerPrice && 
+                        productAtShop.offerExpiryDate && 
+                        new Date(productAtShop.offerExpiryDate) > currentDate;
+  
+  const effectivePrice = hasActiveOffer ? productAtShop.offerPrice : productAtShop.price;
+  return {
+    price: parseFloat(effectivePrice),
+    originalPrice: parseFloat(productAtShop.price),
+    offerPrice: productAtShop.offerPrice ? parseFloat(productAtShop.offerPrice) : null,
+    hasActiveOffer,
+    shopName: productAtShop.shop.name
+  };
+};
+
 const makeList = async (req, res) => {
-  const customerId = Number(req.params.customerId);
+  // Get customerId from authenticated user (from JWT token via middleware)
+  const customerId = req.user?.id;
+  const userType = req.user?.userType;
+  
+  // Only customers can create lists
+  if (userType !== 'CUSTOMER') {
+    return res.status(403).json({ error: "Only customers can create shopping lists" });
+  }
+  
   const { name, description } = req.body;
+
+  if (!name) {
+    return res.status(400).json({ error: "List name is required" });
+  }
 
   try {
     const list = await prisma.list.create({
       data: {
         name,
-        description,
+        description: description || '',
         customerId,
       },
+      include: {
+        products: true, // Include products to get count
+      },
     });
-    res.status(201).json(list);
+    
+    // Format response to match getUserLists format
+    const formattedList = {
+      id: list.id,
+      name: list.name,
+      description: list.description,
+      itemCount: list.products.length,
+      createdAt: list.createdAt,
+      updatedAt: list.updatedAt,
+    };
+    
+    res.status(201).json(formattedList);
   } catch (error) {
-    console.error(error);
+    console.error("Error creating list:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
 
 const addProductToList = async (req, res) => {
-  const { listId, customerId, productId } = req.body;
+  const customerId = req.user?.id;
+  const userType = req.user?.userType;
+  const { listId, productId } = req.body;
+
+  // Only customers can add products to lists
+  if (userType !== 'CUSTOMER') {
+    return res.status(403).json({ error: "Only customers can add products to lists" });
+  }
+
+  if (!listId || !productId) {
+    return res.status(400).json({ error: "listId and productId are required" });
+  }
 
   try {
     // Check if the list exists and belongs to the customer
@@ -33,10 +87,13 @@ const addProductToList = async (req, res) => {
         customer: true,
       },
     });
-    if (!list || list.customerId !== customerId) {
-      return res
-        .status(404)
-        .json({ error: "List not found or does not belong to the customer." });
+    
+    if (!list) {
+      return res.status(404).json({ error: "List not found-e1" });
+    }
+    
+    if (list.customerId !== customerId) {
+      return res.status(403).json({ error: "You don't have permission to modify this list" });
     }
 
     // Find the product in all shops
@@ -45,32 +102,97 @@ const addProductToList = async (req, res) => {
         productId,
       },
       include: {
-        shop: true, // Include shop details if needed
+        shop: true,
+        product: true,
       },
     });
 
+    console.log(`Found ${productAtShops.length} shops with product ${productId}`);
+
     if (productAtShops.length === 0) {
-      return res.status(404).json({ error: "Product not found in any shop." });
+      return res.status(404).json({ 
+        error: "Product not available in any shop yet. Please ask an employee to add it to a shop first." 
+      });
     }
 
-    // Add all the productAtShop entries to the list
-    await prisma.listProduct.createMany({
-      data: productAtShops.map((product) => ({
+    // Check if product is already in the list
+    const existingProducts = await prisma.listProduct.findMany({
+      where: {
         listId,
-        productAtShopId: product.id,
-      })),
+        productAtShopId: {
+          in: productAtShops.map(p => p.id),
+        },
+      },
+    });
+
+    if (existingProducts.length > 0) {
+      // Product already exists - return success without error
+      console.log(`Product ${productId} already in list ${listId} - returning success`);
+      
+      // Get the existing product details
+      const existingEntry = await prisma.listProduct.findFirst({
+        where: {
+          listId,
+          productAtShopId: {
+            in: productAtShops.map(p => p.id),
+          },
+        },
+        include: {
+          productAtShop: {
+            include: {
+              product: true,
+              shop: true,
+            },
+          },
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Product is already in this list",
+        alreadyExists: true,
+        data: {
+          productName: existingEntry.productAtShop.product.title,
+          lowestPrice: parseFloat(existingEntry.productAtShop.price),
+          shopName: existingEntry.productAtShop.shop.name,
+          availableInShops: productAtShops.length,
+        },
+      });
+    }
+
+    // Find the shop with the lowest effective price (considering offers)
+    const lowestPriceEntry = productAtShops.reduce((lowest, current) => {
+      const currentEffective = getEffectivePrice(current);
+      const lowestEffective = getEffectivePrice(lowest);
+      return currentEffective.price < lowestEffective.price ? current : lowest;
+    });
+
+    const finalEffectivePrice = getEffectivePrice(lowestPriceEntry);
+    console.log(`Adding product with lowest effective price: £${finalEffectivePrice.price} (${finalEffectivePrice.hasActiveOffer ? 'offer price' : 'regular price'}) at ${lowestPriceEntry.shop.name}`);
+
+    // Add ONLY the productAtShop entry with the lowest price to the list
+    const listProduct = await prisma.listProduct.create({
+      data: {
+        listId,
+        productAtShopId: lowestPriceEntry.id,
+      },
     });
 
     res.status(200).json({
       success: true,
       message: "Product added to list successfully.",
-      data: productAtShops.map((product) => ({
-        shopName: product.shop.name,
-        price: product.price,
-      })),
+      data: {
+        productName: lowestPriceEntry.product.title,
+        lowestPrice: finalEffectivePrice.price,
+        originalPrice: finalEffectivePrice.originalPrice,
+        offerPrice: finalEffectivePrice.offerPrice,
+        hasActiveOffer: finalEffectivePrice.hasActiveOffer,
+        shopName: lowestPriceEntry.shop.name,
+        availableInShops: productAtShops.length,
+      },
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error adding product to list:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -117,7 +239,7 @@ const getLowestPricesInList = async (req, res) => {
     productsInList.forEach((listProduct) => {
       const shop = listProduct.productAtShop.shop;
       const product = listProduct.productAtShop.product;
-      const price = listProduct.productAtShop.price;
+      const effectivePrice = getEffectivePrice(listProduct.productAtShop);
 
       if (!shopsMap.has(shop.id)) {
         shopsMap.set(shop.id, {
@@ -132,7 +254,10 @@ const getLowestPricesInList = async (req, res) => {
       shopData.items.push({
         productId: product.id,
         productName: product.title,
-        lowestPrice: price,
+        lowestPrice: effectivePrice.price,
+        originalPrice: effectivePrice.originalPrice,
+        offerPrice: effectivePrice.offerPrice,
+        hasActiveOffer: effectivePrice.hasActiveOffer,
       });
     });
 
@@ -151,35 +276,257 @@ const getLowestPricesInList = async (req, res) => {
 };
 
 const removeProductFromList = async (req, res) => {
-  const { listId, productId, customerId } = req.body;
+
+  console.log("hitting the delet eroute")
+  console.log("hitting the delet eroute")
+  console.log("hitting the delet eroute")
+  console.log("hitting the delet eroute")
+  console.log("hitting the delet eroute")
   try {
-    // Ensure the customer owns the list
+    // Get customer ID from JWT token
+    const customerId = req.user?.id;
+    const { listId, productId } = req.body;
+    
+    console.log('DELETE REQUEST RECEIVED:', { customerId, listId, productId });
+    
+    // Verify the list exists and belongs to this customer
     const list = await prisma.list.findFirst({
-      where: { id: listId, customerId },
+      where: { 
+        id: listId,
+        customerId: customerId 
+      }
     });
 
+    console.log('List found?', list ? 'YES' : 'NO');
+
     if (!list) {
-      throw new Error("List not found or does not belong to this customer.");
+      console.log('ERROR: List not found or does not belong to customer');
+      return res.status(404).json({ error: "List not found-e2" });
     }
 
-    // Find and delete the ListProduct entry
-    const deletedProduct = await prisma.listProduct.deleteMany({
+    // Delete all ListProduct entries for this product in this list
+    const deleted = await prisma.listProduct.deleteMany({
       where: {
-        listId,
-        productAtShop: { productId },
+        listId: listId,
+        productAtShop: {
+          productId: productId
+        }
+      }
+    });
+
+    console.log('Deleted count:', deleted.count);
+
+    if (deleted.count === 0) {
+      return res.status(404).json({ error: "Product not found in list" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Product removed from list"
+    });
+
+  } catch (error) {
+    console.error("DELETE ERROR:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Get all lists for the authenticated user
+const getUserLists = async (req, res) => {
+  const customerId = req.user?.id;
+  const userType = req.user?.userType;
+  
+  // Only customers have lists
+  if (userType !== 'CUSTOMER') {
+    return res.status(403).json({ error: "Only customers can have shopping lists" });
+  }
+
+  try {
+    const lists = await prisma.list.findMany({
+      where: {
+        customerId,
+      },
+      include: {
+        products: {
+          include: {
+            productAtShop: {
+              include: {
+                product: true,
+                shop: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        id: 'desc', // Most recent first
       },
     });
 
-    if (deletedProduct.count === 0) {
-      throw new Error("Product not found in the specified list.");
+    // Group products by productId to count unique products
+    const formattedLists = lists.map(list => {
+      const uniqueProducts = new Set();
+      list.products.forEach(lp => {
+        uniqueProducts.add(lp.productAtShop.productId);
+      });
+      
+      return {
+        id: list.id,
+        name: list.name,
+        description: list.description,
+        itemCount: uniqueProducts.size,
+        createdAt: list.createdAt,
+        updatedAt: list.updatedAt,
+      };
+    });
+
+    res.status(200).json(formattedLists);
+  } catch (error) {
+    console.error("Error fetching lists:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Get a specific list by ID
+const getListById = async (req, res) => {
+  const customerId = req.user?.id;
+  const userType = req.user?.userType;
+  const { listId } = req.params;
+  
+  if (userType !== 'CUSTOMER') {
+    return res.status(403).json({ error: "Only customers can access shopping lists" });
+  }
+
+  try {
+    const list = await prisma.list.findUnique({
+      where: {
+        id: listId,
+      },
+      include: {
+        products: {
+          include: {
+            productAtShop: {
+              include: {
+                product: true,
+                shop: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!list) {
+      return res.status(404).json({ error: "List not found-e3" });
     }
 
-    res.status(200).json({
+    // Verify the list belongs to the customer
+    if (list.customerId !== customerId) {
+      return res.status(403).json({ error: "You don't have permission to access this list" });
+    }
+
+    console.log('🔍 First product raw data:', JSON.stringify(list.products[0]?.productAtShop, null, 2));
+
+    // Group by productId and keep only the entry with lowest effective price (including offers)
+    const productMap = new Map();
+    list.products.forEach(lp => {
+      const productId = lp.productAtShop.productId;
+      const effectivePrice = getEffectivePrice(lp.productAtShop);
+      
+      console.log('Processing product:', {
+        productId,
+        productName: lp.productAtShop.product.title,
+        shopName: lp.productAtShop.shop?.name,
+        shopData: lp.productAtShop.shop,
+        regularPrice: parseFloat(lp.productAtShop.price),
+        effectivePrice: effectivePrice.price,
+        hasActiveOffer: effectivePrice.hasActiveOffer,
+        offerPrice: effectivePrice.offerPrice,
+        aielNumber: lp.productAtShop.card_aiel_number,
+        productAtShopId: lp.productAtShop.id
+      });
+      
+      if (!productMap.has(productId) || effectivePrice.price < productMap.get(productId).lowestPrice) {
+        productMap.set(productId, {
+          id: lp.id,
+          productId: productId,
+          productName: lp.productAtShop.product.title,
+          barcode: lp.productAtShop.product.barcode,
+          aielNumber: lp.productAtShop.card_aiel_number,
+          lowestPrice: effectivePrice.price,
+          originalPrice: effectivePrice.originalPrice,
+          offerPrice: effectivePrice.offerPrice,
+          hasActiveOffer: effectivePrice.hasActiveOffer,
+          shopName: lp.productAtShop.shop?.name || 'No Shop',
+          img: lp.productAtShop.product.img,
+        });
+        
+        console.log(`✅ Set product in map with effective price £${effectivePrice.price} ${effectivePrice.hasActiveOffer ? '(OFFER)' : '(REGULAR)'} - aiel: ${lp.productAtShop.card_aiel_number}`);
+      }
+    });
+
+    // Format products to show only the lowest price for each product
+    const formattedList = {
+      id: list.id,
+      name: list.name,
+      description: list.description,
+      customerId: list.customerId,
+      createdAt: list.createdAt,
+      updatedAt: list.updatedAt,
+      products: Array.from(productMap.values()),
+    };
+
+    console.log('📦 Sending formatted list with products and aiel numbers:', 
+      JSON.stringify(formattedList.products.map(p => ({
+        name: p.productName,
+        aielNumber: p.aielNumber,
+        barcode: p.barcode
+      })), null, 2)
+    );
+
+    res.status(200).json(formattedList);
+  } catch (error) {
+    console.error("Error fetching list:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Delete a list
+const deleteList = async (req, res) => {
+  const customerId = req.user?.id;
+  const userType = req.user?.userType;
+  const { listId } = req.params;
+  
+  if (userType !== 'CUSTOMER') {
+    return res.status(403).json({ error: "Only customers can delete shopping lists" });
+  }
+
+  try {
+    // First verify the list exists and belongs to the customer
+    const list = await prisma.list.findUnique({
+      where: { id: listId },
+    });
+
+    if (!list) {
+      return res.status(404).json({ error: "List not found-e4" });
+    }
+
+    if (list.customerId !== customerId) {
+      return res.status(403).json({ error: "You don't have permission to delete this list" });
+    }
+
+    // Delete the list (cascade will handle ListProduct entries)
+    await prisma.list.delete({
+      where: { id: listId },
+    });
+
+    res.status(200).json({ 
       success: true,
-      message: "Product removed from list.",
+      message: "List deleted successfully" 
     });
   } catch (error) {
-    console.error("Error removing product from list:", error.message);
+    console.error("Error deleting list:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 };
 
@@ -188,4 +535,7 @@ export {
   addProductToList,
   getLowestPricesInList,
   removeProductFromList,
+  getUserLists,
+  getListById,
+  deleteList,
 };

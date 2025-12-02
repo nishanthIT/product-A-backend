@@ -1,0 +1,84 @@
+# Test Chat API
+# Replace {{token}} with your actual JWT token
+# Replace {{chatId}} with actual chat ID
+
+### Get All Chats
+GET http://localhost:3000/api/chat
+Authorization: Bearer {{token}}
+
+### Create Personal Chat
+POST http://localhost:3000/api/chat
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "PERSONAL",
+  "participantIds": [
+    {
+      "userId": "participant-user-id",
+      "userType": "CUSTOMER"
+    }
+  ]
+}
+
+### Create Group Chat
+POST http://localhost:3000/api/chat
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "GROUP",
+  "name": "My Group Chat",
+  "participantIds": [
+    {
+      "userId": "user-id-1",
+      "userType": "CUSTOMER"
+    },
+    {
+      "userId": "user-id-2",
+      "userType": "EMPLOYEE"
+    }
+  ]
+}
+
+### Get Chat Messages
+GET http://localhost:3000/api/chat/{{chatId}}?page=1&limit=50
+Authorization: Bearer {{token}}
+
+### Send Text Message
+POST http://localhost:3000/api/chat/message
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "chatId": "{{chatId}}",
+  "content": "Hello, this is a test message!",
+  "messageType": "TEXT"
+}
+
+### Send Image Message
+POST http://localhost:3000/api/chat/message
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "chatId": "{{chatId}}",
+  "content": "Check out this image",
+  "messageType": "IMAGE",
+  "attachmentUrl": "https://example.com/image.jpg",
+  "attachmentName": "image.jpg",
+  "attachmentSize": 1024000
+}
+
+### Mark Messages as Read
+POST http://localhost:3000/api/chat/read
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "messageIds": [
+    "message-id-1",
+    "message-id-2",
+    "message-id-3"
+  ]
+}

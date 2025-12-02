@@ -1,6 +1,6 @@
 import express from "express";
 import { filterProducts } from "../controller/filterProducts.js";
-import { addProduct, editProduct, getProductByBarcode, getProductById } from "../controller/addProduct.js";
+import { addProduct, editProduct, getProductByBarcode, getProductById, searchProducts } from "../controller/addProduct.js";
 import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
 import {
   addProductAtShop,
@@ -30,19 +30,28 @@ import {
   getLowestPricesInList,
   makeList,
   removeProductFromList,
+  getUserLists,
+  getListById,
+  deleteList,
 } from "../controller/makeList.js";
-import { login, logout,  verify } from "../controller/auth.js";
+import { login, register, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword } from "../controller/auth.js";
 import { emp_dash_handler } from "../controller/dashbord/employ.js";
 import { getDashboardOverview } from "../controller/dashbord/admin.js";
 import { isAdmin, isAuthenticated, isEmployee } from "../middleware/authware.js";
+import { requireActiveSubscription, softSubscriptionCheck } from "../middleware/subscriptionCheck.js";
 import { image } from "../controller/image.js";
 
 const router = express.Router();
 
 
 router.post("/auth/login", login);
+router.post("/auth/register", register);
 router.get("/auth/me", verify); // Make sure this route exists and is correctly defined
 router.post("/auth/logout", logout);
+router.post("/auth/extend-trial", isAuthenticated, extendTrialWithPoints);
+router.post("/auth/forgot-password", forgotPassword);
+router.get("/auth/reset-password", resetPassword);
+router.post("/auth/reset-password", resetPassword);
 
 router.get("/image/:barcode",image)
 
@@ -53,6 +62,11 @@ router.post("/addProduct",isAuthenticated,isEmployee, addProduct);
 router.put("/editProduct/:id",isAuthenticated,isEmployee, editProduct);
 router.get("/getProductByBarcode/:barcode",isAuthenticated,isEmployee, getProductByBarcode);
 router.get("/getProductById/:id",isAuthenticated,isEmployee, getProductById);
+
+// Customer product search routes (for adding to lists)
+router.get("/products/barcode/:barcode",isAuthenticated, getProductByBarcode); // Allow customers to search
+router.get("/products/search",isAuthenticated, searchProducts); // Search products by name
+router.get("/products/:id",isAuthenticated, getProductById); // Allow customers to view products
 
 
 /* <!-- Shop Routes --> */
@@ -83,8 +97,8 @@ router.get('/shop/:shopId/products',isAuthenticated,isEmployee, getProductsAtSho
 // Update product price at a shop
 router.put('/shop/:shopId/updateProductPrice',isAuthenticated,isEmployee, updateProductPriceAtShop);
 
-// Search for products not in a shop
-router.get('/products/search',isAuthenticated,isEmployee, searchProductsNotInShop);
+// Search for products not in a shop (for employees)
+router.get('/shop/:shopId/searchProducts',isAuthenticated,isEmployee, searchProductsNotInShop);
 
 // Remove a product from a shop
 router.delete('/shop/:shopId/product',isAuthenticated,isEmployee, removeProductFromShop);
@@ -113,10 +127,13 @@ router.get("/getallemploy",isAuthenticated,isAdmin, getAllEmployees);
 /* <!-- Action Log Routes --> */
 router.get("/getHourlyProductAdds/:employeeId",isAuthenticated,isAdmin, getHourlyProductAdds);
 
-// <!-- List Routes -->
-router.post("/makeList/:customerId", makeList);
-router.post("/addProductToList/", addProductToList);
-router.get("/getLowestPricesInList", getLowestPricesInList);
-router.delete("/removeProductFromList", removeProductFromList);
+// <!-- List Routes --> (Customer only) - With subscription checking
+router.get("/lists", isAuthenticated, softSubscriptionCheck, getUserLists); // Get all lists (soft check - allow viewing)
+router.post("/lists", isAuthenticated, requireActiveSubscription, makeList); // Create new list (requires active subscription)
+router.post("/lists/addProduct", isAuthenticated, requireActiveSubscription, addProductToList); // Add product to list (requires active subscription)
+router.delete("/lists/removeProduct", isAuthenticated, requireActiveSubscription, removeProductFromList); // Remove product from list (requires active subscription)
+router.get("/lists/:listId/lowest-prices", isAuthenticated, requireActiveSubscription, getLowestPricesInList); // Get lowest prices (premium feature)
+router.get("/lists/:listId", isAuthenticated, softSubscriptionCheck, getListById); // Get specific list (soft check - allow viewing)
+router.delete("/lists/:listId", isAuthenticated, requireActiveSubscription, deleteList); // Delete list (requires active subscription)
 
 export default router;

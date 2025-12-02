@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,120 +7,253 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-
 model Admin {
-  id          Int @id @default(autoincrement())
-  email       String @unique
-  password    String
-  userType    UserType @default(ADMIN) // Adding userType for Admin
+  id            Int           @id @default(autoincrement())
+  name          String?
+  email         String
+  password      String
+  userType      UserType      @default(ADMIN)
+  resetToken    String?
+  resetTokenExpiry DateTime?
+  reviewedReports PriceReport[]
 }
 
 model Customer {
-  id                  Int  @id @default(autoincrement())
-  name                String
-  mobile              String @unique
-  email               String @unique
-  password            String
-  productsManaged     ProductAtShop[]
-  lists              List[]
-  userType            UserType @default(CUSTOMER) // Adding userType for Customer
+  id                Int             @id @default(autoincrement())
+  name              String
+  mobile            String          @unique
+  email             String          @unique
+  password          String
+  userType          UserType        @default(CUSTOMER)
+  earnings          Decimal         @default(0)
+  subscriptionStatus String         @default("free_trial")
+  trialStartDate    DateTime?       @default(now())
+  trialEndDate      DateTime?
+  points            Decimal         @default(0)
+  resetToken        String?
+  resetTokenExpiry  DateTime?
+  lists             List[]
+  productsManaged   ProductAtShop[]
+  priceReports      PriceReport[]
 }
 
 model Product {
-  id          String @id @default(cuid()) // Unique identifier  //321
+  id          String          @id @default(cuid())
   title       String
   productUrl  String?
   caseSize    String?
   packetSize  String?
-  img         Json?     
-  barcode     String?    @unique
-  caseBarcode String?
+  barcode     String?         @unique
+  img         Json?
   retailSize  String?
+  caseBarcode String?
   rrp         Decimal?
-  shops       ProductAtShop[] // Many-to-many relationship with Shop through ProductAtShop
   actionLog   ActionLog[]
+  shops       ProductAtShop[]
+  priceReports PriceReport[]
+  promotions  Promotion[]
 }
 
 model Shop {
-  id          String @id @default(cuid()) //123
-  name        String
-  address     String
-  mobile      String 
-  products    ProductAtShop[] // Many-to-many relationship with Product through ProductAtShop
-  actionLog   ActionLog[]
+  id           String          @id @default(cuid())
+  name         String
+  address      String
+  mobile       String
+  actionLog    ActionLog[]
+  products     ProductAtShop[]
+  priceReports PriceReport[]
+  promotions   Promotion[]
 }
 
 model ProductAtShop {
-  id          String @id @default(cuid())  //1
-  price       Decimal
-  shopId      String  //123
-  productId   String  //321
-  userId      Int?  
-  updatedAt   DateTime? @default(now())
-  createdAt   DateTime? @default(now())
-  employeeId  Int?
-  listId      String?
-  shop        Shop       @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  product     Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
-  customer    Customer?  @relation(fields: [userId], references: [id])
-  employee    Empolyee?  @relation(fields: [employeeId], references: [id])
-  lists       ListProduct[]
-  card_aiel_number  String?
-  
+  id               String        @id @default(cuid())
+  price            Decimal
+  shopId           String
+  productId        String
+  employeeId       Int?
+  updatedAt        DateTime?     @default(now())
+  userId           Int?
+  createdAt        DateTime?     @default(now())
+  listId           String?
+  card_aiel_number String?
+  offerPrice       Decimal?
+  offerExpiryDate  DateTime?
+  lists            ListProduct[]
+  employee         Empolyee?     @relation(fields: [employeeId], references: [id])
+  product          Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop             Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  customer         Customer?     @relation(fields: [userId], references: [id])
+
   @@unique([shopId, productId])
-  @@index([employeeId, updatedAt]) 
-} 
+  @@index([employeeId, updatedAt])
+}
 
 model Empolyee {
-  id     Int @id @default(autoincrement())
-  name   String
-  phoneNo  String  @unique
-  email String  @unique
-  password String
-  userType      UserType @default(EMPLOYEE) // Adding userType for Employee
-  productAdded  ProductAtShop[]
-  actionLog   ActionLog[]
-
+  id           Int             @id @default(autoincrement())
+  name         String
+  phoneNo      String          @unique
+  email        String          @unique
+  password     String
+  userType     UserType        @default(EMPLOYEE)
+  resetToken   String?
+  resetTokenExpiry DateTime?
+  actionLog    ActionLog[]
+  productAdded ProductAtShop[]
 }
 
 model ActionLog {
-  id          String   @id @default(cuid())
-  employeeId  Int
-  shopId      String
-  productId   String
-  actionType  String   // e.g., "ADD" or "UPDATE"
-  timestamp   DateTime @default(now())
-  product     Product? @relation(fields: [productId], references: [id])
-  shop        Shop?    @relation(fields: [shopId], references: [id])
-  employee    Empolyee? @relation(fields: [employeeId], references: [id])
+  id         String   @id @default(cuid())
+  employeeId Int
+  shopId     String
+  productId  String
+  actionType String
+  timestamp  DateTime @default(now())
+  employee   Empolyee @relation(fields: [employeeId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id])
+  shop       Shop     @relation(fields: [shopId], references: [id])
 
-  @@index([employeeId, timestamp]) // Index for querying actions by employee and time
-  @@index([shopId, timestamp])     // Index for querying actions by shop and time
-  @@index([productId, timestamp])  // Index for querying actions by product and time
+  @@index([employeeId, timestamp])
+  @@index([shopId, timestamp])
+  @@index([productId, timestamp])
 }
 
 model List {
-  id          String @id @default(cuid())
+  id          String        @id @default(cuid())
   name        String
   description String
-  customerId   Int
-  customer     Customer?  @relation(fields: [customerId], references: [id])
-  products      ListProduct[]
+  customerId  Int
+  customer    Customer      @relation(fields: [customerId], references: [id])
+  products    ListProduct[]
 }
 
 model ListProduct {
-  id              String          @id @default(cuid())
+  id              String        @id @default(cuid())
   listId          String
   productAtShopId String
-  list            List            @relation(fields: [listId], references: [id], onDelete: Cascade)
-  productAtShop   ProductAtShop   @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
+  list            List          @relation(fields: [listId], references: [id], onDelete: Cascade)
+  productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
 }
 
-// Enum for User Roles
 enum UserType {
   ADMIN
   CUSTOMER
   EMPLOYEE
 }
 
+model Chat {
+  id           String            @id @default(cuid())
+  name         String?
+  type         ChatType          @default(PERSONAL)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  lastMessageAt DateTime?
+  messages     Message[]
+  participants ChatParticipant[]
+}
 
+model ChatParticipant {
+  id        String   @id @default(cuid())
+  chatId    String
+  userId    Int
+  userType  UserType
+  joinedAt  DateTime @default(now())
+  isAdmin   Boolean  @default(false)
+  
+  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  
+  @@unique([chatId, userId, userType])
+  @@index([userId, userType])
+}
+
+model Message {
+  id            String        @id @default(cuid())
+  content       String
+  chatId        String
+  senderId      Int
+  senderType    UserType
+  messageType   MessageType   @default(TEXT)
+  attachmentUrl String?
+  attachmentName String?
+  attachmentSize Int?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  deletedAt     DateTime?
+  
+  chat          Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  readReceipts  MessageRead[]
+  
+  @@index([chatId, createdAt])
+  @@index([senderId, senderType])
+}
+
+model MessageRead {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    Int
+  userType  UserType
+  readAt    DateTime @default(now())
+  
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  
+  @@unique([messageId, userId, userType])
+  @@index([userId, userType])
+}
+
+enum ChatType {
+  PERSONAL
+  GROUP
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  DOCUMENT
+}
+
+model PriceReport {
+  id                String        @id @default(cuid())
+  reporterId        Int
+  productId         String
+  shopId            String
+  currentPrice      Decimal
+  reportedPrice     Decimal
+  status            ReportStatus  @default(PENDING)
+  adminNotes        String?
+  pointsAwarded     Boolean       @default(false)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  reviewedAt        DateTime?
+  reviewedBy        Int?
+  
+  reporter          Customer      @relation(fields: [reporterId], references: [id])
+  product           Product       @relation(fields: [productId], references: [id])
+  shop              Shop          @relation(fields: [shopId], references: [id])
+  reviewer          Admin?        @relation(fields: [reviewedBy], references: [id])
+  
+  @@index([reporterId, status])
+  @@index([status, createdAt])
+  @@index([productId, shopId])
+}
+
+enum ReportStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Promotion {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  imageUrl    String
+  shopId      String
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  shop        Shop      @relation(fields: [shopId], references: [id])
+  products    Product[]
+  
+  @@index([shopId, isActive])
+  @@index([isActive, createdAt])
+}
