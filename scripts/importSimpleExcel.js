@@ -62,7 +62,7 @@ async function importSimpleExcel() {
                     continue;
                 }
 
-                // Create new product with backend API image URL
+                // Create new product with working backend API image URL
                 await prisma.product.create({
                     data: {
                         title: cleanDescription,

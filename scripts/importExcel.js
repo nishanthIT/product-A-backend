@@ -150,8 +150,13 @@ async function importFromExcel(filePath) {
                         continue;
                     }
                     
-                    // Create image info using backend API
-                    const imageInfo = processImageUrl(`https://backend.h7tex.com/api/image/${barcode}`, barcode);
+                    // Create image info using working backend API
+                    const imageInfo = {
+                        type: 'api',
+                        url: `https://backend.h7tex.com/api/image/${barcode}`,
+                        filename: null,
+                        ean: barcode
+                    };
                     const imgJson = imageInfo ? { ...imageInfo, category: 'excel-import' } : null;
                     
                     // Create new product only

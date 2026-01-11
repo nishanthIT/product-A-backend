@@ -81,7 +81,7 @@ const addProduct = async (req, res) => {
           // Save processed image
           fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
           fs.unlinkSync(req.file.path);
-          imgPath = `/images/${outputFilename}`;
+          imgPath = `/api/image/${barcode}`;
 
         } catch (bgError) {
           console.error("Background removal failed:", bgError);
@@ -91,7 +91,7 @@ const addProduct = async (req, res) => {
             const image = await Jimp.read(req.file.path);
             await image.writeAsync(outputPath);
             fs.unlinkSync(req.file.path);
-            imgPath = `/images/${outputFilename}`;
+            imgPath = `/api/image/${barcode}`;
           } catch (jimpError) {
             console.error("Fallback failed:", jimpError);
             return res.status(500).json({ error: "Image processing failed" });
@@ -309,7 +309,7 @@ const editProduct = async (req, res) => {
 
           fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
           fs.unlinkSync(req.file.path);
-          const imagePath = `/images/${outputFilename}`;
+          const imagePath = `/api/image/${targetBarcode}`;
 
           // Replace existing image with new one
           dataToUpdate.img = imagePath;
@@ -320,7 +320,7 @@ const editProduct = async (req, res) => {
             const image = await Jimp.read(req.file.path);
             await image.writeAsync(outputPath);
             fs.unlinkSync(req.file.path);
-            const imagePath = `https://backend.h7tex.com/api/image/${outputFilename}`;
+            const imagePath = `/api/image/${targetBarcode}`;
             dataToUpdate.img = imagePath;
           } catch (jimpError) {
             console.error("Fallback failed:", jimpError);

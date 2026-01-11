@@ -25,7 +25,7 @@ function processRRP(rrp) {
 function processImageUrl(imageUrl, ean) {
     if (!imageUrl || !ean) return null;
 
-    // Check if it's your backend API URL
+    // Check if it's your working backend API URL
     if (imageUrl.includes('backend.h7tex.com/api/image/')) {
         return {
             type: 'api',
