@@ -106,6 +106,7 @@ app.use(express.json());
 
 // Serve uploaded files
 app.use('/uploads', express.static('uploads'));
+app.use('/images', express.static('images'));
 
 // Socket.IO connection handling - Define userSockets BEFORE using it in middleware
 const userSockets = new Map(); // Map userId to socketId

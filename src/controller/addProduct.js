@@ -45,7 +45,7 @@ const addProduct = async (req, res) => {
     if (err) return res.status(400).json({ error: err.message });
 
     try {
-      const { title, rrp, caseSize, packetSize, retailSize, barcode } = req.body;
+      const { title, rrp, caseSize, packetSize, retailSize, barcode, caseBarcode } = req.body;
       
       if (!title || !barcode) {
         if (req.file) fs.unlinkSync(req.file.path);
@@ -91,7 +91,7 @@ const addProduct = async (req, res) => {
             const image = await Jimp.read(req.file.path);
             await image.writeAsync(outputPath);
             fs.unlinkSync(req.file.path);
-            imgPath = `https://backend.h7tex.com/api/image/${outputFilename}`;
+            imgPath = `/images/${outputFilename}`;
           } catch (jimpError) {
             console.error("Fallback failed:", jimpError);
             return res.status(500).json({ error: "Image processing failed" });
@@ -109,6 +109,7 @@ const addProduct = async (req, res) => {
           retailSize: retailSize || null,
           img: imgPath,
           barcode: String(barcode),
+          caseBarcode: caseBarcode ? String(caseBarcode) : null,
         },
       });
 
