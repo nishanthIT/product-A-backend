@@ -5,7 +5,12 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "import-products": "node scripts/importProductData.js",
+    "fast-import": "node scripts/fastImport.js",
+    "import-excel": "node scripts/importExcel.js",
+    "import-excel-simple": "node scripts/importSimpleExcel.js",
+    "download-images": "node scripts/downloadImages.js"
   },
   "prisma": {
     "seed": "node prisma/seed.js",
