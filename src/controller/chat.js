@@ -250,12 +250,18 @@ export const createChat = async (req, res) => {
       p => !(Number(p.id) === Number(userId) && p.userType === userType)
     );
 
+    // Invalidate chat list cache for ALL participants so they get fresh data
+    for (const participant of chat.participants) {
+      await cacheService.invalidateUserChats(participant.userId);
+    }
+
     // Notify all participants via Socket.IO
     chat.participants.forEach(participant => {
       req.io.to(`user_${participant.userId}`).emit('new_chat_created', {
         chatId: chat.id,
         chatType: chat.type,
-        chatName: chat.name
+        chatName: chat.name,
+        participants: participantsWithDetails
       });
     });
 
