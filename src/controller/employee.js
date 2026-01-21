@@ -206,7 +206,6 @@ const updateEmployee = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, phoneNo, email, password } = req.body;
-    console.log(password);
 
     const hashedPassword = password ? await bcrypt.hash(password, 10) : undefined;
 

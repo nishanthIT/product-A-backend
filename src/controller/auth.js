@@ -121,7 +121,7 @@ const register = async (req, res) => {
         mobile: `temp_${Date.now()}`, // Temporary unique mobile number
         subscriptionStatus: 'free_trial', // Set as free trial (lowercase to match schema default)
         trialStartDate: new Date(),
-        trialEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+        trialEndDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days from now
       }
     });
     
@@ -232,7 +232,7 @@ const verify = async (req, res) => {
         
         if (!trialEndDate && user.trialStartDate) {
           trialEndDate = new Date(user.trialStartDate);
-          trialEndDate.setDate(trialEndDate.getDate() + 30);
+          trialEndDate.setDate(trialEndDate.getDate() + 90);
         }
         
         if (trialEndDate) {

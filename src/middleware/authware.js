@@ -12,12 +12,10 @@ const isAuthenticated = async (req, res, next) => {
     // First check if token exists in cookies
     if (req.cookies && req.cookies.auth_token) {
       token = req.cookies.auth_token;
-      console.log('Token found in cookie');
     } 
     // If not in cookies, check authorization header
     else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
       token = req.headers.authorization.split(' ')[1];
-      console.log('Token found in Authorization header');
     }
     
     if (!token) {
@@ -26,8 +24,6 @@ const isAuthenticated = async (req, res, next) => {
     
     // Verify the token
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    
-    console.log('🔐 JWT Decoded:', { id: decoded.id, email: decoded.email, userType: decoded.userType });
     
     // Attach the user info to the request object
     req.user = {

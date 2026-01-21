@@ -122,7 +122,7 @@ model List {
   name        String
   description String
   customerId  Int
-  customer    Customer      @relation(fields: [customerId], references: [id])
+  customer    Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   products    ListProduct[]
 }
 
@@ -130,6 +130,8 @@ model ListProduct {
   id              String        @id @default(cuid())
   listId          String
   productAtShopId String
+  quantity        Int           @default(1)
+  isPurchased     Boolean       @default(false)
   list            List          @relation(fields: [listId], references: [id], onDelete: Cascade)
   productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
 }
@@ -225,7 +227,7 @@ model PriceReport {
   reviewedAt        DateTime?
   reviewedBy        Int?
   
-  reporter          Customer      @relation(fields: [reporterId], references: [id])
+  reporter          Customer      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
   product           Product       @relation(fields: [productId], references: [id])
   shop              Shop          @relation(fields: [shopId], references: [id])
   reviewer          Admin?        @relation(fields: [reviewedBy], references: [id])

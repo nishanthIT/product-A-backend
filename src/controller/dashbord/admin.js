@@ -109,7 +109,7 @@ const getAllCustomers = async (req, res) => {
         // If trialEndDate is null but we have trialStartDate, calculate it
         if (!trialEndDate && trialStartDate) {
           trialEndDate = new Date(trialStartDate);
-          trialEndDate.setDate(trialEndDate.getDate() + 30);
+          trialEndDate.setDate(trialEndDate.getDate() + 90);
         }
         
         if (trialEndDate) {
@@ -131,9 +131,32 @@ const getAllCustomers = async (req, res) => {
             statusColor: '#888888'
           };
         }
+      } else if (customer.subscriptionStatus === 'premium') {
+        // Handle premium users - use trialEndDate as subscription end date
+        const endDate = customer.trialEndDate ? new Date(customer.trialEndDate) : null;
+        
+        if (endDate) {
+          const daysRemaining = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
+          const isExpired = daysRemaining <= 0;
+          subscriptionDetails = {
+            status: isExpired ? 'Premium Expired' : 'Premium Active',
+            daysRemaining: Math.max(0, daysRemaining),
+            isExpired: isExpired,
+            trialEndDate: endDate.toLocaleDateString(),
+            statusColor: isExpired ? '#ff4444' : (daysRemaining <= 7 ? '#ff9900' : '#9b59b6')
+          };
+        } else {
+          subscriptionDetails = {
+            status: 'Premium (Unlimited)',
+            daysRemaining: '∞',
+            isExpired: false,
+            statusColor: '#9b59b6'
+          };
+        }
       } else {
         subscriptionDetails = {
           status: customer.subscriptionStatus || 'Unknown',
+          daysRemaining: '--',
           isExpired: false,
           statusColor: '#0066cc'
         };

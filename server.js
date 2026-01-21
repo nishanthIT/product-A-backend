@@ -1,67 +1,3 @@
-// // import express from "express";
-// // import dotenv from "dotenv";
-// // import authRoutes from "./src/routes/authRoutes.js";
-// // import cors from 'cors';
-// // import cookieParser from 'cookie-parser';  // Add this import
-
-// // dotenv.config();
-// // const app = express();
-
-// // // Configure CORS to allow all origins with credentials
-// // app.use(cors({
-// //   origin: (origin, callback) => {
-// //     const allowedOrigins = ["http://localhost:8080", "http://192.168.126.1:8080"];
-    
-// //     if (!origin || allowedOrigins.includes(origin)) {
-// //       callback(null, true);
-// //     } else {
-// //       callback(new Error("Not allowed by CORS"));
-// //     }
-// //   },
-// //   credentials: true
-// // }));
-
-// // // Middleware
-// // app.use(cookieParser());  // Add this middleware
-// // app.use(express.json());
-
-// // app.use("/api", authRoutes);
-
-// // const PORT = process.env.PORT || 3000;
-// // app.listen(PORT, () => {
-// //   console.log(`Server is running on http://localhost:${PORT}`);
-// // });
-
-
-// import express from "express";
-// import dotenv from "dotenv";
-// import authRoutes from "./src/routes/authRoutes.js";
-// import cors from 'cors';
-// import cookieParser from 'cookie-parser';
-
-// dotenv.config();
-// const app = express();
-
-// // Configure CORS with more precise settings
-// app.use(cors({
-//   origin: ["http://localhost:8080", "http://192.168.126.1:8080", "http://localhost:5173"], // Add your Vite dev server port (default 5173)
-//   credentials: true,
-//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-//   allowedHeaders: ['Content-Type', 'Authorization']
-// }));
-
-// // Middleware
-// app.use(cookieParser());
-// app.use(express.json());
-
-// // Make auth route available
-// app.use("/api", authRoutes);
-
-// const PORT = process.env.PORT || 3000;
-// app.listen(PORT, () => {
-//   console.log(`Server is running on http://localhost:${PORT}`);
-// });
-
 import express from "express";
 import dotenv from "dotenv";
 import authRoutes from "./src/routes/authRoutes.js";
@@ -69,14 +5,23 @@ import chatRoutes from "./src/routes/chat.js";
 import priceReportsRoutes from "./src/routes/priceReports.js";
 import promotionsRoutes from "./src/routes/promotions.js";
 import adminRoutes from "./src/routes/adminRoutes.js";
+import listRoutes from "./src/routes/listRoutes.js";
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import redisService from './src/services/redisService.js';
+import cacheService from './src/services/cacheService.js';
 
 dotenv.config();
 const app = express();
 const server = createServer(app);
+
+// Initialize Redis connection
+(async () => {
+  const connected = await redisService.connect();
+  console.log(`📊 Redis Status:`, redisService.getStatus());
+})();
 
 // Configure Socket.IO with CORS
 const io = new Server(server, {
@@ -111,27 +56,11 @@ app.use('/images', express.static('images'));
 // Socket.IO connection handling - Define userSockets BEFORE using it in middleware
 const userSockets = new Map(); // Map userId to socketId
 
-// Log all incoming requests
-app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path}`, req.body || '');
-  next();
-});
-
-// Make io and userSockets available to routes
+// Make io, userSockets and cacheService available to routes
 app.use((req, res, next) => {
   req.io = io;
   req.userSockets = userSockets;
-  next();
-});
-
-// Log all incoming requests
-app.use((req, res, next) => {
-  console.log('📥 Incoming Request:', {
-    method: req.method,
-    url: req.url,
-    path: req.path,
-    body: req.body
-  });
+  req.cacheService = cacheService;
   next();
 });
 
@@ -140,16 +69,33 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/price-reports", priceReportsRoutes);
 app.use("/api/promotions", promotionsRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/lists", listRoutes);
+
+// Health check endpoint with Redis status
+app.get('/api/health', (req, res) => {
+  const status = cacheService.getStatus();
+  res.json({
+    success: true,
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    cache: status,
+    uptime: process.uptime()
+  });
+});
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   // Join user to their personal room (for direct messages)
-  socket.on('join_user_room', (userId) => {
+  socket.on('join_user_room', async (userId) => {
     // Ensure userId is stored as a number
     const userIdNum = typeof userId === 'number' ? userId : parseInt(userId);
     socket.join(`user_${userId}`);
     userSockets.set(userIdNum, socket.id); // Store socket ID with numeric key
+    
+    // Cache online status in Redis
+    await cacheService.setUserOnline(userIdNum, socket.id);
+    
     console.log(`✅ User ${userIdNum} joined their personal room (Socket: ${socket.id})`);
     console.log('📊 Current userSockets map:', Array.from(userSockets.entries()));
     console.log(`🏠 User ${userIdNum} is now in rooms:`, Array.from(socket.rooms));
@@ -177,30 +123,35 @@ io.on('connection', (socket) => {
   });
 
   // Handle new message broadcasting
-  socket.on('new_message', (data) => {
+  socket.on('new_message', async (data) => {
     const { chatId, message } = data;
+    // Add message to cache
+    await cacheService.addMessageToCache(chatId, message);
     // Broadcast to all users in this chat except sender
     socket.to(`chat_${chatId}`).emit('message_received', message);
   });
 
   // Handle typing indicators
-  socket.on('typing_start', (data) => {
+  socket.on('typing_start', async (data) => {
     const { chatId, userInfo } = data;
+    await cacheService.setTyping(userInfo.id || userInfo.userId, chatId);
     socket.to(`chat_${chatId}`).emit('user_typing', userInfo);
   });
 
-  socket.on('typing_stop', (data) => {
+  socket.on('typing_stop', async (data) => {
     const { chatId, userInfo } = data;
+    await cacheService.clearTyping(userInfo.id || userInfo.userId, chatId);
     socket.to(`chat_${chatId}`).emit('user_stopped_typing', userInfo);
   });
 
   // Handle disconnection
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
-    // Remove from userSockets map
+    // Remove from userSockets map and cache
     for (const [userId, socketId] of userSockets.entries()) {
       if (socketId === socket.id) {
         userSockets.delete(userId);
+        await cacheService.setUserOffline(userId);
         console.log(`Removed user ${userId} from socket map`);
         break;
       }

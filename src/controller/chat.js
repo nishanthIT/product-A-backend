@@ -1,4 +1,8 @@
 import { PrismaClient } from '@prisma/client';
+import fs from 'fs';
+import path from 'path';
+import cacheService from '../services/cacheService.js';
+
 const prisma = new PrismaClient();
 
 // Get all chats for a user (GLOBAL CHAT - all users can see all chats)
@@ -7,7 +11,11 @@ export const getUserChats = async (req, res) => {
     const userId = req.user.id; // From JWT middleware
     const userType = req.user.userType;
 
-    console.log('🔍 getUserChats called for:', { userId, userType });
+    // Try to get cached chats first
+    const cachedChats = await cacheService.getCachedUserChats(userId);
+    if (cachedChats) {
+      return res.status(200).json({ success: true, chats: cachedChats });
+    }
 
     // Get chats where user is actually a participant OR the main group chat
     const chats = await prisma.chat.findMany({
@@ -55,22 +63,16 @@ export const getUserChats = async (req, res) => {
     const formattedChats = await Promise.all(chats.map(async (chat) => {
       const lastMessage = chat.messages[0];
       
-      console.log(`🔍 Processing chat ${chat.id} (${chat.type}): ${chat.participants.length} raw participants`);
-      
       // Get ALL participants info (including current user for group chats)
       const allParticipantsInfo = await Promise.all(
         chat.participants.map(async (p) => {
-          console.log(`  - Participant: userId=${p.userId}, userType=${p.userType}`);
           if (p.userType === 'CUSTOMER') {
             const customer = await prisma.customer.findUnique({
               where: { id: p.userId },
               select: { id: true, name: true, email: true }
             });
             if (customer) {
-              console.log(`    ✅ Found customer: ${customer.name}`);
               return { ...customer, userType: 'CUSTOMER' };
-            } else {
-              console.log(`    ❌ Customer not found: ${p.userId}`);
             }
           } else if (p.userType === 'EMPLOYEE') {
             const employee = await prisma.empolyee.findUnique({
@@ -78,10 +80,7 @@ export const getUserChats = async (req, res) => {
               select: { id: true, name: true, email: true }
             });
             if (employee) {
-              console.log(`    ✅ Found employee: ${employee.name}`);
               return { ...employee, userType: 'EMPLOYEE' };
-            } else {
-              console.log(`    ❌ Employee not found: ${p.userId}`);
             }
           }
           return null;
@@ -91,15 +90,10 @@ export const getUserChats = async (req, res) => {
       // Filter out null values (deleted users)
       const validParticipants = allParticipantsInfo.filter(p => p !== null);
       
-      console.log(`  📊 Valid participants: ${validParticipants.length}`);
-      
       // Get other participants (excluding current user)
       const otherParticipants = validParticipants.filter(
-        p => !(p.id === userId && p.userType === userType)
+        p => !(Number(p.id) === Number(userId) && p.userType === userType)
       );
-
-      console.log(`  📊 Other participants: ${otherParticipants.length}`);
-      otherParticipants.forEach(op => console.log(`    - ${op.name} (${op.userType})`));
 
       // Calculate unread count
       const unreadCount = lastMessage ? await prisma.message.count({
@@ -131,12 +125,8 @@ export const getUserChats = async (req, res) => {
       };
     }));
 
-    const groupChats = formattedChats.filter(c => c.type === 'GROUP').length;
-    const personalChats = formattedChats.filter(c => c.type === 'PERSONAL').length;
-    console.log(`✅ Returning ${formattedChats.length} chats for user ${userId} (${groupChats} group + ${personalChats} personal chats where user is participant)`);
-    formattedChats.forEach(chat => {
-      console.log(`   - ${chat.name} (${chat.type}): ${chat.participantCount} participants`);
-    });
+    // Cache the chats for this user
+    await cacheService.cacheUserChats(userId, formattedChats);
 
     res.status(200).json({ success: true, chats: formattedChats });
   } catch (error) {
@@ -225,25 +215,59 @@ export const createChat = async (req, res) => {
       }
     });
 
-    console.log('✅ Chat created successfully:', {
-      chatId: chat.id,
-      type: chat.type,
-      participantCount: chat.participants.length,
-      participants: chat.participants.map(p => ({ userId: p.userId, userType: p.userType }))
-    });
+    // Get participant details (names, emails) for the response
+    const participantsWithDetails = await Promise.all(
+      chat.participants.map(async (p) => {
+        let userDetails = null;
+        if (p.userType === 'CUSTOMER') {
+          userDetails = await prisma.customer.findUnique({
+            where: { id: p.userId },
+            select: { id: true, name: true, email: true }
+          });
+        } else if (p.userType === 'EMPLOYEE') {
+          userDetails = await prisma.empolyee.findUnique({
+            where: { id: p.userId },
+            select: { id: true, name: true, email: true }
+          });
+        } else if (p.userType === 'ADMIN') {
+          userDetails = await prisma.admin.findUnique({
+            where: { id: p.userId },
+            select: { id: true, name: true, email: true }
+          });
+        }
+        return {
+          id: p.userId.toString(),
+          name: userDetails?.name || 'Unknown',
+          email: userDetails?.email || '',
+          userType: p.userType,
+          isAdmin: p.isAdmin
+        };
+      })
+    );
+
+    // Get other participants (excluding current user)
+    const otherParticipants = participantsWithDetails.filter(
+      p => !(Number(p.id) === Number(userId) && p.userType === userType)
+    );
 
     // Notify all participants via Socket.IO
-    console.log('📢 Notifying participants about new chat:', chat.id);
     chat.participants.forEach(participant => {
       req.io.to(`user_${participant.userId}`).emit('new_chat_created', {
         chatId: chat.id,
         chatType: chat.type,
         chatName: chat.name
       });
-      console.log(`  ✅ Notified user ${participant.userId} (${participant.userType})`);
     });
 
-    res.status(201).json({ success: true, chat });
+    // Return chat with full participant details
+    res.status(201).json({ 
+      success: true, 
+      chat: {
+        ...chat,
+        participants: participantsWithDetails,
+        otherParticipants: otherParticipants
+      }
+    });
   } catch (error) {
     console.error('Error creating chat:', error);
     res.status(500).json({ success: false, message: 'Failed to create chat', error: error.message });
@@ -257,6 +281,27 @@ export const getChatById = async (req, res) => {
     const userType = req.user.userType;
     const { chatId } = req.params;
     const { page = 1, limit = 50 } = req.query;
+
+    // Try to get cached messages for page 1
+    if (parseInt(page) === 1) {
+      const cachedMessages = await cacheService.getCachedMessages(chatId);
+      const cachedMeta = await cacheService.getCachedChatMetadata(chatId);
+      
+      if (cachedMessages && cachedMeta) {
+        // Update isOwnMessage for current user
+        const messagesWithOwn = cachedMessages.map(msg => ({
+          ...msg,
+          isOwnMessage: msg.senderId === userId && msg.senderType === userType
+        }));
+        return res.status(200).json({
+          success: true,
+          chat: {
+            ...cachedMeta,
+            messages: messagesWithOwn
+          }
+        });
+      }
+    }
 
     // GLOBAL CHAT SYSTEM: Allow everyone to view any chat
     // (Removed participant check for global access)
@@ -354,16 +399,30 @@ export const getChatById = async (req, res) => {
     // Filter out null values (deleted users)
     const validParticipants = participantsWithDetails.filter(p => p !== null);
 
-    res.status(200).json({
-      success: true,
-      chat: {
+    const chatData = {
+      id: chat.id,
+      name: chat.name,
+      type: chat.type,
+      participants: validParticipants,
+      participantCount: validParticipants.length,
+      messages: messagesWithSender.reverse() // Oldest first
+    };
+
+    // Cache the first page of messages and metadata
+    if (parseInt(page) === 1) {
+      await cacheService.cacheMessages(chatId, chatData.messages);
+      await cacheService.cacheChatMetadata(chatId, {
         id: chat.id,
         name: chat.name,
         type: chat.type,
         participants: validParticipants,
-        participantCount: validParticipants.length,
-        messages: messagesWithSender.reverse() // Oldest first
-      }
+        participantCount: validParticipants.length
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      chat: chatData
     });
   } catch (error) {
     console.error('Error fetching chat:', error);
@@ -377,8 +436,6 @@ export const sendMessage = async (req, res) => {
     const userId = req.user.id;
     const userType = req.user.userType;
     const { chatId, content, messageType = 'TEXT', attachmentUrl, attachmentName, attachmentSize } = req.body;
-
-    console.log('📩 Sending message:', { userId, userType, chatId, content, messageType });
 
     // Validation
     if (!chatId || !content) {
@@ -404,7 +461,6 @@ export const sendMessage = async (req, res) => {
 
       // If it's the ALL Chat group, automatically add user as participant
       if (chat && chat.type === 'GROUP' && chat.name === 'ALL Chat') {
-        console.log('🔄 Auto-adding user to ALL Chat group...');
         participant = await prisma.chatParticipant.create({
           data: {
             chatId,
@@ -412,14 +468,10 @@ export const sendMessage = async (req, res) => {
             userType: userType
           }
         });
-        console.log('✅ User added to ALL Chat group');
       } else {
-        console.log('❌ User is not a participant');
         return res.status(403).json({ success: false, message: 'You are not a participant of this chat' });
       }
     }
-
-    console.log('✅ User is participant, creating message...');
 
     // Create message
     const message = await prisma.message.create({
@@ -435,13 +487,14 @@ export const sendMessage = async (req, res) => {
       }
     });
 
-    console.log('✅ Message created:', message.id);
-
     // Update chat's lastMessageAt
     await prisma.chat.update({
       where: { id: chatId },
       data: { lastMessageAt: new Date() }
     });
+
+    // Invalidate cache for this chat's messages
+    await cacheService.invalidateMessages(chatId);
 
     // Get sender info based on userType
     let sender = null;
@@ -474,33 +527,29 @@ export const sendMessage = async (req, res) => {
 
     // Broadcast message to all users in the chat room via Socket.IO (except sender)
     if (req.io) {
-      // Get sender's socket ID
-      console.log('🔍 Looking for sender socket:', { userId, userType: typeof userId });
-      console.log('📊 Available sockets:', Array.from(req.userSockets?.entries() || []));
-      
       const senderSocketId = req.userSockets?.get(userId);
-      console.log('🎯 Found sender socket:', senderSocketId);
       
-      // Get all sockets in this chat room
-      const room = req.io.sockets.adapter.rooms.get(`chat_${chatId}`);
-      console.log(`🏠 Sockets in room chat_${chatId}:`, room ? Array.from(room) : 'Room not found or empty');
+      // Invalidate user chats cache for all participants
+      const chatParticipants = await prisma.chatParticipant.findMany({
+        where: { chatId },
+        select: { userId: true }
+      });
+      for (const p of chatParticipants) {
+        await cacheService.invalidateUserChats(p.userId);
+      }
       
       if (senderSocketId) {
-        // Broadcast to room but exclude the sender using socket.to()
+        // Broadcast to room but exclude the sender
         req.io.to(`chat_${chatId}`).except(senderSocketId).emit('message_received', {
           ...formattedMessage,
-          isOwnMessage: false // For receivers, it's not their own message
+          isOwnMessage: false
         });
-        console.log('📡 Broadcasted message to chat room (excluding sender):', chatId);
-        console.log('📡 Message will be sent to sockets:', room ? Array.from(room).filter(id => id !== senderSocketId) : []);
       } else {
         // Fallback: broadcast to all (frontend will filter)
         req.io.to(`chat_${chatId}`).emit('message_received', {
           ...formattedMessage,
           isOwnMessage: false
         });
-        console.log('📡 Broadcasted message to chat room (sender socket not found):', chatId);
-        console.log('📡 Message will be sent to all sockets in room');
       }
     }
 
@@ -557,8 +606,6 @@ export const deleteChat = async (req, res) => {
     const userType = req.user.userType;
     const { chatId } = req.params;
 
-    console.log('🗑️ deleteChat called:', { userId, userType, chatId });
-
     // First, verify the chat exists and user is a participant
     const chat = await prisma.chat.findUnique({
       where: { id: chatId },
@@ -610,8 +657,6 @@ export const deleteChat = async (req, res) => {
       where: { id: chatId }
     });
 
-    console.log(`✅ Successfully deleted chat ${chatId}`);
-
     // Notify other participants via Socket.IO
     req.io.to(`chat_${chatId}`).emit('chat_deleted', { chatId });
 
@@ -622,13 +667,20 @@ export const deleteChat = async (req, res) => {
   }
 };
 
-// Get all users for starting new chats
+// Get all users for starting new chats (with optional search by name or email)
 export const getAllUsers = async (req, res) => {
   try {
     const currentUserId = req.user.id;
     const currentUserType = req.user.userType;
+    const { search } = req.query; // Get search query parameter
 
-    console.log('🔍 getAllUsers called by:', { currentUserId, currentUserType });
+    // Build search filter for name and email
+    const searchFilter = search ? {
+      OR: [
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } }
+      ]
+    } : {};
 
     // Get all customers
     const customers = await prisma.customer.findMany({
@@ -638,7 +690,8 @@ export const getAllUsers = async (req, res) => {
             { id: currentUserId },
             { userType: 'CUSTOMER' }
           ]
-        }
+        },
+        ...searchFilter
       },
       select: {
         id: true,
@@ -656,7 +709,8 @@ export const getAllUsers = async (req, res) => {
             { id: currentUserId },
             { userType: 'EMPLOYEE' }
           ]
-        }
+        },
+        ...searchFilter
       },
       select: {
         id: true,
@@ -674,7 +728,8 @@ export const getAllUsers = async (req, res) => {
             { id: currentUserId },
             { userType: 'ADMIN' }
           ]
-        }
+        },
+        ...searchFilter
       },
       select: {
         id: true,
@@ -708,8 +763,6 @@ export const getAllUsers = async (req, res) => {
         isOnline: false
       }))
     ];
-
-    console.log(`✅ Returning ${allUsers.length} users for chat contacts`);
     
     res.status(200).json({
       success: true,
@@ -721,6 +774,66 @@ export const getAllUsers = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Failed to get users', 
+      error: error.message 
+    });
+  }
+};
+// Delete a message
+export const deleteMessage = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userType = req.user.userType;
+    const { messageId } = req.params;
+
+    // Find the message
+    const message = await prisma.message.findUnique({
+      where: { id: messageId },
+      include: { chat: true }
+    });
+
+    if (!message) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
+    }
+
+    // Check if user is the sender of the message
+    if (message.senderId !== userId || message.senderType !== userType) {
+      return res.status(403).json({ success: false, message: 'You can only delete your own messages' });
+    }
+
+    // If message has an attachment, delete the file from disk
+    if (message.attachmentUrl) {
+      try {
+        const filePath = path.join(process.cwd(), message.attachmentUrl);
+        
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (fileError) {
+        console.error('⚠️ Error deleting attachment file:', fileError);
+        // Continue with message deletion even if file deletion fails
+      }
+    }
+
+    // Delete the message
+    await prisma.message.delete({
+      where: { id: messageId }
+    });
+
+    // Broadcast deletion to chat room via Socket.IO
+    if (req.io) {
+      req.io.to(`chat_${message.chatId}`).emit('message_deleted', {
+        messageId,
+        chatId: message.chatId
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Message deleted successfully' });
+
+  } catch (error) {
+    console.error('❌ deleteMessage error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to delete message', 
       error: error.message 
     });
   }

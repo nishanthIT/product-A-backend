@@ -57,35 +57,64 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const userId = parseInt(req.user.id);
-    const { productId, shopId, reportedPrice, currentPrice } = req.body;
+    const { productId, shopId, reportedPrice, currentPrice, notes, productAtShopId } = req.body;
 
     // Validate required fields
-    if (!productId || !shopId || !reportedPrice) {
-      return res.status(400).json({ error: 'Product ID, Shop ID, and Reported Price are required' });
+    if (!reportedPrice) {
+      return res.status(400).json({ error: 'Reported Price is required' });
     }
 
-    // Check if product exists at this shop
-    const productAtShop = await prisma.productAtShop.findUnique({
-      where: { shopId_productId: { shopId, productId } },
-      include: {
-        product: true,
-        shop: true
-      }
-    });
+    if (!productId && !productAtShopId) {
+      return res.status(400).json({ error: 'Either productId with shopId, or productAtShopId is required' });
+    }
 
-    if (!productAtShop) {
-      return res.status(404).json({ error: 'Product not found at this shop' });
+    let finalProductId = productId;
+    let finalShopId = shopId;
+    let productAtShop;
+
+    // If productAtShopId is provided, look up the product and shop
+    if (productAtShopId) {
+      productAtShop = await prisma.productAtShop.findUnique({
+        where: { id: productAtShopId },
+        include: {
+          product: true,
+          shop: true
+        }
+      });
+
+      if (!productAtShop) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+
+      finalProductId = productAtShop.productId;
+      finalShopId = productAtShop.shopId;
+    } else if (productId && shopId) {
+      // Check if product exists at this shop
+      productAtShop = await prisma.productAtShop.findUnique({
+        where: { shopId_productId: { shopId, productId } },
+        include: {
+          product: true,
+          shop: true
+        }
+      });
+
+      if (!productAtShop) {
+        return res.status(404).json({ error: 'Product not found at this shop' });
+      }
+    } else {
+      return res.status(400).json({ error: 'Product and Shop information required' });
     }
 
     // Create price report
     const report = await prisma.priceReport.create({
       data: {
         reporterId: userId,
-        productId,
-        shopId,
-        currentPrice: productAtShop.price,
+        productId: finalProductId,
+        shopId: finalShopId,
+        currentPrice: currentPrice || productAtShop.price,
         reportedPrice: parseFloat(reportedPrice),
-        status: 'PENDING'
+        status: 'PENDING',
+        adminNotes: notes || null
       },
       include: {
         product: true,
@@ -93,7 +122,7 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     });
 
-    console.log(`📋 New price report created by user ${userId} for product ${productId} at shop ${shopId}`);
+    console.log(`📋 New price report created by user ${userId} for product ${finalProductId} at shop ${finalShopId}`);
 
     res.status(201).json({
       message: 'Price report submitted successfully',

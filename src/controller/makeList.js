@@ -1,5 +1,11 @@
 import { PrismaClient } from "@prisma/client";
+import cacheService from '../services/cacheService.js';
+
 const prisma = new PrismaClient();
+
+// Cache TTL for lists (in seconds)
+const LIST_CACHE_TTL = 300; // 5 minutes
+const LIST_DETAIL_CACHE_TTL = 180; // 3 minutes
 
 // Helper function to get effective price (considering active offers)
 const getEffectivePrice = (productAtShop) => {
@@ -55,6 +61,9 @@ const makeList = async (req, res) => {
       createdAt: list.createdAt,
       updatedAt: list.updatedAt,
     };
+    
+    // Invalidate user's lists cache
+    await cacheService.invalidateUserLists(customerId);
     
     res.status(201).json(formattedList);
   } catch (error) {
@@ -191,6 +200,10 @@ const addProductToList = async (req, res) => {
         availableInShops: productAtShops.length,
       },
     });
+    
+    // Invalidate cache for this list and user's lists
+    await cacheService.invalidateAllUserListCache(customerId, listId);
+    
   } catch (error) {
     console.error("Error adding product to list:", error);
     res.status(500).json({ error: "Internal server error." });
@@ -276,18 +289,9 @@ const getLowestPricesInList = async (req, res) => {
 };
 
 const removeProductFromList = async (req, res) => {
-
-  console.log("hitting the delet eroute")
-  console.log("hitting the delet eroute")
-  console.log("hitting the delet eroute")
-  console.log("hitting the delet eroute")
-  console.log("hitting the delet eroute")
   try {
-    // Get customer ID from JWT token
     const customerId = req.user?.id;
     const { listId, productId } = req.body;
-    
-    console.log('DELETE REQUEST RECEIVED:', { customerId, listId, productId });
     
     // Verify the list exists and belongs to this customer
     const list = await prisma.list.findFirst({
@@ -320,6 +324,9 @@ const removeProductFromList = async (req, res) => {
       return res.status(404).json({ error: "Product not found in list" });
     }
 
+    // Invalidate cache for this list and user's lists
+    await cacheService.invalidateAllUserListCache(customerId, listId);
+
     return res.status(200).json({
       success: true,
       message: "Product removed from list"
@@ -342,6 +349,13 @@ const getUserLists = async (req, res) => {
   }
 
   try {
+    // Try cache first
+    const cachedLists = await cacheService.getCachedUserLists(customerId);
+    if (cachedLists) {
+      console.log(`⚡ Returning cached lists for user ${customerId}`);
+      return res.status(200).json(cachedLists);
+    }
+
     const lists = await prisma.list.findMany({
       where: {
         customerId,
@@ -380,6 +394,9 @@ const getUserLists = async (req, res) => {
       };
     });
 
+    // Cache the result
+    await cacheService.cacheUserLists(customerId, formattedLists);
+
     res.status(200).json(formattedLists);
   } catch (error) {
     console.error("Error fetching lists:", error);
@@ -389,6 +406,7 @@ const getUserLists = async (req, res) => {
 
 // Get a specific list by ID
 const getListById = async (req, res) => {
+  console.log("Yes i am printing from here-------")
   const customerId = req.user?.id;
   const userType = req.user?.userType;
   const { listId } = req.params;
@@ -398,6 +416,13 @@ const getListById = async (req, res) => {
   }
 
   try {
+    // Try cache first
+    const cachedList = await cacheService.getCachedListDetail(listId);
+    if (cachedList && cachedList.customerId === customerId) {
+      console.log(`⚡ Returning cached list detail for ${listId}`);
+      return res.status(200).json(cachedList);
+    }
+
     const list = await prisma.list.findUnique({
       where: {
         id: listId,
@@ -445,7 +470,7 @@ const getListById = async (req, res) => {
         aielNumber: lp.productAtShop.card_aiel_number,
         productAtShopId: lp.productAtShop.id
       });
-      
+    
       if (!productMap.has(productId) || effectivePrice.price < productMap.get(productId).lowestPrice) {
         productMap.set(productId, {
           id: lp.id,
@@ -459,6 +484,7 @@ const getListById = async (req, res) => {
           hasActiveOffer: effectivePrice.hasActiveOffer,
           shopName: lp.productAtShop.shop?.name || 'No Shop',
           img: lp.productAtShop.product.img,
+          quantity: lp.quantity || 1,
         });
         
         console.log(`✅ Set product in map with effective price £${effectivePrice.price} ${effectivePrice.hasActiveOffer ? '(OFFER)' : '(REGULAR)'} - aiel: ${lp.productAtShop.card_aiel_number}`);
@@ -480,9 +506,13 @@ const getListById = async (req, res) => {
       JSON.stringify(formattedList.products.map(p => ({
         name: p.productName,
         aielNumber: p.aielNumber,
-        barcode: p.barcode
+        barcode: p.barcode,
+        quantity: p.quantity
       })), null, 2)
     );
+
+    // Cache the list detail
+    await cacheService.cacheListDetail(listId, formattedList);
 
     res.status(200).json(formattedList);
   } catch (error) {
@@ -519,6 +549,9 @@ const deleteList = async (req, res) => {
     await prisma.list.delete({
       where: { id: listId },
     });
+
+    // Invalidate cache for this list and user's lists
+    await cacheService.invalidateAllUserListCache(customerId, listId);
 
     res.status(200).json({ 
       success: true,

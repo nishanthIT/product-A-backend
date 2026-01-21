@@ -133,7 +133,7 @@ router.post("/lists", isAuthenticated, requireActiveSubscription, makeList); // 
 router.post("/lists/addProduct", isAuthenticated, requireActiveSubscription, addProductToList); // Add product to list (requires active subscription)
 router.delete("/lists/removeProduct", isAuthenticated, requireActiveSubscription, removeProductFromList); // Remove product from list (requires active subscription)
 router.get("/lists/:listId/lowest-prices", isAuthenticated, requireActiveSubscription, getLowestPricesInList); // Get lowest prices (premium feature)
-router.get("/lists/:listId", isAuthenticated, softSubscriptionCheck, getListById); // Get specific list (soft check - allow viewing)
+// router.get("/lists/:listId", isAuthenticated, softSubscriptionCheck, getListById); // DISABLED - conflicts with listRoutes.js
 router.delete("/lists/:listId", isAuthenticated, requireActiveSubscription, deleteList); // Delete list (requires active subscription)
 
 export default router;

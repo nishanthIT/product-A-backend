@@ -43,15 +43,58 @@ const updateCustomer = async (req, res) => {
 const deleteCustomer = async (req, res) => {
   try {
     const id = Number(req.params.id);
+    
+    // First, delete all chat-related data for this customer
+    // Delete message read receipts
+    await prisma.messageRead.deleteMany({
+      where: {
+        userId: id,
+        userType: 'CUSTOMER'
+      }
+    });
+    
+    // Delete messages sent by this customer
+    await prisma.message.deleteMany({
+      where: {
+        senderId: id,
+        senderType: 'CUSTOMER'
+      }
+    });
+    
+    // Delete chat participations
+    await prisma.chatParticipant.deleteMany({
+      where: {
+        userId: id,
+        userType: 'CUSTOMER'
+      }
+    });
+    
+    // Delete ProductAtShop records managed by this customer (if any)
+    await prisma.productAtShop.updateMany({
+      where: {
+        userId: id
+      },
+      data: {
+        userId: null
+      }
+    });
+    
+    // Now delete the customer (Lists, ListProducts, and PriceReports will cascade)
     const customer = await prisma.customer.delete({
       where: {
         id: id,
       },
     });
-    res.json(customer);
+    
+    console.log(`✅ Customer ${id} and all related data deleted successfully`);
+    res.json({ 
+      success: true, 
+      message: 'Customer and all related data deleted successfully',
+      customer 
+    });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Internal server error." });
+    console.error('Error deleting customer:', error);
+    res.status(500).json({ error: "Internal server error.", details: error.message });
   }
 };
 
