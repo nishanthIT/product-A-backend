@@ -474,9 +474,13 @@ const getProductByBarcode = async (req, res) => {
       return res.status(400).json({ error: "Barcode is required." });
     }
 
-    // Fetch product by barcode and include related shops
-    const product = await prisma.product.findUnique({
-      where: { barcode },
+    // Trim and clean the barcode
+    const cleanBarcode = barcode.trim();
+    console.log("Searching for barcode:", cleanBarcode);
+
+    // First try exact match on barcode field
+    let product = await prisma.product.findUnique({
+      where: { barcode: cleanBarcode },
       include: {
         shops: {
           include: {
@@ -486,10 +490,48 @@ const getProductByBarcode = async (req, res) => {
       },
     });
 
+    // If not found, try searching in caseBarcode field
+    if (!product) {
+      console.log("Not found in barcode field, trying caseBarcode...");
+      product = await prisma.product.findFirst({
+        where: { caseBarcode: cleanBarcode },
+        include: {
+          shops: {
+            include: {
+              shop: true,
+            },
+          },
+        },
+      });
+    }
+
+    // If still not found, try case-insensitive search on both fields
+    if (!product) {
+      console.log("Trying case-insensitive search...");
+      product = await prisma.product.findFirst({
+        where: {
+          OR: [
+            { barcode: { equals: cleanBarcode, mode: 'insensitive' } },
+            { caseBarcode: { equals: cleanBarcode, mode: 'insensitive' } }
+          ]
+        },
+        include: {
+          shops: {
+            include: {
+              shop: true,
+            },
+          },
+        },
+      });
+    }
+
     // Handle case where product is not found
     if (!product) {
+      console.log("Product not found for barcode:", cleanBarcode);
       return res.status(404).json({ error: "Product not found." });
     }
+
+    console.log("Product found:", product.title);
 
     // Format response with shop details
     const formattedShops = product.shops.map((productAtShop) => ({

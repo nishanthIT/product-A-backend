@@ -151,9 +151,22 @@ const limit = 100
     // Add search condition if provided - improved fuzzy search with typo tolerance
     if (search) {
       // Split search into words for better matching
-      const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
+      const searchTerm = search.trim();
+      const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
       
-      if (searchWords.length > 0) {
+      // Check if search looks like a barcode (mostly numbers)
+      const looksLikeBarcode = /^\d{8,}$/.test(searchTerm);
+      
+      if (looksLikeBarcode) {
+        // For barcode-like searches, use exact or contains on barcode fields
+        console.log("Detected barcode search:", searchTerm);
+        whereClause.OR = [
+          { barcode: { equals: searchTerm } },
+          { barcode: { contains: searchTerm, mode: "insensitive" } },
+          { caseBarcode: { equals: searchTerm } },
+          { caseBarcode: { contains: searchTerm, mode: "insensitive" } }
+        ];
+      } else if (searchWords.length > 0) {
         // Build OR conditions for each word to match title OR barcode
         // Also add partial matching (first 3+ characters) for typo tolerance
         const searchConditions = searchWords.map(word => {
