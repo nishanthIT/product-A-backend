@@ -1,6 +1,64 @@
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
+// Levenshtein distance function for fuzzy matching
+function levenshteinDistance(str1, str2) {
+  const m = str1.length;
+  const n = str2.length;
+  
+  // Create a 2D array to store distances
+  const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+  
+  // Initialize first column and row
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  
+  // Fill the rest of the matrix
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (str1[i - 1].toLowerCase() === str2[j - 1].toLowerCase()) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  
+  return dp[m][n];
+}
+
+// Fuzzy match a word against a text
+function fuzzyMatchWord(searchWord, text, maxDistance = 2) {
+  if (!searchWord || !text) return false;
+  
+  const lowerWord = searchWord.toLowerCase();
+  const lowerText = text.toLowerCase();
+  
+  // Direct contains check
+  if (lowerText.includes(lowerWord)) return true;
+  
+  // Check each word in the text
+  const textWords = lowerText.split(/\s+/);
+  
+  for (const textWord of textWords) {
+    // Exact match
+    if (textWord === lowerWord) return true;
+    
+    // Starts with the search word
+    if (textWord.startsWith(lowerWord) || lowerWord.startsWith(textWord)) return true;
+    
+    // Levenshtein distance check for words of similar length
+    const lengthDiff = Math.abs(textWord.length - lowerWord.length);
+    if (lengthDiff <= maxDistance) {
+      const distance = levenshteinDistance(textWord, lowerWord);
+      const threshold = lowerWord.length <= 4 ? 1 : maxDistance;
+      if (distance <= threshold) return true;
+    }
+  }
+  
+  return false;
+}
+
 // Helper function to get effective price (considering active offers)
 const getEffectivePrice = (productAtShop) => {
   const currentDate = new Date();
@@ -458,7 +516,7 @@ const getProductByBarcode = async (req, res) => {
   }
 };
 
-// Search products by title/name (for customers adding to lists)
+// Search products by title/name with fuzzy matching (for customers adding to lists)
 const searchProducts = async (req, res) => {
   try {
     const { q, limit = 20 } = req.query;
@@ -468,14 +526,30 @@ const searchProducts = async (req, res) => {
     }
 
     const searchTerm = q.trim();
+    const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
 
-    // Search products by title (case-insensitive)
-    const products = await prisma.product.findMany({
+    // Build search conditions for each word
+    const searchConditions = searchWords.map(word => {
+      const conditions = [
+        { title: { contains: word, mode: 'insensitive' } },
+        { barcode: { contains: word, mode: 'insensitive' } }
+      ];
+      
+      // For words longer than 3 characters, also try partial matching
+      if (word.length > 3) {
+        const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
+        if (partialWord.length >= 3) {
+          conditions.push({ title: { contains: partialWord, mode: 'insensitive' } });
+        }
+      }
+      
+      return { OR: conditions };
+    });
+
+    // Search products by title and barcode (case-insensitive)
+    let products = await prisma.product.findMany({
       where: {
-        title: {
-          contains: searchTerm,
-          mode: 'insensitive',
-        },
+        AND: searchConditions
       },
       include: {
         shops: {
@@ -484,11 +558,42 @@ const searchProducts = async (req, res) => {
           },
         },
       },
-      take: parseInt(limit),
+      take: parseInt(limit) * 2, // Get more for potential fuzzy filtering
       orderBy: {
         title: 'asc',
       },
     });
+
+    // If few results, apply fuzzy matching to a broader search
+    if (products.length < parseInt(limit) / 2) {
+      const broadProducts = await prisma.product.findMany({
+        include: {
+          shops: {
+            include: {
+              shop: true,
+            },
+          },
+        },
+        take: 300,
+        orderBy: {
+          title: 'asc',
+        },
+      });
+      
+      // Apply fuzzy matching
+      const fuzzyMatched = broadProducts.filter(product => {
+        const searchableText = `${product.title || ''} ${product.barcode || ''}`;
+        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
+      });
+      
+      // Merge with existing results
+      const existingIds = new Set(products.map(p => p.id));
+      const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.id));
+      products = [...products, ...additionalProducts];
+    }
+
+    // Limit results
+    products = products.slice(0, parseInt(limit));
 
     // Format response with offer price logic
     const formattedProducts = products.map(product => {
@@ -521,4 +626,65 @@ const searchProducts = async (req, res) => {
   }
 };
 
-export { addProduct, editProduct, getProductById, getProductByBarcode, searchProducts };
+// Delete a product (Admin only)
+const deleteProduct = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({ error: "Product ID is required" });
+    }
+
+    // Check if product exists
+    const product = await prisma.product.findUnique({
+      where: { id },
+      include: {
+        shops: true,
+      }
+    });
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    // Get all ProductAtShop IDs for this product
+    const productAtShopIds = product.shops.map(s => s.id);
+
+    // Delete related records first (cascade delete)
+    // 1. Delete from ListProduct (which references ProductAtShop)
+    if (productAtShopIds.length > 0) {
+      await prisma.listProduct.deleteMany({
+        where: { 
+          productAtShopId: {
+            in: productAtShopIds
+          }
+        }
+      });
+    }
+
+    // 2. Delete from ProductAtShop
+    await prisma.productAtShop.deleteMany({
+      where: { productId: id }
+    });
+
+    // 3. Delete price reports related to this product
+    await prisma.priceReport.deleteMany({
+      where: { productId: id }
+    });
+
+    // Finally delete the product
+    await prisma.product.delete({
+      where: { id }
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Product deleted successfully"
+    });
+  } catch (error) {
+    console.error("Error deleting product:", error);
+    res.status(500).json({ error: "Failed to delete product" });
+  }
+};
+
+export { addProduct, editProduct, getProductById, getProductByBarcode, searchProducts, deleteProduct };

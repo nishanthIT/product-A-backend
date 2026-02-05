@@ -5,10 +5,62 @@ import jwt from 'jsonwebtoken';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+// Levenshtein distance function for fuzzy matching
+function levenshteinDistance(str1, str2) {
+  const m = str1.length;
+  const n = str2.length;
+  
+  const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+  
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (str1[i - 1].toLowerCase() === str2[j - 1].toLowerCase()) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  
+  return dp[m][n];
+}
+
+// Fuzzy match a word against a text
+function fuzzyMatchWord(searchWord, text, maxDistance = 2) {
+  if (!searchWord || !text) return false;
+  
+  const lowerWord = searchWord.toLowerCase();
+  const lowerText = text.toLowerCase();
+  
+  if (lowerText.includes(lowerWord)) return true;
+  
+  const textWords = lowerText.split(/\s+/);
+  
+  for (const textWord of textWords) {
+    if (textWord === lowerWord) return true;
+    if (textWord.startsWith(lowerWord) || lowerWord.startsWith(textWord)) return true;
+    
+    const lengthDiff = Math.abs(textWord.length - lowerWord.length);
+    if (lengthDiff <= maxDistance) {
+      const distance = levenshteinDistance(textWord, lowerWord);
+      const threshold = lowerWord.length <= 4 ? 1 : maxDistance;
+      if (distance <= threshold) return true;
+    }
+  }
+  
+  return false;
+}
+
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
+
+  console.log('🔐 Auth header:', authHeader ? 'Present' : 'Missing');
+  console.log('🔑 Token extracted:', token ? 'Present' : 'Missing');
 
   if (!token) {
     return res.status(401).json({ error: 'Access token required' });
@@ -16,8 +68,10 @@ const authenticateToken = (req, res, next) => {
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
+      console.log('❌ Token verification failed:', err.message);
       return res.status(403).json({ error: 'Invalid token' });
     }
+    console.log('✅ Token verified, user:', user);
     req.user = user;
     next();
   });
@@ -317,7 +371,7 @@ router.get('/product/:productId/shop/:shopId/price', authenticateToken, async (r
   }
 });
 
-// GET /api/price-reports/products/search - Search products for price reporting
+// GET /api/price-reports/products/search - Search products for price reporting with fuzzy matching
 router.get('/products/search', authenticateToken, async (req, res) => {
   try {
     const { q, limit = 10 } = req.query;
@@ -326,12 +380,30 @@ router.get('/products/search', authenticateToken, async (req, res) => {
       return res.json({ products: [] });
     }
 
-    const products = await prisma.product.findMany({
+    const searchTerm = q.trim();
+    const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
+    
+    // Build search conditions for each word
+    const searchConditions = searchWords.map(word => {
+      const conditions = [
+        { title: { contains: word, mode: 'insensitive' } },
+        { barcode: { contains: word, mode: 'insensitive' } }
+      ];
+      
+      // For words longer than 3 characters, also try partial matching
+      if (word.length > 3) {
+        const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
+        if (partialWord.length >= 3) {
+          conditions.push({ title: { contains: partialWord, mode: 'insensitive' } });
+        }
+      }
+      
+      return { OR: conditions };
+    });
+
+    let products = await prisma.product.findMany({
       where: {
-        OR: [
-          { title: { contains: q, mode: 'insensitive' } },
-          { barcode: { contains: q, mode: 'insensitive' } }
-        ]
+        AND: searchConditions
       },
       select: {
         id: true,
@@ -339,18 +411,41 @@ router.get('/products/search', authenticateToken, async (req, res) => {
         barcode: true,
         img: true
       },
-      take: parseInt(limit),
+      take: parseInt(limit) * 2,
       orderBy: { title: 'asc' }
     });
 
-    res.json({ products });
+    // If few results, apply fuzzy matching
+    if (products.length < parseInt(limit) / 2) {
+      const broadProducts = await prisma.product.findMany({
+        select: {
+          id: true,
+          title: true,
+          barcode: true,
+          img: true
+        },
+        take: 200,
+        orderBy: { title: 'asc' }
+      });
+      
+      const fuzzyMatched = broadProducts.filter(product => {
+        const searchableText = `${product.title || ''} ${product.barcode || ''}`;
+        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
+      });
+      
+      const existingIds = new Set(products.map(p => p.id));
+      const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.id));
+      products = [...products, ...additionalProducts];
+    }
+
+    res.json({ products: products.slice(0, parseInt(limit)) });
   } catch (error) {
     console.error('Error searching products:', error);
     res.status(500).json({ error: 'Failed to search products' });
   }
 });
 
-// GET /api/price-reports/products/:productId/shops/search - Search shops that have a specific product
+// GET /api/price-reports/products/:productId/shops/search - Search shops that have a specific product with fuzzy matching
 router.get('/products/:productId/shops/search', authenticateToken, async (req, res) => {
   try {
     const { productId } = req.params;
@@ -361,18 +456,24 @@ router.get('/products/:productId/shops/search', authenticateToken, async (req, r
       productId: productId,
     };
 
+    let searchWords = [];
+    
     // Only add search filters if query is provided and has enough characters
     if (q && q.trim().length >= 2) {
-      whereCondition.shop = {
+      searchWords = q.trim().split(/\s+/).filter(word => word.length > 0);
+      
+      const searchConditions = searchWords.map(word => ({
         OR: [
-          { name: { contains: q, mode: 'insensitive' } },
-          { address: { contains: q, mode: 'insensitive' } }
+          { name: { contains: word, mode: 'insensitive' } },
+          { address: { contains: word, mode: 'insensitive' } }
         ]
-      };
+      }));
+      
+      whereCondition.shop = { AND: searchConditions };
     }
 
     // Find shops that have this product (with optional search filter)
-    const shopsWithProduct = await prisma.productAtShop.findMany({
+    let shopsWithProduct = await prisma.productAtShop.findMany({
       where: whereCondition,
       include: {
         shop: {
@@ -384,11 +485,38 @@ router.get('/products/:productId/shops/search', authenticateToken, async (req, r
           }
         }
       },
-      take: parseInt(limit),
+      take: parseInt(limit) * 2,
       orderBy: { shop: { name: 'asc' } }
     });
 
-    const shops = shopsWithProduct.map(item => item.shop);
+    // If few results and search was provided, try fuzzy matching
+    if (searchWords.length > 0 && shopsWithProduct.length < parseInt(limit) / 2) {
+      const allShopsWithProduct = await prisma.productAtShop.findMany({
+        where: { productId: productId },
+        include: {
+          shop: {
+            select: {
+              id: true,
+              name: true,
+              address: true,
+              mobile: true
+            }
+          }
+        },
+        take: 100
+      });
+      
+      const fuzzyMatched = allShopsWithProduct.filter(item => {
+        const searchableText = `${item.shop.name || ''} ${item.shop.address || ''}`;
+        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
+      });
+      
+      const existingIds = new Set(shopsWithProduct.map(s => s.shop.id));
+      const additionalShops = fuzzyMatched.filter(s => !existingIds.has(s.shop.id));
+      shopsWithProduct = [...shopsWithProduct, ...additionalShops];
+    }
+
+    const shops = shopsWithProduct.slice(0, parseInt(limit)).map(item => item.shop);
     res.json({ shops });
   } catch (error) {
     console.error('Error searching shops:', error);
@@ -465,13 +593,20 @@ router.get('/admin/pending', authenticateToken, async (req, res) => {
 // POST /api/price-reports/admin/approve/:reportId - Approve a price report
 router.post('/admin/approve/:reportId', authenticateToken, async (req, res) => {
   try {
+    console.log('📝 Approve request received');
+    console.log('👤 User from token:', req.user);
+    console.log('🔑 User type:', req.user?.userType);
+    
     // Check if user is admin
     if (req.user.userType !== 'EMPLOYEE' && req.user.userType !== 'ADMIN') {
+      console.log('❌ Access denied. User type:', req.user.userType);
       return res.status(403).json({ error: 'Admin access required' });
     }
 
     const { reportId } = req.params;
     const { adminNotes } = req.body;
+    
+    console.log('📋 Report ID:', reportId);
 
     // Get the report details
     const report = await prisma.priceReport.findUnique({
@@ -480,10 +615,12 @@ router.post('/admin/approve/:reportId', authenticateToken, async (req, res) => {
     });
 
     if (!report) {
+      console.log('❌ Report not found:', reportId);
       return res.status(404).json({ error: 'Report not found' });
     }
 
     if (report.status !== 'PENDING') {
+      console.log('❌ Report already processed:', report.status);
       return res.status(400).json({ error: 'Report already processed' });
     }
 
@@ -538,13 +675,20 @@ router.post('/admin/approve/:reportId', authenticateToken, async (req, res) => {
 // POST /api/price-reports/admin/reject/:reportId - Reject a price report
 router.post('/admin/reject/:reportId', authenticateToken, async (req, res) => {
   try {
+    console.log('📝 Reject request received');
+    console.log('👤 User from token:', req.user);
+    console.log('🔑 User type:', req.user?.userType);
+    
     // Check if user is admin
     if (req.user.userType !== 'EMPLOYEE' && req.user.userType !== 'ADMIN') {
+      console.log('❌ Access denied. User type:', req.user.userType);
       return res.status(403).json({ error: 'Admin access required' });
     }
 
     const { reportId } = req.params;
     const { adminNotes } = req.body;
+    
+    console.log('📋 Report ID:', reportId);
 
     // Get the report details
     const report = await prisma.priceReport.findUnique({
@@ -552,10 +696,12 @@ router.post('/admin/reject/:reportId', authenticateToken, async (req, res) => {
     });
 
     if (!report) {
+      console.log('❌ Report not found:', reportId);
       return res.status(404).json({ error: 'Report not found' });
     }
 
     if (report.status !== 'PENDING') {
+      console.log('❌ Report already processed:', report.status);
       return res.status(400).json({ error: 'Report already processed' });
     }
 

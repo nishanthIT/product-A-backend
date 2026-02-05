@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node server.js",
     "import-products": "node scripts/importProductData.js",
+    "import-deebee": "node scripts/importDeebeeData.js",
     "fast-import": "node scripts/fastImport.js",
     "import-excel": "node scripts/importExcel.js",
     "import-excel-simple": "node scripts/importSimpleExcel.js",
@@ -28,14 +29,12 @@
     "date-fns-tz": "^3.2.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "ioredis": "^5.9.2",
     "jimp": "^1.6.0",
     "jsonwebtoken": "^9.0.2",
     "luxon": "^3.5.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^7.0.11",
     "pg": "^8.13.1",
-    "redis": "^5.10.0",
     "remove.bg": "^1.3.0",
     "socket.io": "^4.8.1"
   },

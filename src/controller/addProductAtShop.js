@@ -5,6 +5,51 @@
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
+// Levenshtein distance function for fuzzy matching (typo tolerance)
+const levenshteinDistance = (str1, str2) => {
+  const m = str1.length;
+  const n = str2.length;
+  const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+  return dp[m][n];
+};
+
+// Check if a word fuzzy matches any word in text
+const fuzzyMatchWord = (searchWord, text, maxDistance = 2) => {
+  const textLower = text.toLowerCase();
+  const searchLower = searchWord.toLowerCase();
+  
+  if (textLower.includes(searchLower)) return true;
+  
+  const textWords = textLower.split(/\s+/);
+  for (const textWord of textWords) {
+    const allowedDistance = searchLower.length <= 3 ? 1 : maxDistance;
+    
+    if (textWord.startsWith(searchLower.substring(0, Math.min(3, searchLower.length)))) {
+      const distance = levenshteinDistance(searchLower, textWord.substring(0, searchLower.length + 2));
+      if (distance <= allowedDistance) return true;
+    }
+    
+    if (textWord.length >= searchLower.length - 2 && textWord.length <= searchLower.length + 2) {
+      const distance = levenshteinDistance(searchLower, textWord);
+      if (distance <= allowedDistance) return true;
+    }
+  }
+  return false;
+};
+
 // Add a product at a shop
 const addProductAtShop = async (req, res) => {
   const {
@@ -340,7 +385,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
   }
 };
 
-// Get products at a shop with pagination and search
+// Get products at a shop with pagination and search (with fuzzy matching)
 const getProductsAtShop = async (req, res) => {
   const { shopId } = req.params;
   const { page = 1,  search = "" } = req.query;
@@ -364,30 +409,42 @@ const getProductsAtShop = async (req, res) => {
       return res.status(404).json({ error: "Shop not found" });
     }
 
-    // Get total count of products that match the search
-    const totalCount = await prisma.productAtShop.count({
-      where: {
-        shopId,
-        product: {
-          title: {
-            contains: search,
-            mode: "insensitive"
+    // Build search conditions for fuzzy matching
+    let whereClause = { shopId };
+    
+    if (search && search.trim()) {
+      const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
+      
+      if (searchWords.length > 0) {
+        // Build OR conditions for each word to match title OR barcode
+        const searchConditions = searchWords.map(word => {
+          const conditions = [
+            { product: { title: { contains: word, mode: "insensitive" } } },
+            { product: { barcode: { contains: word, mode: "insensitive" } } },
+            { product: { caseBarcode: { contains: word, mode: "insensitive" } } }
+          ];
+          
+          // For words longer than 3 characters, also try matching with first part
+          if (word.length > 3) {
+            const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
+            if (partialWord.length >= 3) {
+              conditions.push({ product: { title: { contains: partialWord, mode: "insensitive" } } });
+            }
           }
-        }
+          
+          return { OR: conditions };
+        });
+        
+        whereClause.AND = searchConditions;
       }
-    });
+    }
+
+    // Get total count
+    const totalCount = await prisma.productAtShop.count({ where: whereClause });
 
     // Get products with pagination and search
-    const productsAtShop = await prisma.productAtShop.findMany({
-      where: {
-        shopId,
-        product: {
-          title: {
-            contains: search,
-            mode: "insensitive"
-          }
-        }
-      },
+    let productsAtShop = await prisma.productAtShop.findMany({
+      where: whereClause,
       include: {
         product: {
           select: {
@@ -405,9 +462,45 @@ const getProductsAtShop = async (req, res) => {
       skip: offset,
       take: limitNumber,
       orderBy: {
-        updatedAt: 'desc' // Most recently updated first
+        updatedAt: 'desc'
       }
     });
+
+    // If search provided and few results, apply fuzzy matching
+    if (search && search.trim() && productsAtShop.length < 10) {
+      const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
+      
+      // Get more products for fuzzy matching
+      const allProductsAtShop = await prisma.productAtShop.findMany({
+        where: { shopId },
+        include: {
+          product: {
+            select: {
+              title: true,
+              caseSize: true,
+              packetSize: true,
+              retailSize: true,
+              barcode: true,
+              caseBarcode: true,
+              img: true,
+              rrp: true
+            }
+          }
+        },
+        take: 500
+      });
+      
+      // Apply fuzzy matching
+      const fuzzyMatched = allProductsAtShop.filter(item => {
+        const searchableText = `${item.product.title || ''} ${item.product.barcode || ''} ${item.product.caseBarcode || ''}`;
+        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
+      });
+      
+      // Merge results
+      const existingIds = new Set(productsAtShop.map(p => p.productId));
+      const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.productId));
+      productsAtShop = [...productsAtShop, ...additionalProducts].slice(0, limitNumber);
+    }
 
     // Map the data to a more frontend-friendly format
     const formattedProducts = productsAtShop.map(item => ({
@@ -430,10 +523,10 @@ const getProductsAtShop = async (req, res) => {
 
     res.status(200).json({
       products: formattedProducts,
-      total: totalCount,
+      total: Math.max(totalCount, formattedProducts.length),
       page: pageNumber,
       limit: limitNumber,
-      totalPages: Math.ceil(totalCount / limitNumber)
+      totalPages: Math.ceil(Math.max(totalCount, formattedProducts.length) / limitNumber)
     });
   } catch (error) {
     console.error("Error fetching products at shop:", error);

@@ -544,18 +544,29 @@ export const sendMessage = async (req, res) => {
         await cacheService.invalidateUserChats(p.userId);
       }
       
+      const messagePayload = {
+        ...formattedMessage,
+        isOwnMessage: false
+      };
+      
+      // Broadcast to chat room (for users actively viewing this chat)
       if (senderSocketId) {
         // Broadcast to room but exclude the sender
-        req.io.to(`chat_${chatId}`).except(senderSocketId).emit('message_received', {
-          ...formattedMessage,
-          isOwnMessage: false
-        });
+        req.io.to(`chat_${chatId}`).except(senderSocketId).emit('message_received', messagePayload);
       } else {
-        // Fallback: broadcast to all (frontend will filter)
-        req.io.to(`chat_${chatId}`).emit('message_received', {
-          ...formattedMessage,
-          isOwnMessage: false
-        });
+        // Fallback: broadcast to all in room (frontend will filter)
+        req.io.to(`chat_${chatId}`).emit('message_received', messagePayload);
+      }
+      
+      // ALSO broadcast to each participant's user room (for users not in chat view)
+      // This ensures real-time delivery even if user is on a different screen
+      for (const participant of chatParticipants) {
+        // Skip the sender
+        if (participant.userId === userId) continue;
+        
+        const participantUserRoom = `user_${participant.userId}`;
+        console.log(`📨 Also emitting to user room: ${participantUserRoom}`);
+        req.io.to(participantUserRoom).emit('message_received', messagePayload);
       }
     }
 

@@ -1,6 +1,6 @@
 import express from "express";
 import { filterProducts } from "../controller/filterProducts.js";
-import { addProduct, editProduct, getProductByBarcode, getProductById, searchProducts } from "../controller/addProduct.js";
+import { addProduct, editProduct, getProductByBarcode, getProductById, searchProducts, deleteProduct } from "../controller/addProduct.js";
 import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
 import {
   addProductAtShop,
@@ -62,6 +62,7 @@ router.post("/addProduct",isAuthenticated,isEmployee, addProduct);
 router.put("/editProduct/:id",isAuthenticated,isEmployee, editProduct);
 router.get("/getProductByBarcode/:barcode",isAuthenticated,isEmployee, getProductByBarcode);
 router.get("/getProductById/:id",isAuthenticated,isEmployee, getProductById);
+router.delete("/deleteProduct/:id",isAuthenticated,isAdmin, deleteProduct); // Admin only - delete product
 
 // Customer product search routes (for adding to lists)
 router.get("/products/barcode/:barcode",isAuthenticated, getProductByBarcode); // Allow customers to search
@@ -74,7 +75,7 @@ router.post("/addShop",isAuthenticated,isEmployee, addShop);
 router.put("/editShop/:id",isAuthenticated,isEmployee, editShop);
 router.get("/getAllshop", isAuthenticated,isEmployee,getAllShops);
 router.get("/getshop/:id",isAuthenticated,isEmployee, getShopById);
-router.delete("/shops/:id",isAuthenticated,isEmployee, deleteShop); // Add the delete route
+router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only - delete shop
 
 /* <!-- ProductAtShop Routes --> */
 // router.post("/addProductAtShop", addProductAtShop);

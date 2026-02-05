@@ -6,6 +6,26 @@ import cacheService from '../services/cacheService.js';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+// Retry wrapper for database operations (handles Neon cold starts)
+const withRetry = async (operation, maxRetries = 3, delayMs = 1000) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      const isConnectionError = error.code === 'P1001' || 
+        error.message?.includes("Can't reach database server") ||
+        error.message?.includes('Connection refused');
+      
+      if (isConnectionError && attempt < maxRetries) {
+        console.log(`⏳ Database connection failed (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      }
+      throw error;
+    }
+  }
+};
+
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -68,14 +88,11 @@ router.get('/:id', authenticateToken, async (req, res) => {
   try {
     const listId = req.params.id;
     const customerId = parseInt(req.user.id);
+    
+    // Skip cache check - always fetch fresh data to avoid race conditions with togglePurchased
+    console.log('📦 Fetching list from DATABASE (no cache):', listId);
 
-    // Try cache first
-    const cachedList = await cacheService.getCachedListDetail(listId);
-    if (cachedList) {
-      return res.json(cachedList);
-    }
-
-    const list = await prisma.list.findFirst({
+    const list = await withRetry(() => prisma.list.findFirst({
       where: {
         id: listId,
         customerId: customerId,
@@ -92,7 +109,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
           },
         },
       },
-    });
+    }));
 
     if (!list) {
       return res.status(404).json({ error: 'List not found' });
@@ -119,13 +136,15 @@ router.get('/:id', authenticateToken, async (req, res) => {
       isPurchased: lp.isPurchased || false,
     }));
 
+    console.log('📦 Database isPurchased states:', transformedProducts.map(p => ({ id: p.id, name: p.productName, isPurchased: p.isPurchased })));
+
     const responseData = {
       ...list,
       products: transformedProducts,
     };
 
-    // Cache the result
-    await cacheService.cacheListDetail(listId, responseData);
+    // Don't cache - to avoid race conditions with togglePurchased operations
+    // await cacheService.cacheListDetail(listId, responseData);
 
     res.json(responseData);
   } catch (error) {
@@ -352,33 +371,35 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'listId and listProductId are required' });
     }
 
-    // Verify the list belongs to the user
-    const list = await prisma.list.findFirst({
+    // Verify the list belongs to the user (with retry for Neon cold starts)
+    const list = await withRetry(() => prisma.list.findFirst({
       where: {
         id: listId,
         customerId: customerId,
       },
-    });
+    }));
 
     if (!list) {
       return res.status(404).json({ error: 'List not found' });
     }
 
-    // Find the list product
-    const listProduct = await prisma.listProduct.findFirst({
+    // Find the list product (with retry)
+    const listProduct = await withRetry(() => prisma.listProduct.findFirst({
       where: {
         id: listProductId,
         listId,
       },
-    });
+    }));
 
     if (!listProduct) {
       console.log('❌ Product not found in list:', { listId, listProductId });
       return res.status(404).json({ error: 'Product not found in list' });
     }
 
-    // Toggle the purchased status
-    const updatedProduct = await prisma.listProduct.update({
+    console.log('🔄 Current isPurchased state:', listProduct.isPurchased);
+
+    // Toggle the purchased status (with retry)
+    const updatedProduct = await withRetry(() => prisma.listProduct.update({
       where: {
         id: listProduct.id,
       },
@@ -393,10 +414,13 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
           },
         },
       },
-    });
+    }));
+
+    console.log('🔄 New isPurchased state:', updatedProduct.isPurchased);
 
     // Invalidate cache
     await cacheService.invalidateListDetail(listId);
+    console.log('🗑️ Cache invalidated for list:', listId);
 
     console.log('✅ Purchased status toggled:', { 
       listProductId: listProduct.id, 
