@@ -1,4 +1,6 @@
 import express from "express";
+import multer from "multer";
+import path from "path";
 import { filterProducts } from "../controller/filterProducts.js";
 import { addProduct, editProduct, getProductByBarcode, getProductById, searchProducts, deleteProduct } from "../controller/addProduct.js";
 import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
@@ -42,6 +44,32 @@ import { requireActiveSubscription, softSubscriptionCheck } from "../middleware/
 import { image } from "../controller/image.js";
 
 const router = express.Router();
+
+// Configure multer for product image uploads
+const productStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/products');
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'product-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const productUpload = multer({
+  storage: productStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    if (extname && mimetype) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  }
+});
 
 
 router.post("/auth/login", login);
@@ -89,8 +117,8 @@ router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only -
 // Add a new product and associate it with a shop
 router.post('/addProductAtShop',isAuthenticated,isEmployee, addProductAtShop);
 
-// Add an existing product to a shop
-router.post('/addProductAtShopifExistAtProduct',isAuthenticated,isEmployee, addProductAtShopifExistAtProduct);
+// Add an existing product to a shop (with optional image upload)
+router.post('/addProductAtShopifExistAtProduct',isAuthenticated,isEmployee, productUpload.single('image'), addProductAtShopifExistAtProduct);
 
 // Get products at a shop with pagination and search
 router.get('/shop/:shopId/products',isAuthenticated,isEmployee, getProductsAtShop);

@@ -255,13 +255,19 @@ const updateProductPriceAtShop = async (req, res) => {
 
 // Add an existing product to a shop
 const addProductAtShopifExistAtProduct = async (req, res) => {
+  console.log("Request body:", req.body);
+  console.log("Request file:", req.file);
+  
   const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize, offerPrice, offerExpiryDate } = req.body;
  
+  console.log("Extracted values - shopId:", shopId, "id:", id);
   
-  // Validate required fields
-  if (!shopId || !id || price === undefined ||price == ''|| aiel === undefined ||aiel == ''|| casebarcode === undefined ||casebarcode == ''|| packetSize === undefined ||packetSize == ''  || !employeeId) {
+  // Validate required fields - only shopId and id are truly required
+  if (!shopId || !id) {
+    console.log("Validation failed - shopId:", shopId, "id:", id);
     return res.status(400).json({
-      error: "Missing required fields: shopId, id, price, and employeeId are required."
+      error: "Missing required fields: shopId and id are required.",
+      received: { shopId, id }
     });
   }
   
@@ -286,23 +292,29 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
       });
     }
     
-    // Parse numeric values
-    const parsedPrice = parseFloat(price);
+    // Handle image upload - get file path if provided
+    const imageUrl = req.file ? `/uploads/products/${req.file.filename}` : null;
+    
+    // Parse numeric values - handle optional fields
+    const parsedPrice = price ? parseFloat(price) : 0;
     const parsedRrp = rrp ? parseFloat(rrp) : null;
-    const parsedEmployeeId = parseInt(employeeId, 10);
+    const parsedEmployeeId = employeeId ? parseInt(employeeId, 10) : null;
     const parsedOfferPrice = offerPrice ? parseFloat(offerPrice) : null;
     const parsedOfferExpiryDate = offerExpiryDate ? new Date(offerExpiryDate) : null;
     
-    // First, update the product record with caseBarcode, rrp, caseSize, and packetSize if provided
-    if (casebarcode || parsedRrp !== null || caseSize || packetSize) {
+    // First, update the product record with caseBarcode, rrp, caseSize, packetSize, and image if provided
+    const productUpdateData = {
+      ...(casebarcode ? { caseBarcode: casebarcode } : {}),
+      ...(parsedRrp !== null ? { rrp: parsedRrp } : {}),
+      ...(caseSize ? { caseSize: caseSize } : {}),
+      ...(packetSize ? { packetSize: packetSize } : {}),
+      ...(imageUrl ? { img: { url: imageUrl } } : {})
+    };
+    
+    if (Object.keys(productUpdateData).length > 0) {
       await prisma.product.update({
         where: { id },
-        data: {
-          ...(casebarcode ? { caseBarcode: casebarcode } : {}),
-          ...(parsedRrp !== null ? { rrp: parsedRrp } : {}),
-          ...(caseSize ? { caseSize: caseSize } : {}),
-          ...(packetSize ? { packetSize: packetSize } : {})
-        },
+        data: productUpdateData,
       });
     }
     
@@ -322,24 +334,26 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           shopId_productId: { shopId, productId: id },
         },
         data: {
-          price: parsedPrice,
+          ...(price ? { price: parsedPrice } : {}),
           ...(aiel ? { card_aiel_number: aiel } : {}),
           ...(parsedOfferPrice !== null ? { offerPrice: parsedOfferPrice } : {}),
           ...(parsedOfferExpiryDate ? { offerExpiryDate: parsedOfferExpiryDate } : {}),
           updatedAt: new Date(),
-          employeeId: parsedEmployeeId
+          ...(parsedEmployeeId ? { employeeId: parsedEmployeeId } : {})
         },
       });
       
-      // Log the update action
-      await prisma.actionLog.create({
-        data: {
-          employeeId: parsedEmployeeId,
-          shopId,
-          productId: id,
-          actionType: "UPDATE",
-        },
-      });
+      // Log the update action if we have an employee
+      if (parsedEmployeeId) {
+        await prisma.actionLog.create({
+          data: {
+            employeeId: parsedEmployeeId,
+            shopId,
+            productId: id,
+            actionType: "UPDATE",
+          },
+        });
+      }
       
       res.status(200).json({
         success: true,
@@ -353,22 +367,24 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           shopId,
           productId: id,
           price: parsedPrice,
-          employeeId: parsedEmployeeId,
+          ...(parsedEmployeeId ? { employeeId: parsedEmployeeId } : {}),
           ...(aiel ? { card_aiel_number: aiel } : {}),
           ...(parsedOfferPrice !== null ? { offerPrice: parsedOfferPrice } : {}),
           ...(parsedOfferExpiryDate ? { offerExpiryDate: parsedOfferExpiryDate } : {})
         },
       });
       
-      // Log the add action
-      await prisma.actionLog.create({
-        data: {
-          employeeId: parsedEmployeeId,
-          shopId,
-          productId: id,
-          actionType: "ADD",
-        },
-      });
+      // Log the add action if we have an employee
+      if (parsedEmployeeId) {
+        await prisma.actionLog.create({
+          data: {
+            employeeId: parsedEmployeeId,
+            shopId,
+            productId: id,
+            actionType: "ADD",
+          },
+        });
+      }
       
       res.status(201).json({
         success: true,
