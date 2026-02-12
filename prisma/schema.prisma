@@ -230,6 +230,22 @@ model PriceReport {
   reporter          Customer      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
   product           Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
   shop              Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  reviewer          Admin?        @relation(fields: [reviewedBy], references: [id])
+  
+  @@index([reporterId, status])
+  @@index([status, createdAt])
+  @@index([productId, shopId])
+}
+
+enum ReportStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Promotion {
+  id          String    @id @default(cuid())
+  title       String
   description String?
   imageUrl    String
   shopId      String
