@@ -26,25 +26,45 @@ const server = createServer(app);
 // Configure Socket.IO with CORS
 const io = new Server(server, {
   cors: {
-    origin: true,
+    origin: ['https://bigsave.h7tex.com', 'http://localhost:5173', 'http://localhost:3000'],
     credentials: true,
     methods: ['GET', 'POST']
   }
 });
 
-// More permissive CORS setup for mobile app
-app.use(cors({
-  origin: true, // Allow any origin for development (mobile apps)
+// CORS configuration
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, etc)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'https://bigsave.h7tex.com',
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:3000'
+    ];
+    
+    if (allowedOrigins.includes(origin) || origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      callback(null, true);
+    } else {
+      // Allow any origin for mobile apps
+      callback(null, true);
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
-}));
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With'],
+  exposedHeaders: ['Set-Cookie'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
 
-// Add extra header for cookies
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Credentials', 'true');
-  next();
-});
+app.use(cors(corsOptions));
+
+// Handle preflight requests explicitly
+app.options('*', cors(corsOptions));
 
 app.use(cookieParser());
 app.use(express.json());
