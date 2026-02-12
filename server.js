@@ -23,41 +23,22 @@ const server = createServer(app);
   console.log(`📊 Redis Status:`, redisService.getStatus());
 })();
 
-// Configure Socket.IO with CORS
+// Configure Socket.IO with CORS - Allow all origins
 const io = new Server(server, {
   cors: {
-    origin: ['https://bigsave.h7tex.com', 'http://localhost:5173', 'http://localhost:3000'],
+    origin: true,
     credentials: true,
     methods: ['GET', 'POST']
   }
 });
 
-// CORS configuration
+// CORS configuration - Allow all origins
 const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, etc)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'https://bigsave.h7tex.com',
-      'http://localhost:5173',
-      'http://localhost:3000',
-      'http://127.0.0.1:5173',
-      'http://127.0.0.1:3000'
-    ];
-    
-    if (allowedOrigins.includes(origin) || origin.includes('localhost') || origin.includes('127.0.0.1')) {
-      callback(null, true);
-    } else {
-      // Allow any origin for mobile apps
-      callback(null, true);
-    }
-  },
+  origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With'],
   exposedHeaders: ['Set-Cookie'],
-  preflightContinue: false,
   optionsSuccessStatus: 204
 };
 
