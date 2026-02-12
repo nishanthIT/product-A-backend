@@ -109,8 +109,8 @@ model ActionLog {
   actionType String
   timestamp  DateTime @default(now())
   employee   Empolyee @relation(fields: [employeeId], references: [id])
-  product    Product  @relation(fields: [productId], references: [id])
-  shop       Shop     @relation(fields: [shopId], references: [id])
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
 
   @@index([employeeId, timestamp])
   @@index([shopId, timestamp])
@@ -228,24 +228,8 @@ model PriceReport {
   reviewedBy        Int?
   
   reporter          Customer      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
-  product           Product       @relation(fields: [productId], references: [id])
-  shop              Shop          @relation(fields: [shopId], references: [id])
-  reviewer          Admin?        @relation(fields: [reviewedBy], references: [id])
-  
-  @@index([reporterId, status])
-  @@index([status, createdAt])
-  @@index([productId, shopId])
-}
-
-enum ReportStatus {
-  PENDING
-  APPROVED
-  REJECTED
-}
-
-model Promotion {
-  id          String    @id @default(cuid())
-  title       String
+  product           Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop              Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
   description String?
   imageUrl    String
   shopId      String
@@ -253,7 +237,7 @@ model Promotion {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   
-  shop        Shop      @relation(fields: [shopId], references: [id])
+  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
   products    Product[]
   
   @@index([shopId, isActive])
