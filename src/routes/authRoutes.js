@@ -58,7 +58,7 @@ const productStorage = multer.diskStorage({
 
 const productUpload = multer({
   storage: productStorage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max - allow larger images
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max - allow larger images
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|webp|heic|heif|bmp|tiff/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -118,7 +118,22 @@ router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only -
 router.post('/addProductAtShop',isAuthenticated,isEmployee, addProductAtShop);
 
 // Add an existing product to a shop (with optional image upload)
-router.post('/addProductAtShopifExistAtProduct',isAuthenticated,isEmployee, productUpload.single('image'), addProductAtShopifExistAtProduct);
+router.post('/addProductAtShopifExistAtProduct', isAuthenticated, isEmployee, (req, res, next) => {
+  productUpload.single('image')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      // A Multer error occurred when uploading
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File is too large. Maximum size is 100MB.' });
+      }
+      return res.status(400).json({ error: `Upload error: ${err.message}` });
+    } else if (err) {
+      // An unknown error occurred when uploading
+      return res.status(400).json({ error: err.message });
+    }
+    // Everything went fine, continue to the next middleware
+    next();
+  });
+}, addProductAtShopifExistAtProduct);
 
 // Get products at a shop with pagination and search
 router.get('/shop/:shopId/products',isAuthenticated,isEmployee, getProductsAtShop);
