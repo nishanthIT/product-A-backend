@@ -8,7 +8,7 @@ import fs from 'fs';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Configure multer for image uploads
+// Configure multer for image and PDF uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadPath = 'uploads/promotions';
@@ -19,27 +19,48 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'promotion-' + uniqueSuffix + path.extname(file.originalname));
+    const prefix = file.fieldname === 'pdf' ? 'promotion-pdf-' : 'promotion-';
+    cb(null, prefix + uniqueSuffix + path.extname(file.originalname));
   }
 });
 
 const upload = multer({
   storage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fileSize: 20 * 1024 * 1024, // 20MB limit for PDFs
   },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-
-    if (mimetype && extname) {
-      return cb(null, true);
+    // Allow images and PDFs
+    const imageTypes = /jpeg|jpg|png|gif/;
+    const pdfType = /pdf/;
+    const extname = path.extname(file.originalname).toLowerCase();
+    
+    if (file.fieldname === 'pdf') {
+      // PDF field - only allow PDFs
+      if (pdfType.test(extname) || file.mimetype === 'application/pdf') {
+        return cb(null, true);
+      } else {
+        cb(new Error('Only PDF files are allowed for this field'));
+      }
     } else {
-      cb(new Error('Only image files are allowed'));
+      // Image fields - only allow images
+      const isImageExt = imageTypes.test(extname.replace('.', ''));
+      const isImageMime = file.mimetype.startsWith('image/');
+      if (isImageExt || isImageMime) {
+        return cb(null, true);
+      } else {
+        cb(new Error('Only image files are allowed'));
+      }
     }
   }
 });
+
+// Multi-file upload configuration
+const uploadFields = upload.fields([
+  { name: 'image', maxCount: 1 },      // Single primary image (legacy support)
+  { name: 'images', maxCount: 10 },    // Multiple images for carousel
+  { name: 'pdf', maxCount: 1 }         // Single PDF document
+]);
 
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
@@ -136,6 +157,17 @@ router.get('/', async (req, res) => {
       })
     );
 
+    // Debug: Log first promotion to verify fields
+    if (enrichedPromotions.length > 0) {
+      console.log('First promotion fields:', {
+        id: enrichedPromotions[0].id,
+        title: enrichedPromotions[0].title,
+        imageUrl: enrichedPromotions[0].imageUrl,
+        imageUrls: enrichedPromotions[0].imageUrls,
+        pdfUrl: enrichedPromotions[0].pdfUrl
+      });
+    }
+
     res.json({ promotions: enrichedPromotions });
   } catch (error) {
     console.error('Error fetching promotions:', error);
@@ -182,13 +214,31 @@ router.get('/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/promotions - Create new promotion
-router.post('/', authenticateToken, requireAdmin, upload.single('image'), async (req, res) => {
-  try {
-    const { title, description, shopId, productIds } = req.body;
+// Helper middleware to handle multer errors
+const handleUpload = (req, res, next) => {
+  uploadFields(req, res, (err) => {
+    if (err) {
+      console.error('Multer error:', err);
+      return res.status(400).json({ error: err.message || 'File upload error' });
+    }
+    next();
+  });
+};
 
-    if (!title || !shopId || !req.file) {
-      return res.status(400).json({ error: 'Title, shop, and image are required' });
+// POST /api/promotions - Create new promotion
+router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res) => {
+  try {
+    console.log('Creating promotion - Body:', req.body);
+    console.log('Creating promotion - Files:', req.files);
+    
+    const { title, description, shopId, productIds } = req.body;
+    const files = req.files;
+
+    // Check for at least one image (either single 'image' or multiple 'images')
+    const hasImage = files?.image?.length > 0 || files?.images?.length > 0;
+    
+    if (!title || !shopId || !hasImage) {
+      return res.status(400).json({ error: 'Title, shop, and at least one image are required' });
     }
 
     let parsedProductIds = [];
@@ -222,14 +272,39 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
       return res.status(404).json({ error: 'One or more products not found' });
     }
 
-    // Create promotion
-    const imageUrl = `${req.protocol}://${req.get('host')}/uploads/promotions/${req.file.filename}`;
+    // Build URLs for uploaded files
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    
+    // Primary image URL (from 'image' field or first of 'images')
+    let imageUrl;
+    let imageUrls = [];
+    
+    if (files?.image?.length > 0) {
+      imageUrl = `${baseUrl}/uploads/promotions/${files.image[0].filename}`;
+    }
+    
+    if (files?.images?.length > 0) {
+      imageUrls = files.images.map(f => `${baseUrl}/uploads/promotions/${f.filename}`);
+      // If no single image provided, use first of multiple as primary
+      if (!imageUrl) {
+        imageUrl = imageUrls[0];
+      }
+    }
+    
+    // PDF URL if provided
+    let pdfUrl = null;
+    if (files?.pdf?.length > 0) {
+      pdfUrl = `${baseUrl}/uploads/promotions/${files.pdf[0].filename}`;
+    }
 
+    // Create promotion
     const promotion = await prisma.promotion.create({
       data: {
         title,
         description,
         imageUrl,
+        imageUrls,
+        pdfUrl,
         shopId,
         isActive: true,
         products: {
@@ -260,7 +335,12 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
     res.status(201).json({ promotion });
   } catch (error) {
     console.error('Error creating promotion:', error);
-    res.status(500).json({ error: 'Failed to create promotion' });
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      error: 'Failed to create promotion',
+      details: error.message 
+    });
   }
 });
 

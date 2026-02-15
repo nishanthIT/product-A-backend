@@ -6,6 +6,8 @@ import priceReportsRoutes from "./src/routes/priceReports.js";
 import promotionsRoutes from "./src/routes/promotions.js";
 import adminRoutes from "./src/routes/adminRoutes.js";
 import listRoutes from "./src/routes/listRoutes.js";
+import advertisementsRoutes from "./src/routes/advertisements.js";
+import newsRoutes from "./src/routes/news.js";
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
@@ -71,6 +73,8 @@ app.use("/api/price-reports", priceReportsRoutes);
 app.use("/api/promotions", promotionsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/lists", listRoutes);
+app.use("/api/advertisements", advertisementsRoutes);
+app.use("/api/news", newsRoutes);
 
 // Health check endpoint with Redis status
 app.get('/api/health', (req, res) => {

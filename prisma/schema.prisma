@@ -248,6 +248,8 @@ model Promotion {
   title       String
   description String?
   imageUrl    String
+  imageUrls   String[]  @default([])  // Multiple images for carousel
+  pdfUrl      String?   // PDF document URL
   shopId      String
   isActive    Boolean   @default(true)
   createdAt   DateTime  @default(now())
@@ -258,4 +260,33 @@ model Promotion {
   
   @@index([shopId, isActive])
   @@index([isActive, createdAt])
+}
+
+// Advertisement model for home page carousel
+model Advertisement {
+  id          String    @id @default(cuid())
+  title       String
+  imageUrl    String
+  linkUrl     String?   // Optional link when clicked
+  isActive    Boolean   @default(true)
+  sortOrder   Int       @default(0)  // For ordering carousel
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([isActive, sortOrder])
+}
+
+// News model for home page news feed
+model News {
+  id          String    @id @default(cuid())
+  title       String
+  description String
+  imageUrl    String?   // Optional thumbnail image
+  sourceUrl   String    // Link to full article/source
+  isActive    Boolean   @default(true)
+  publishedAt DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  @@index([isActive, publishedAt])
 }
