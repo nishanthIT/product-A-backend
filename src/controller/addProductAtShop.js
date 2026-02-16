@@ -1,8 +1,9 @@
-
-
-
-
 import { PrismaClient } from "@prisma/client";
+import fs from 'fs';
+import path from 'path';
+import { Jimp } from 'jimp';
+import { removeBackground } from "@imgly/background-removal-node";
+
 const prisma = new PrismaClient();
 
 // Levenshtein distance function for fuzzy matching (typo tolerance)
@@ -292,8 +293,50 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
       });
     }
     
-    // Handle image upload - get file path if provided
-    const imageUrl = req.file ? `/uploads/products/${req.file.filename}` : null;
+    // Handle image upload with background removal
+    let imgPath = null;
+    if (req.file) {
+      const outputFilename = `${product.barcode}.png`;
+      const outputPath = path.join('./images', outputFilename);
+
+      // Ensure images directory exists
+      if (!fs.existsSync('./images')) {
+        fs.mkdirSync('./images', { recursive: true });
+      }
+
+      try {
+        // Use @imgly/background-removal-node
+        const blob = await removeBackground(req.file.path, {
+          publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
+          debug: true,
+          output: {
+            format: 'image/png',
+            quality: 0.8,
+            type: 'foreground'
+          }
+        });
+
+        // Save processed image
+        fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
+        fs.unlinkSync(req.file.path);
+        imgPath = `/api/image/${product.barcode}`;
+        console.log("Background removal successful for:", product.barcode);
+
+      } catch (bgError) {
+        console.error("Background removal failed:", bgError);
+        
+        // Jimp fallback
+        try {
+          const image = await Jimp.read(req.file.path);
+          await image.writeAsync(outputPath);
+          fs.unlinkSync(req.file.path);
+          imgPath = `/api/image/${product.barcode}`;
+        } catch (jimpError) {
+          console.error("Fallback failed:", jimpError);
+          // Continue without image if both fail
+        }
+      }
+    }
     
     // Parse numeric values - handle optional fields
     const parsedPrice = price ? parseFloat(price) : 0;
@@ -308,7 +351,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
       ...(parsedRrp !== null ? { rrp: parsedRrp } : {}),
       ...(caseSize ? { caseSize: caseSize } : {}),
       ...(packetSize ? { packetSize: packetSize } : {}),
-      ...(imageUrl ? { img: { url: imageUrl } } : {})
+      ...(imgPath ? { img: imgPath } : {})
     };
     
     if (Object.keys(productUpdateData).length > 0) {
