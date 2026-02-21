@@ -93,6 +93,11 @@ const image = async (req, res) => {
     return res.status(404).send('Image not found');
   }
   
+  // Set cache-control headers to prevent caching (so updated images are shown immediately)
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  
   // Send the file with error handling
   res.sendFile(imagePath, (err) => {
     if (err) {
