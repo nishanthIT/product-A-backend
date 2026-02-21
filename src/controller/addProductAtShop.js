@@ -142,10 +142,10 @@ const addProductAtShop = async (req, res) => {
       }
 
       try {
-        // Use @imgly/background-removal-node
+        // Try background removal first
         const blob = await removeBackground(req.file.path, {
           publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
-          debug: true,
+          debug: false,
           output: {
             format: 'image/png',
             quality: 0.8,
@@ -160,7 +160,7 @@ const addProductAtShop = async (req, res) => {
         console.log("Background removal successful for new product:", barcode);
 
       } catch (bgError) {
-        console.error("Background removal failed:", bgError);
+        console.error("Background removal failed, trying Jimp:", bgError.message);
         
         // Jimp fallback
         try {
@@ -168,11 +168,22 @@ const addProductAtShop = async (req, res) => {
           await image.writeAsync(outputPath);
           try { fs.unlinkSync(req.file.path); } catch (e) {}
           imgPath = `/api/image/${barcode}`;
+          console.log("Jimp fallback successful for:", barcode);
         } catch (jimpError) {
-          console.error("Fallback failed:", jimpError);
-          // Clean up and continue without image if both fail
-          if (req.file && fs.existsSync(req.file.path)) {
+          console.error("Jimp fallback failed, copying raw file:", jimpError.message);
+          
+          // Last resort: just copy the file as-is
+          try {
+            fs.copyFileSync(req.file.path, outputPath);
             try { fs.unlinkSync(req.file.path); } catch (e) {}
+            imgPath = `/api/image/${barcode}`;
+            console.log("Raw file copy successful for:", barcode);
+          } catch (copyError) {
+            console.error("All image processing failed:", copyError.message);
+            // Clean up and continue without image
+            if (req.file && fs.existsSync(req.file.path)) {
+              try { fs.unlinkSync(req.file.path); } catch (e) {}
+            }
           }
         }
       }

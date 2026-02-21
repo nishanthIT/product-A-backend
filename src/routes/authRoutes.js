@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import path from "path";
+import fs from 'fs';
 import { filterProducts } from "../controller/filterProducts.js";
 import { addProduct, editProduct, getProductByBarcode, getProductById, searchProducts, deleteProduct } from "../controller/addProduct.js";
 import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
@@ -45,10 +46,22 @@ import { image } from "../controller/image.js";
 
 const router = express.Router();
 
+// Ensure upload directories exist
+const uploadDirs = ['uploads', 'uploads/products', 'images'];
+uploadDirs.forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+});
+
 // Configure multer for product image uploads
 const productStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/products');
+    const dir = 'uploads/products';
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    cb(null, dir);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
