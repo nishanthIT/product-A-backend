@@ -8,6 +8,7 @@ import adminRoutes from "./src/routes/adminRoutes.js";
 import listRoutes from "./src/routes/listRoutes.js";
 import advertisementsRoutes from "./src/routes/advertisements.js";
 import newsRoutes from "./src/routes/news.js";
+import categoryRoutes from "./src/routes/categoryRoutes.js";
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
@@ -75,6 +76,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/lists", listRoutes);
 app.use("/api/advertisements", advertisementsRoutes);
 app.use("/api/news", newsRoutes);
+app.use("/api/categories", categoryRoutes);
 
 // Health check endpoint with Redis status
 app.get('/api/health', (req, res) => {

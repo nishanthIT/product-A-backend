@@ -64,11 +64,16 @@ const addProductAtShop = async (req, res) => {
     price,
     employeeId,
     aiel,
-    rrp
+    rrp,
+    category
   } = req.body;
 
   // Check for required fields
   if (!shopId || !title || !employeeId) {
+    // Clean up uploaded file if validation fails
+    if (req.file) {
+      fs.unlinkSync(req.file.path);
+    }
     return res.status(400).json({ 
       error: "Missing required fields: shopId, title, and employeeId are required." 
     });
@@ -78,16 +83,18 @@ const addProductAtShop = async (req, res) => {
     // Check if shop exists
     const shopExists = await prisma.shop.findUnique({ where: { id: shopId } });
     if (!shopExists) {
+      if (req.file) fs.unlinkSync(req.file.path);
       return res.status(404).json({ error: "Shop not found." });
     }
 
     // Check if product with case barcode already exists
     if (casebarcode) {
       const existingProduct = await prisma.product.findFirst({
-        where: { caseBarcode:casebarcode },
+        where: { caseBarcode: casebarcode },
       });
 
       if (existingProduct) {
+        if (req.file) fs.unlinkSync(req.file.path);
         return res.status(409).json({ error: "Product with this case barcode already exists." });
       }
     }
@@ -99,6 +106,7 @@ const addProductAtShop = async (req, res) => {
       });
 
       if (existingProductWithBarcode) {
+        if (req.file) fs.unlinkSync(req.file.path);
         return res.status(409).json({ error: "Product with this barcode already exists." });
       }
     }
@@ -108,6 +116,57 @@ const addProductAtShop = async (req, res) => {
     const finalPacketSize = packetSize || "1";
     const finalRrp = rrp || price;
 
+    // Handle image upload with background removal
+    let imgPath = null;
+    if (req.file && barcode) {
+      const outputFilename = `${barcode}.png`;
+      const outputPath = path.join('./images', outputFilename);
+
+      // Ensure images directory exists
+      if (!fs.existsSync('./images')) {
+        fs.mkdirSync('./images', { recursive: true });
+      }
+
+      try {
+        // Use @imgly/background-removal-node
+        const blob = await removeBackground(req.file.path, {
+          publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
+          debug: true,
+          output: {
+            format: 'image/png',
+            quality: 0.8,
+            type: 'foreground'
+          }
+        });
+
+        // Save processed image
+        fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
+        fs.unlinkSync(req.file.path);
+        imgPath = `/api/image/${barcode}`;
+        console.log("Background removal successful for new product:", barcode);
+
+      } catch (bgError) {
+        console.error("Background removal failed:", bgError);
+        
+        // Jimp fallback
+        try {
+          const image = await Jimp.read(req.file.path);
+          await image.writeAsync(outputPath);
+          fs.unlinkSync(req.file.path);
+          imgPath = `/api/image/${barcode}`;
+        } catch (jimpError) {
+          console.error("Fallback failed:", jimpError);
+          // Clean up and continue without image if both fail
+          if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+          }
+        }
+      }
+    } else if (req.file) {
+      // No barcode provided but image uploaded - clean up
+      fs.unlinkSync(req.file.path);
+    }
+
     // Create the product in the database
     const newProduct = await prisma.product.create({
       data: {
@@ -116,10 +175,11 @@ const addProductAtShop = async (req, res) => {
         caseSize: String(finalCaseSize),
         packetSize: String(finalPacketSize),
         retailSize: retailSize ? String(retailSize) : null,
-        img: null,
+        img: imgPath,
         barcode: barcode || null,
         caseBarcode: casebarcode || null,
         rrp: finalRrp ? parseFloat(finalRrp) : null,
+        category: category || null,
       },
     });
 
@@ -150,6 +210,10 @@ const addProductAtShop = async (req, res) => {
     });
   } catch (error) {
     console.error("Error adding product at shop:", error);
+    // Clean up uploaded file on error
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
     res
       .status(500)
       .json({ error: "An error occurred while adding the product." });
@@ -259,7 +323,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
   console.log("Request body:", req.body);
   console.log("Request file:", req.file);
   
-  const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize, offerPrice, offerExpiryDate } = req.body;
+  const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize, offerPrice, offerExpiryDate, category } = req.body;
  
   console.log("Extracted values - shopId:", shopId, "id:", id);
   
@@ -345,12 +409,13 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
     const parsedOfferPrice = offerPrice ? parseFloat(offerPrice) : null;
     const parsedOfferExpiryDate = offerExpiryDate ? new Date(offerExpiryDate) : null;
     
-    // First, update the product record with caseBarcode, rrp, caseSize, packetSize, and image if provided
+    // First, update the product record with caseBarcode, rrp, caseSize, packetSize, category, and image if provided
     const productUpdateData = {
       ...(casebarcode ? { caseBarcode: casebarcode } : {}),
       ...(parsedRrp !== null ? { rrp: parsedRrp } : {}),
       ...(caseSize ? { caseSize: caseSize } : {}),
       ...(packetSize ? { packetSize: packetSize } : {}),
+      ...(category ? { category: category } : {}),
       ...(imgPath ? { img: imgPath } : {})
     };
     

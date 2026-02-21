@@ -114,8 +114,20 @@ router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only -
 // router.put("/updateProductPriceAtShop/:shopId", updateProductPriceAtShop);
 // router.get("/productAtShop/:shopId",getProductAtShop);
 
-// Add a new product and associate it with a shop
-router.post('/addProductAtShop',isAuthenticated,isEmployee, addProductAtShop);
+// Add a new product and associate it with a shop (with optional image upload)
+router.post('/addProductAtShop', isAuthenticated, isEmployee, (req, res, next) => {
+  productUpload.single('image')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File is too large. Maximum size is 100MB.' });
+      }
+      return res.status(400).json({ error: `Upload error: ${err.message}` });
+    } else if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}, addProductAtShop);
 
 // Add an existing product to a shop (with optional image upload)
 router.post('/addProductAtShopifExistAtProduct', isAuthenticated, isEmployee, (req, res, next) => {

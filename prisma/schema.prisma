@@ -8,50 +8,50 @@ datasource db {
 }
 
 model Admin {
-  id            Int           @id @default(autoincrement())
-  name          String?
-  email         String
-  password      String
-  userType      UserType      @default(ADMIN)
-  resetToken    String?
+  id               Int           @id @default(autoincrement())
+  email            String
+  password         String
+  userType         UserType      @default(ADMIN)
+  name             String?
+  resetToken       String?
   resetTokenExpiry DateTime?
-  reviewedReports PriceReport[]
+  reviewedReports  PriceReport[]
 }
 
 model Customer {
-  id                Int             @id @default(autoincrement())
-  name              String
-  mobile            String          @unique
-  email             String          @unique
-  password          String
-  userType          UserType        @default(CUSTOMER)
-  earnings          Decimal         @default(0)
-  subscriptionStatus String         @default("free_trial")
-  trialStartDate    DateTime?       @default(now())
-  trialEndDate      DateTime?
-  points            Decimal         @default(0)
-  resetToken        String?
-  resetTokenExpiry  DateTime?
-  lists             List[]
-  productsManaged   ProductAtShop[]
-  priceReports      PriceReport[]
+  id                 Int             @id @default(autoincrement())
+  name               String
+  mobile             String          @unique
+  email              String          @unique
+  password           String
+  userType           UserType        @default(CUSTOMER)
+  earnings           Decimal         @default(0)
+  subscriptionStatus String          @default("free_trial")
+  trialEndDate       DateTime?
+  trialStartDate     DateTime?       @default(now())
+  points             Decimal         @default(0)
+  resetToken         String?
+  resetTokenExpiry   DateTime?
+  lists              List[]
+  priceReports       PriceReport[]
+  productsManaged    ProductAtShop[]
 }
 
 model Product {
-  id          String          @id @default(cuid())
-  title       String
-  productUrl  String?
-  caseSize    String?
-  packetSize  String?
-  barcode     String?         @unique
-  img         Json?
-  retailSize  String?
-  caseBarcode String?
-  rrp         Decimal?
-  actionLog   ActionLog[]
-  shops       ProductAtShop[]
+  id           String          @id @default(cuid())
+  title        String
+  productUrl   String?
+  caseSize     String?
+  packetSize   String?
+  barcode      String?         @unique
+  img          Json?
+  retailSize   String?
+  caseBarcode  String?
+  rrp          Decimal?
+  actionLog    ActionLog[]
   priceReports PriceReport[]
-  promotions  Promotion[]
+  shops        ProductAtShop[]
+  promotions   Promotion[]     @relation("ProductToPromotion")
 }
 
 model Shop {
@@ -60,8 +60,8 @@ model Shop {
   address      String
   mobile       String
   actionLog    ActionLog[]
-  products     ProductAtShop[]
   priceReports PriceReport[]
+  products     ProductAtShop[]
   promotions   Promotion[]
 }
 
@@ -76,8 +76,8 @@ model ProductAtShop {
   createdAt        DateTime?     @default(now())
   listId           String?
   card_aiel_number String?
-  offerPrice       Decimal?
   offerExpiryDate  DateTime?
+  offerPrice       Decimal?
   lists            ListProduct[]
   employee         Empolyee?     @relation(fields: [employeeId], references: [id])
   product          Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -89,16 +89,16 @@ model ProductAtShop {
 }
 
 model Empolyee {
-  id           Int             @id @default(autoincrement())
-  name         String
-  phoneNo      String          @unique
-  email        String          @unique
-  password     String
-  userType     UserType        @default(EMPLOYEE)
-  resetToken   String?
+  id               Int             @id @default(autoincrement())
+  name             String
+  phoneNo          String          @unique
+  email            String          @unique
+  password         String
+  userType         UserType        @default(EMPLOYEE)
+  resetToken       String?
   resetTokenExpiry DateTime?
-  actionLog    ActionLog[]
-  productAdded ProductAtShop[]
+  actionLog        ActionLog[]
+  productAdded     ProductAtShop[]
 }
 
 model ActionLog {
@@ -136,54 +136,46 @@ model ListProduct {
   productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
 }
 
-enum UserType {
-  ADMIN
-  CUSTOMER
-  EMPLOYEE
-}
-
 model Chat {
-  id           String            @id @default(cuid())
-  name         String?
-  type         ChatType          @default(PERSONAL)
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
+  id            String            @id @default(cuid())
+  name          String?
+  type          ChatType          @default(PERSONAL)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
   lastMessageAt DateTime?
-  messages     Message[]
-  participants ChatParticipant[]
+  participants  ChatParticipant[]
+  messages      Message[]
 }
 
 model ChatParticipant {
-  id        String   @id @default(cuid())
-  chatId    String
-  userId    Int
-  userType  UserType
-  joinedAt  DateTime @default(now())
-  isAdmin   Boolean  @default(false)
-  
-  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
-  
+  id       String   @id @default(cuid())
+  chatId   String
+  userId   Int
+  userType UserType
+  joinedAt DateTime @default(now())
+  isAdmin  Boolean  @default(false)
+  chat     Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
   @@unique([chatId, userId, userType])
   @@index([userId, userType])
 }
 
 model Message {
-  id            String        @id @default(cuid())
-  content       String
-  chatId        String
-  senderId      Int
-  senderType    UserType
-  messageType   MessageType   @default(TEXT)
-  attachmentUrl String?
+  id             String        @id @default(cuid())
+  content        String
+  chatId         String
+  senderId       Int
+  senderType     UserType
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
   attachmentName String?
   attachmentSize Int?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  deletedAt     DateTime?
-  
-  chat          Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
-  readReceipts  MessageRead[]
-  
+  attachmentUrl  String?
+  deletedAt      DateTime?
+  messageType    MessageType   @default(TEXT)
+  chat           Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  readReceipts   MessageRead[]
+
   @@index([chatId, createdAt])
   @@index([senderId, senderType])
 }
@@ -194,11 +186,85 @@ model MessageRead {
   userId    Int
   userType  UserType
   readAt    DateTime @default(now())
-  
   message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  
+
   @@unique([messageId, userId, userType])
   @@index([userId, userType])
+}
+
+model PriceReport {
+  id            String       @id @default(cuid())
+  reporterId    Int
+  productId     String
+  shopId        String
+  currentPrice  Decimal
+  reportedPrice Decimal
+  status        ReportStatus @default(PENDING)
+  adminNotes    String?
+  pointsAwarded Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  reviewedAt    DateTime?
+  reviewedBy    Int?
+  product       Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  reporter      Customer     @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  reviewer      Admin?       @relation(fields: [reviewedBy], references: [id])
+  shop          Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([reporterId, status])
+  @@index([status, createdAt])
+  @@index([productId, shopId])
+}
+
+model Promotion {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  imageUrl    String
+  shopId      String
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  imageUrls   String[]  @default([])
+  pdfUrl      String?
+  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  products    Product[] @relation("ProductToPromotion")
+
+  @@index([shopId, isActive])
+  @@index([isActive, createdAt])
+}
+
+model Advertisement {
+  id        String   @id @default(cuid())
+  title     String
+  imageUrl  String
+  linkUrl   String?
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
+}
+
+model News {
+  id          String   @id @default(cuid())
+  title       String
+  description String
+  imageUrl    String?
+  sourceUrl   String
+  isActive    Boolean  @default(true)
+  publishedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, publishedAt])
+}
+
+enum UserType {
+  ADMIN
+  CUSTOMER
+  EMPLOYEE
 }
 
 enum ChatType {
@@ -212,81 +278,8 @@ enum MessageType {
   DOCUMENT
 }
 
-model PriceReport {
-  id                String        @id @default(cuid())
-  reporterId        Int
-  productId         String
-  shopId            String
-  currentPrice      Decimal
-  reportedPrice     Decimal
-  status            ReportStatus  @default(PENDING)
-  adminNotes        String?
-  pointsAwarded     Boolean       @default(false)
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
-  reviewedAt        DateTime?
-  reviewedBy        Int?
-  
-  reporter          Customer      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
-  product           Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
-  shop              Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  reviewer          Admin?        @relation(fields: [reviewedBy], references: [id])
-  
-  @@index([reporterId, status])
-  @@index([status, createdAt])
-  @@index([productId, shopId])
-}
-
 enum ReportStatus {
   PENDING
   APPROVED
   REJECTED
-}
-
-model Promotion {
-  id          String    @id @default(cuid())
-  title       String
-  description String?
-  imageUrl    String
-  imageUrls   String[]  @default([])  // Multiple images for carousel
-  pdfUrl      String?   // PDF document URL
-  shopId      String
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  
-  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  products    Product[]
-  
-  @@index([shopId, isActive])
-  @@index([isActive, createdAt])
-}
-
-// Advertisement model for home page carousel
-model Advertisement {
-  id          String    @id @default(cuid())
-  title       String
-  imageUrl    String
-  linkUrl     String?   // Optional link when clicked
-  isActive    Boolean   @default(true)
-  sortOrder   Int       @default(0)  // For ordering carousel
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  
-  @@index([isActive, sortOrder])
-}
-
-// News model for home page news feed
-model News {
-  id          String    @id @default(cuid())
-  title       String
-  description String
-  imageUrl    String?   // Optional thumbnail image
-  sourceUrl   String    // Link to full article/source
-  isActive    Boolean   @default(true)
-  publishedAt DateTime  @default(now())
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  
-  @@index([isActive, publishedAt])
 }

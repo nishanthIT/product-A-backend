@@ -104,7 +104,7 @@ const addProduct = async (req, res) => {
     if (err) return res.status(400).json({ error: err.message });
 
     try {
-      const { title, rrp, caseSize, packetSize, retailSize, barcode, caseBarcode } = req.body;
+      const { title, rrp, caseSize, packetSize, retailSize, barcode, caseBarcode, category } = req.body;
       
       if (!title || !barcode) {
         if (req.file) fs.unlinkSync(req.file.path);
@@ -158,7 +158,7 @@ const addProduct = async (req, res) => {
         }
       }
 
-      // Create product
+      // Create product with category
       const newProduct = await prisma.product.create({
         data: {
           title,
@@ -169,6 +169,7 @@ const addProduct = async (req, res) => {
           img: imgPath,
           barcode: String(barcode),
           caseBarcode: caseBarcode ? String(caseBarcode) : null,
+          category: category || null,
         },
       });
 
@@ -323,7 +324,7 @@ const editProduct = async (req, res) => {
 
     try {
       const { id } = req.params;
-      const { title, barcode, rrp, caseSize, packetSize, retailSize,caseBarcode } = req.body;
+      const { title, barcode, rrp, caseSize, packetSize, retailSize, caseBarcode, category } = req.body;
 
       if (!id) return res.status(400).json({ error: "Product ID is required." });
 
@@ -356,6 +357,7 @@ const editProduct = async (req, res) => {
       if (rrp !== undefined) dataToUpdate.rrp = handleNumericField(rrp, null);
       if (barcode !== undefined) dataToUpdate.barcode = String(barcode);
       if (caseBarcode !== undefined) dataToUpdate.caseBarcode = String(caseBarcode);
+      if (category !== undefined) dataToUpdate.category = category || null;
       if (req.file) {
         const outputFilename = `${targetBarcode}.png`;
         const outputPath = path.join('./images', outputFilename);
