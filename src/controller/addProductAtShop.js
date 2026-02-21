@@ -53,6 +53,9 @@ const fuzzyMatchWord = (searchWord, text, maxDistance = 2) => {
 
 // Add a product at a shop
 const addProductAtShop = async (req, res) => {
+  console.log("addProductAtShop called with body:", req.body);
+  console.log("addProductAtShop file:", req.file);
+  
   const {
     shopId,
     title,
@@ -72,18 +75,29 @@ const addProductAtShop = async (req, res) => {
   if (!shopId || !title || !employeeId) {
     // Clean up uploaded file if validation fails
     if (req.file) {
-      fs.unlinkSync(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch (e) { console.error("Failed to cleanup file:", e); }
     }
     return res.status(400).json({ 
       error: "Missing required fields: shopId, title, and employeeId are required." 
     });
   }
 
+  // Parse and validate price
+  const parsedPrice = price ? parseFloat(price) : 0;
+  const parsedEmployeeId = parseInt(employeeId, 10);
+  
+  if (isNaN(parsedEmployeeId)) {
+    if (req.file) {
+      try { fs.unlinkSync(req.file.path); } catch (e) { console.error("Failed to cleanup file:", e); }
+    }
+    return res.status(400).json({ error: "Invalid employeeId" });
+  }
+
   try {
     // Check if shop exists
     const shopExists = await prisma.shop.findUnique({ where: { id: shopId } });
     if (!shopExists) {
-      if (req.file) fs.unlinkSync(req.file.path);
+      if (req.file) try { fs.unlinkSync(req.file.path); } catch (e) {}
       return res.status(404).json({ error: "Shop not found." });
     }
 
@@ -94,7 +108,7 @@ const addProductAtShop = async (req, res) => {
       });
 
       if (existingProduct) {
-        if (req.file) fs.unlinkSync(req.file.path);
+        if (req.file) try { fs.unlinkSync(req.file.path); } catch (e) {}
         return res.status(409).json({ error: "Product with this case barcode already exists." });
       }
     }
@@ -106,7 +120,7 @@ const addProductAtShop = async (req, res) => {
       });
 
       if (existingProductWithBarcode) {
-        if (req.file) fs.unlinkSync(req.file.path);
+        if (req.file) try { fs.unlinkSync(req.file.path); } catch (e) {}
         return res.status(409).json({ error: "Product with this barcode already exists." });
       }
     }
@@ -141,7 +155,7 @@ const addProductAtShop = async (req, res) => {
 
         // Save processed image
         fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
-        fs.unlinkSync(req.file.path);
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
         imgPath = `/api/image/${barcode}`;
         console.log("Background removal successful for new product:", barcode);
 
@@ -152,19 +166,19 @@ const addProductAtShop = async (req, res) => {
         try {
           const image = await Jimp.read(req.file.path);
           await image.writeAsync(outputPath);
-          fs.unlinkSync(req.file.path);
+          try { fs.unlinkSync(req.file.path); } catch (e) {}
           imgPath = `/api/image/${barcode}`;
         } catch (jimpError) {
           console.error("Fallback failed:", jimpError);
           // Clean up and continue without image if both fail
           if (req.file && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
+            try { fs.unlinkSync(req.file.path); } catch (e) {}
           }
         }
       }
     } else if (req.file) {
       // No barcode provided but image uploaded - clean up
-      fs.unlinkSync(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
 
     // Create the product in the database
@@ -188,8 +202,8 @@ const addProductAtShop = async (req, res) => {
       data: {
         shopId,
         productId: newProduct.id,
-        price: parseFloat(price),
-        employeeId: parseInt(employeeId, 10),
+        price: parsedPrice,
+        employeeId: parsedEmployeeId,
         card_aiel_number: aiel || null,
       },
     });
@@ -197,7 +211,7 @@ const addProductAtShop = async (req, res) => {
     // Log the action
     const actionLog = await prisma.actionLog.create({
       data: {
-        employeeId: parseInt(employeeId, 10),
+        employeeId: parsedEmployeeId,
         shopId,
         productId: newProduct.id,
         actionType: "ADD",
@@ -212,7 +226,7 @@ const addProductAtShop = async (req, res) => {
     console.error("Error adding product at shop:", error);
     // Clean up uploaded file on error
     if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
     res
       .status(500)
