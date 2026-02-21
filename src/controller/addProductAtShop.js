@@ -130,7 +130,7 @@ const addProductAtShop = async (req, res) => {
     const finalPacketSize = packetSize || "1";
     const finalRrp = rrp || price;
 
-    // Handle image upload with background removal
+    // Handle image upload - save directly without background removal for reliability
     let imgPath = null;
     if (req.file && barcode) {
       const outputFilename = `${barcode}.png`;
@@ -142,53 +142,37 @@ const addProductAtShop = async (req, res) => {
       }
 
       try {
-        // Try background removal first
-        const blob = await removeBackground(req.file.path, {
-          publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
-          debug: false,
-          output: {
-            format: 'image/png',
-            quality: 0.8,
-            type: 'foreground'
-          }
-        });
-
-        // Save processed image
-        fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
-        try { fs.unlinkSync(req.file.path); } catch (e) {}
-        imgPath = `/api/image/${barcode}`;
-        console.log("Background removal successful for new product:", barcode);
-
-      } catch (bgError) {
-        console.error("Background removal failed, trying Jimp:", bgError.message);
+        console.log("Processing image for barcode:", barcode);
+        console.log("Source file:", req.file.path);
+        console.log("Destination:", outputPath);
         
-        // Jimp fallback
-        try {
-          const image = await Jimp.read(req.file.path);
-          await image.writeAsync(outputPath);
-          try { fs.unlinkSync(req.file.path); } catch (e) {}
-          imgPath = `/api/image/${barcode}`;
-          console.log("Jimp fallback successful for:", barcode);
-        } catch (jimpError) {
-          console.error("Jimp fallback failed, copying raw file:", jimpError.message);
-          
-          // Last resort: just copy the file as-is
-          try {
-            fs.copyFileSync(req.file.path, outputPath);
-            try { fs.unlinkSync(req.file.path); } catch (e) {}
-            imgPath = `/api/image/${barcode}`;
-            console.log("Raw file copy successful for:", barcode);
-          } catch (copyError) {
-            console.error("All image processing failed:", copyError.message);
-            // Clean up and continue without image
-            if (req.file && fs.existsSync(req.file.path)) {
-              try { fs.unlinkSync(req.file.path); } catch (e) {}
-            }
-          }
+        // Check if source file exists
+        if (!fs.existsSync(req.file.path)) {
+          console.error("Source file not found:", req.file.path);
+          throw new Error("Uploaded file not found");
         }
+
+        // Simply copy the file for reliability
+        fs.copyFileSync(req.file.path, outputPath);
+        imgPath = `/api/image/${barcode}`;
+        console.log("Image saved successfully for:", barcode);
+        
+        // Clean up temp file
+        try { fs.unlinkSync(req.file.path); } catch (e) { 
+          console.log("Could not delete temp file:", e.message); 
+        }
+      } catch (imgError) {
+        console.error("Image processing failed:", imgError.message);
+        // Clean up on error
+        if (req.file && fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch (e) {}
+        }
+        // Continue without image instead of failing
+        imgPath = null;
       }
     } else if (req.file) {
       // No barcode provided but image uploaded - clean up
+      console.log("No barcode provided, cleaning up image");
       try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
 
