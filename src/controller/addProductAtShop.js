@@ -130,7 +130,7 @@ const addProductAtShop = async (req, res) => {
     const finalPacketSize = packetSize || "1";
     const finalRrp = rrp || price;
 
-    // Handle image upload - save directly without background removal for reliability
+    // Handle image upload with background removal
     let imgPath = null;
     if (req.file && barcode) {
       const outputFilename = `${barcode}.png`;
@@ -152,10 +152,30 @@ const addProductAtShop = async (req, res) => {
           throw new Error("Uploaded file not found");
         }
 
-        // Simply copy the file for reliability
-        fs.copyFileSync(req.file.path, outputPath);
+        // Try background removal first
+        try {
+          console.log("Attempting background removal...");
+          const blob = await removeBackground(req.file.path, {
+            publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
+            debug: false,
+            output: {
+              format: 'image/png',
+              quality: 0.8,
+              type: 'foreground'
+            }
+          });
+
+          // Save processed image
+          fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
+          console.log("Background removal successful for:", barcode);
+        } catch (bgError) {
+          console.error("Background removal failed, saving original:", bgError.message);
+          // Fallback: just copy the file as-is
+          fs.copyFileSync(req.file.path, outputPath);
+          console.log("Saved original image for:", barcode);
+        }
+
         imgPath = `/api/image/${barcode}`;
-        console.log("Image saved successfully for:", barcode);
         
         // Clean up temp file
         try { fs.unlinkSync(req.file.path); } catch (e) { 
