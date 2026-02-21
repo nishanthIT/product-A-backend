@@ -228,9 +228,15 @@ const addProductAtShop = async (req, res) => {
     if (req.file && fs.existsSync(req.file.path)) {
       try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
+    
+    // Return more specific error message
+    const errorMessage = error.message || "An error occurred while adding the product.";
     res
       .status(500)
-      .json({ error: "An error occurred while adding the product." });
+      .json({ error: errorMessage.includes('category') 
+        ? "Database schema out of sync. Please run 'npx prisma generate' on server." 
+        : errorMessage 
+      });
   }
 };
 
