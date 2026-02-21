@@ -78,6 +78,14 @@ app.use("/api/advertisements", advertisementsRoutes);
 app.use("/api/news", newsRoutes);
 app.use("/api/categories", categoryRoutes);
 
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('=== GLOBAL ERROR HANDLER ===');
+  console.error('Error:', err.message);
+  console.error('Stack:', err.stack);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
 // Health check endpoint with Redis status
 app.get('/api/health', (req, res) => {
   const status = cacheService.getStatus();

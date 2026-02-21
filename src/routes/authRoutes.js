@@ -128,16 +128,25 @@ router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only -
 // router.get("/productAtShop/:shopId",getProductAtShop);
 
 // Add a new product and associate it with a shop (with optional image upload)
-router.post('/addProductAtShop', isAuthenticated, isEmployee, (req, res, next) => {
+router.post('/addProductAtShop', (req, res, next) => {
+  console.log('=== addProductAtShop route hit ===');
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  next();
+}, isAuthenticated, isEmployee, (req, res, next) => {
+  console.log('=== Passed auth, starting multer ===');
   productUpload.single('image')(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File is too large. Maximum size is 100MB.' });
+    if (err) {
+      console.error('=== Multer error ===', err);
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: 'File is too large. Maximum size is 100MB.' });
+        }
+        return res.status(400).json({ error: `Upload error: ${err.message}` });
+      } else {
+        return res.status(400).json({ error: err.message });
       }
-      return res.status(400).json({ error: `Upload error: ${err.message}` });
-    } else if (err) {
-      return res.status(400).json({ error: err.message });
     }
+    console.log('=== Multer complete, file:', req.file ? req.file.filename : 'no file');
     next();
   });
 }, addProductAtShop);
