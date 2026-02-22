@@ -614,7 +614,8 @@ const getProductsAtShop = async (req, res) => {
             barcode: true,
             caseBarcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
         }
       },
@@ -642,7 +643,8 @@ const getProductsAtShop = async (req, res) => {
               barcode: true,
               caseBarcode: true,
               img: true,
-              rrp: true
+              rrp: true,
+              category: true
             }
           }
         },
@@ -676,6 +678,7 @@ const getProductsAtShop = async (req, res) => {
       caseBarcode: item.product.caseBarcode,
       img: item.product.img,
       rrp: item.product.rrp,
+      category: item.product.category,
       aiel: item.card_aiel_number,
       updatedAt: item.updatedAt
     }));
