@@ -199,7 +199,7 @@ const addProductAtShop = async (req, res) => {
     // Create the product in the database
     const newProduct = await prisma.product.create({
       data: {
-        title,
+        title: title.toUpperCase(),
         productUrl: null,
         caseSize: String(finalCaseSize),
         packetSize: String(finalPacketSize),
@@ -614,8 +614,7 @@ const getProductsAtShop = async (req, res) => {
             barcode: true,
             caseBarcode: true,
             img: true,
-            rrp: true,
-            category: true
+            rrp: true
           }
         }
       },
@@ -643,8 +642,7 @@ const getProductsAtShop = async (req, res) => {
               barcode: true,
               caseBarcode: true,
               img: true,
-              rrp: true,
-              category: true
+              rrp: true
             }
           }
         },

@@ -161,7 +161,7 @@ const addProduct = async (req, res) => {
       // Create product with category
       const newProduct = await prisma.product.create({
         data: {
-          title,
+          title: title.toUpperCase(),
           rrp: rrp ? parseFloat(rrp) : null,
           caseSize: caseSize || null,
           packetSize: packetSize || null,
@@ -350,7 +350,7 @@ const editProduct = async (req, res) => {
         return parseFloat(value) || defaultValue;
       };
      
-      if (title !== undefined) dataToUpdate.title = title;
+      if (title !== undefined) dataToUpdate.title = title.toUpperCase();
       if (caseSize !== undefined) dataToUpdate.caseSize = caseSize || null;
       if (packetSize !== undefined) dataToUpdate.packetSize = packetSize || null;
       if (retailSize !== undefined) dataToUpdate.retailSize = retailSize || null;
