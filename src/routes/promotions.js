@@ -231,7 +231,7 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     console.log('Creating promotion - Body:', req.body);
     console.log('Creating promotion - Files:', req.files);
     
-    const { title, description, shopId, productIds } = req.body;
+    const { title, description, shopId, productIds, productPrices } = req.body;
     const files = req.files;
 
     // Check for at least one image (either single 'image' or multiple 'images')
@@ -252,6 +252,14 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
       return res.status(400).json({ error: 'At least one product must be selected' });
     }
 
+    // Parse product prices
+    let parsedPrices = [];
+    try {
+      parsedPrices = JSON.parse(productPrices || '[]');
+    } catch (error) {
+      console.error('Invalid product prices format:', error);
+    }
+
     // Verify shop exists
     const shop = await prisma.shop.findUnique({
       where: { id: shopId }
@@ -270,6 +278,26 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
 
     if (products.length !== parsedProductIds.length) {
       return res.status(404).json({ error: 'One or more products not found' });
+    }
+
+    // Update offer prices in ProductAtShop for each product
+    for (const priceData of parsedPrices) {
+      if (priceData.productId && priceData.offerPrice) {
+        try {
+          await prisma.productAtShop.updateMany({
+            where: {
+              productId: priceData.productId,
+              shopId: shopId
+            },
+            data: {
+              offerPrice: parseFloat(priceData.offerPrice)
+            }
+          });
+          console.log(`Updated offer price for product ${priceData.productId}: £${priceData.offerPrice}`);
+        } catch (priceError) {
+          console.error(`Error updating offer price for product ${priceData.productId}:`, priceError);
+        }
+      }
     }
 
     // Build URLs for uploaded files
