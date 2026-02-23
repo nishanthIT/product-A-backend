@@ -382,10 +382,33 @@ router.put('/:id/toggle', authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // PUT /api/promotions/:id - Update promotion
-router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), async (req, res) => {
+router.put('/:id', authenticateToken, requireAdmin, handleUpload, async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, shopId, productIds } = req.body;
+    const { 
+      title, 
+      description, 
+      shopId, 
+      productIds, 
+      productPrices,
+      keepExistingImageUrls,
+      keepExistingPrimaryImage,
+      keepExistingPdf
+    } = req.body;
+    const files = req.files;
+
+    console.log('Updating promotion:', id);
+    console.log('Body:', req.body);
+    console.log('Files:', files);
+
+    // Get current promotion to handle image cleanup
+    const currentPromotion = await prisma.promotion.findUnique({
+      where: { id }
+    });
+
+    if (!currentPromotion) {
+      return res.status(404).json({ error: 'Promotion not found' });
+    }
 
     const updateData = {
       title,
@@ -393,10 +416,42 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
       shopId
     };
 
-    // If new image uploaded, update imageUrl
-    if (req.file) {
-      updateData.imageUrl = `${req.protocol}://${req.get('host')}/uploads/promotions/${req.file.filename}`;
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+
+    // Handle primary image
+    if (files?.image?.length > 0) {
+      // New primary image uploaded
+      updateData.imageUrl = `${baseUrl}/uploads/promotions/${files.image[0].filename}`;
+    } else if (keepExistingPrimaryImage !== 'true') {
+      // Primary image was removed
+      updateData.imageUrl = null;
     }
+    // else: keep existing imageUrl (don't update)
+
+    // Handle carousel images
+    let existingUrls = [];
+    try {
+      existingUrls = JSON.parse(keepExistingImageUrls || '[]');
+    } catch (e) {
+      existingUrls = [];
+    }
+
+    // Add new uploaded images to the list
+    let newImageUrls = [];
+    if (files?.images?.length > 0) {
+      newImageUrls = files.images.map(f => `${baseUrl}/uploads/promotions/${f.filename}`);
+    }
+
+    // Combine existing and new images
+    updateData.imageUrls = [...existingUrls, ...newImageUrls];
+
+    // Handle PDF
+    if (files?.pdf?.length > 0) {
+      updateData.pdfUrl = `${baseUrl}/uploads/promotions/${files.pdf[0].filename}`;
+    } else if (keepExistingPdf !== 'true') {
+      updateData.pdfUrl = null;
+    }
+    // else: keep existing pdfUrl
 
     // Handle product updates
     if (productIds) {
@@ -407,10 +462,40 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
         return res.status(400).json({ error: 'Invalid product IDs format' });
       }
 
-      // Disconnect all products and reconnect new ones
+      // Update products connection
       updateData.products = {
         set: parsedProductIds.map(productId => ({ id: productId }))
       };
+
+      // Handle product prices if provided
+      if (productPrices) {
+        let parsedPrices = [];
+        try {
+          parsedPrices = JSON.parse(productPrices);
+        } catch (error) {
+          console.error('Invalid product prices format:', error);
+        }
+
+        // Update ProductAtShop prices for each product
+        for (const priceData of parsedPrices) {
+          if (priceData.productId && (priceData.price || priceData.offerPrice)) {
+            try {
+              await prisma.productAtShop.updateMany({
+                where: {
+                  productId: priceData.productId,
+                  shopId: shopId
+                },
+                data: {
+                  ...(priceData.price && { price: parseFloat(priceData.price) }),
+                  ...(priceData.offerPrice && { offerPrice: parseFloat(priceData.offerPrice) })
+                }
+              });
+            } catch (priceError) {
+              console.error(`Error updating price for product ${priceData.productId}:`, priceError);
+            }
+          }
+        }
+      }
     }
 
     const promotion = await prisma.promotion.update({
