@@ -80,6 +80,7 @@ model ProductAtShop {
   offerExpiryDate  DateTime?
   offerPrice       Decimal?
   lists            ListProduct[]
+  promotions       ProductPromotion[]
   employee         Empolyee?     @relation(fields: [employeeId], references: [id])
   product          Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
   shop             Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -87,6 +88,23 @@ model ProductAtShop {
 
   @@unique([shopId, productId])
   @@index([employeeId, updatedAt])
+}
+
+// Multiple promotions per product at shop with date ranges
+model ProductPromotion {
+  id              String        @id @default(cuid())
+  productAtShopId String
+  startDate       DateTime
+  endDate         DateTime?     // Optional - null means never expires
+  promotionPrice  Decimal
+  description     String?
+  isActive        Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
+
+  @@index([productAtShopId, startDate, endDate])
+  @@index([startDate, endDate, isActive])
 }
 
 model Empolyee {
@@ -224,6 +242,8 @@ model Promotion {
   imageUrl    String
   shopId      String
   isActive    Boolean   @default(true)
+  startDate   DateTime  @default(now())    // When promotion starts
+  endDate     DateTime?                     // Optional - null means never expires
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   imageUrls   String[]  @default([])
@@ -233,6 +253,7 @@ model Promotion {
 
   @@index([shopId, isActive])
   @@index([isActive, createdAt])
+  @@index([startDate, endDate, isActive])
 }
 
 model Advertisement {

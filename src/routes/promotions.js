@@ -231,7 +231,7 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     console.log('Creating promotion - Body:', req.body);
     console.log('Creating promotion - Files:', req.files);
     
-    const { title, description, shopId, productIds, productPrices } = req.body;
+    const { title, description, shopId, productIds, productPrices, startDate, endDate } = req.body;
     const files = req.files;
 
     // Check for at least one image (either single 'image' or multiple 'images')
@@ -335,6 +335,8 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
         pdfUrl,
         shopId,
         isActive: true,
+        startDate: startDate ? new Date(startDate) : new Date(),
+        endDate: endDate ? new Date(endDate) : null, // null = never expires
         products: {
           connect: parsedProductIds.map(id => ({ id }))
         }
@@ -421,7 +423,9 @@ router.put('/:id', authenticateToken, requireAdmin, handleUpload, async (req, re
       productPrices,
       keepExistingImageUrls,
       keepExistingPrimaryImage,
-      keepExistingPdf
+      keepExistingPdf,
+      startDate,
+      endDate
     } = req.body;
     const files = req.files;
 
@@ -441,7 +445,9 @@ router.put('/:id', authenticateToken, requireAdmin, handleUpload, async (req, re
     const updateData = {
       title,
       description,
-      shopId
+      shopId,
+      ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : new Date() }),
+      ...(endDate !== undefined && { endDate: endDate ? new Date(endDate) : null })
     };
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -589,6 +595,58 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Error deleting promotion:', error);
     res.status(500).json({ error: 'Failed to delete promotion' });
+  }
+});
+
+// POST /api/promotions/auto-deactivate - Automatically deactivate expired promotions
+// Can be called by a cron job daily
+router.post('/auto-deactivate', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    
+    // Find all promotions that have an end date that has passed and are still active
+    const expiredPromotions = await prisma.promotion.findMany({
+      where: {
+        isActive: true,
+        endDate: {
+          not: null,
+          lt: today
+        }
+      }
+    });
+    
+    if (expiredPromotions.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No expired promotions found',
+        deactivatedCount: 0
+      });
+    }
+    
+    // Deactivate all expired promotions
+    const result = await prisma.promotion.updateMany({
+      where: {
+        isActive: true,
+        endDate: {
+          not: null,
+          lt: today
+        }
+      },
+      data: {
+        isActive: false
+      }
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: `Deactivated ${result.count} expired promotions`,
+      deactivatedCount: result.count,
+      expiredPromotionIds: expiredPromotions.map(p => p.id)
+    });
+  } catch (error) {
+    console.error('Error auto-deactivating promotions:', error);
+    res.status(500).json({ error: 'Failed to auto-deactivate promotions' });
   }
 });
 

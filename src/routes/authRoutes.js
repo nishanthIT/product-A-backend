@@ -8,11 +8,11 @@ import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../cont
 import {
   addProductAtShop,
   addProductAtShopifExistAtProduct,
- 
   getProductsAtShop,
   removeProductFromShop,
   searchProductsNotInShop,
   updateProductPriceAtShop,
+  getShopFilters,
 } from "../controller/addProductAtShop.js";
 import {
   addEmployee,
@@ -171,6 +171,9 @@ router.post('/addProductAtShopifExistAtProduct', isAuthenticated, isEmployee, (r
 
 // Get products at a shop with pagination and search
 router.get('/shop/:shopId/products',isAuthenticated,isEmployee, getProductsAtShop);
+
+// Get categories and aisles available at a shop for filters
+router.get('/shop/:shopId/filters',isAuthenticated,isEmployee, getShopFilters);
 
 // Update product price at a shop
 router.put('/shop/:shopId/updateProductPrice',isAuthenticated,isEmployee, updateProductPriceAtShop);

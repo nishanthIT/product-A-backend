@@ -547,7 +547,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
 // Get products at a shop with pagination and search (with fuzzy matching)
 const getProductsAtShop = async (req, res) => {
   const { shopId } = req.params;
-  const { page = 1,  search = "" } = req.query;
+  const { page = 1, search = "", category = "", aisle = "" } = req.query;
   const limit = 100
   
   if (!shopId) {
@@ -570,13 +570,27 @@ const getProductsAtShop = async (req, res) => {
 
     // Build search conditions for fuzzy matching
     let whereClause = { shopId };
+    let productFilters = {};
+    
+    // Add category filter
+    if (category && category.trim()) {
+      productFilters.category = category.trim();
+    }
+    
+    // Add aisle filter
+    if (aisle && aisle.trim()) {
+      whereClause.card_aiel_number = aisle.trim();
+    }
+    
+    // Build search conditions
+    let searchConditions = [];
     
     if (search && search.trim()) {
       const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
       
       if (searchWords.length > 0) {
         // Build OR conditions for each word to match title OR barcode
-        const searchConditions = searchWords.map(word => {
+        searchConditions = searchWords.map(word => {
           const conditions = [
             { product: { title: { contains: word, mode: "insensitive" } } },
             { product: { barcode: { contains: word, mode: "insensitive" } } },
@@ -593,9 +607,16 @@ const getProductsAtShop = async (req, res) => {
           
           return { OR: conditions };
         });
-        
-        whereClause.AND = searchConditions;
       }
+    }
+    
+    // Combine filters
+    if (Object.keys(productFilters).length > 0) {
+      whereClause.product = productFilters;
+    }
+    
+    if (searchConditions.length > 0) {
+      whereClause.AND = searchConditions;
     }
 
     // Get total count
@@ -614,8 +635,13 @@ const getProductsAtShop = async (req, res) => {
             barcode: true,
             caseBarcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
+        },
+        promotions: {
+          where: { isActive: true },
+          orderBy: { startDate: 'asc' }
         }
       },
       skip: offset,
@@ -642,8 +668,13 @@ const getProductsAtShop = async (req, res) => {
               barcode: true,
               caseBarcode: true,
               img: true,
-              rrp: true
+              rrp: true,
+              category: true
             }
+          },
+          promotions: {
+            where: { isActive: true },
+            orderBy: { startDate: 'asc' }
           }
         },
         take: 500
@@ -661,25 +692,70 @@ const getProductsAtShop = async (req, res) => {
       productsAtShop = [...productsAtShop, ...additionalProducts].slice(0, limitNumber);
     }
 
+    // Helper function to get current best price from promotions
+    const getCurrentBestPrice = (promotions, regularPrice) => {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const activePromotions = promotions.filter(promo => {
+        if (!promo.isActive) return false;
+        const startDate = new Date(promo.startDate);
+        const endDate = new Date(promo.endDate);
+        startDate.setHours(0, 0, 0, 0);
+        endDate.setHours(23, 59, 59, 999);
+        return today >= startDate && today <= endDate;
+      });
+      
+      if (activePromotions.length === 0) {
+        return { offerPrice: null, offerExpiryDate: null };
+      }
+      
+      const lowestPromotion = activePromotions.reduce((lowest, current) => {
+        const currentPrice = parseFloat(current.promotionPrice);
+        const lowestPrice = parseFloat(lowest.promotionPrice);
+        return currentPrice < lowestPrice ? current : lowest;
+      });
+      
+      return {
+        offerPrice: parseFloat(lowestPromotion.promotionPrice),
+        offerExpiryDate: lowestPromotion.endDate
+      };
+    };
+
     // Map the data to a more frontend-friendly format
-    const formattedProducts = productsAtShop.map(item => ({
-      productId: item.productId,
-      shopId: item.shopId,
-      price: item.price,
-      offerPrice: item.offerPrice,
-      offerExpiryDate: item.offerExpiryDate,
-      title: item.product.title,
-      caseSize: item.product.caseSize,
-      packetSize: item.product.packetSize,
-      retailSize: item.product.retailSize,
-      barcode: item.product.barcode,
-      caseBarcode: item.product.caseBarcode,
-      img: item.product.img,
-      rrp: item.product.rrp,
-      category: item.product.category,
-      aiel: item.card_aiel_number,
-      updatedAt: item.updatedAt
-    }));
+    const formattedProducts = productsAtShop.map(item => {
+      // Calculate best price from promotions if available
+      let offerPrice = item.offerPrice;
+      let offerExpiryDate = item.offerExpiryDate;
+      
+      if (item.promotions && item.promotions.length > 0) {
+        const bestPrice = getCurrentBestPrice(item.promotions, item.price);
+        if (bestPrice.offerPrice !== null) {
+          offerPrice = bestPrice.offerPrice;
+          offerExpiryDate = bestPrice.offerExpiryDate;
+        }
+      }
+      
+      return {
+        productId: item.productId,
+        shopId: item.shopId,
+        price: item.price,
+        offerPrice: offerPrice,
+        offerExpiryDate: offerExpiryDate,
+        title: item.product.title,
+        caseSize: item.product.caseSize,
+        packetSize: item.product.packetSize,
+        retailSize: item.product.retailSize,
+        barcode: item.product.barcode,
+        caseBarcode: item.product.caseBarcode,
+        img: item.product.img,
+        rrp: item.product.rrp,
+        category: item.product.category,
+        aiel: item.card_aiel_number,
+        updatedAt: item.updatedAt,
+        promotionsCount: item.promotions ? item.promotions.length : 0
+      };
+    });
 
     res.status(200).json({
       products: formattedProducts,
@@ -727,6 +803,58 @@ const searchProductsNotInShop = async (req, res) => {
     res.status(200).json(products);
   } catch (error) {
     console.error("Error searching products:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Get categories and aisles available at a shop
+const getShopFilters = async (req, res) => {
+  const { shopId } = req.params;
+
+  if (!shopId) {
+    return res.status(400).json({ error: "Shop ID is required" });
+  }
+
+  try {
+    // Get all products at the shop to extract unique categories and aisles
+    const productsAtShop = await prisma.productAtShop.findMany({
+      where: { shopId },
+      select: {
+        card_aiel_number: true,
+        product: {
+          select: {
+            category: true
+          }
+        }
+      }
+    });
+
+    // Extract unique categories (from product)
+    const categories = [...new Set(
+      productsAtShop
+        .map(p => p.product?.category)
+        .filter(Boolean)
+    )].sort();
+
+    // Extract unique aisles (from ProductAtShop)
+    const aisles = [...new Set(
+      productsAtShop
+        .map(p => p.card_aiel_number)
+        .filter(Boolean)
+    )].sort((a, b) => {
+      // Sort numerically if possible
+      const numA = parseInt(a);
+      const numB = parseInt(b);
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+      return a.localeCompare(b);
+    });
+
+    res.status(200).json({
+      categories,
+      aisles
+    });
+  } catch (error) {
+    console.error("Error fetching shop filters:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -790,5 +918,6 @@ export {
   addProductAtShopifExistAtProduct,
   getProductsAtShop,
   searchProductsNotInShop,
-  removeProductFromShop
+  removeProductFromShop,
+  getShopFilters
 };
