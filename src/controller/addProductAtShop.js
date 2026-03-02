@@ -199,7 +199,7 @@ const addProductAtShop = async (req, res) => {
     // Create the product in the database
     const newProduct = await prisma.product.create({
       data: {
-        title: title.toUpperCase(),
+        title,
         productUrl: null,
         caseSize: String(finalCaseSize),
         packetSize: String(finalPacketSize),
@@ -258,7 +258,7 @@ const addProductAtShop = async (req, res) => {
 // Update product price at a shop
 const updateProductPriceAtShop = async (req, res) => {
   const { shopId } = req.params;
-  const { productId, price, employeeId, offerPrice, offerExpiryDate } = req.body;
+  const { productId, price, employeeId, offerPrice, offerExpiryDate, aisle } = req.body;
 
   console.log('updateProductPriceAtShop received:', {
     shopId,
@@ -267,6 +267,7 @@ const updateProductPriceAtShop = async (req, res) => {
     employeeId,
     offerPrice,
     offerExpiryDate,
+    aisle,
     offerPriceType: typeof offerPrice,
     offerExpiryDateType: typeof offerExpiryDate
   });
@@ -301,7 +302,8 @@ const updateProductPriceAtShop = async (req, res) => {
       originalOfferPrice: offerPrice,
       parsedOfferPrice,
       originalOfferExpiryDate: offerExpiryDate,
-      parsedOfferExpiryDate
+      parsedOfferExpiryDate,
+      aisle
     });
 
     // Prepare update data
@@ -313,6 +315,11 @@ const updateProductPriceAtShop = async (req, res) => {
     // Always update offer fields to handle clearing offers
     updateData.offerPrice = parsedOfferPrice;
     updateData.offerExpiryDate = parsedOfferExpiryDate;
+    
+    // Update aisle if provided (can be empty string to clear)
+    if (aisle !== undefined) {
+      updateData.card_aiel_number = aisle || null;
+    }
 
     console.log('Update data:', updateData);
 
@@ -547,7 +554,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
 // Get products at a shop with pagination and search (with fuzzy matching)
 const getProductsAtShop = async (req, res) => {
   const { shopId } = req.params;
-  const { page = 1, search = "", category = "", aisle = "" } = req.query;
+  const { page = 1, search = "", category = "", aisle = "", stockStatus = "" } = req.query;
   const limit = 100
   
   if (!shopId) {
@@ -570,11 +577,20 @@ const getProductsAtShop = async (req, res) => {
 
     // Build search conditions for fuzzy matching
     let whereClause = { shopId };
-    let productFilters = {};
+    
+    // Add stock status filter
+    if (stockStatus === "in-stock") {
+      whereClause.outOfStock = false;
+    } else if (stockStatus === "out-of-stock") {
+      whereClause.outOfStock = true;
+    }
     
     // Add category filter
     if (category && category.trim()) {
-      productFilters.category = category.trim();
+      whereClause.product = {
+        ...whereClause.product,
+        category: category.trim()
+      };
     }
     
     // Add aisle filter
@@ -582,15 +598,12 @@ const getProductsAtShop = async (req, res) => {
       whereClause.card_aiel_number = aisle.trim();
     }
     
-    // Build search conditions
-    let searchConditions = [];
-    
     if (search && search.trim()) {
       const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
       
       if (searchWords.length > 0) {
         // Build OR conditions for each word to match title OR barcode
-        searchConditions = searchWords.map(word => {
+        const searchConditions = searchWords.map(word => {
           const conditions = [
             { product: { title: { contains: word, mode: "insensitive" } } },
             { product: { barcode: { contains: word, mode: "insensitive" } } },
@@ -607,16 +620,9 @@ const getProductsAtShop = async (req, res) => {
           
           return { OR: conditions };
         });
+        
+        whereClause.AND = searchConditions;
       }
-    }
-    
-    // Combine filters
-    if (Object.keys(productFilters).length > 0) {
-      whereClause.product = productFilters;
-    }
-    
-    if (searchConditions.length > 0) {
-      whereClause.AND = searchConditions;
     }
 
     // Get total count
@@ -638,10 +644,6 @@ const getProductsAtShop = async (req, res) => {
             rrp: true,
             category: true
           }
-        },
-        promotions: {
-          where: { isActive: true },
-          orderBy: { startDate: 'asc' }
         }
       },
       skip: offset,
@@ -655,9 +657,18 @@ const getProductsAtShop = async (req, res) => {
     if (search && search.trim() && productsAtShop.length < 10) {
       const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
       
+      // Build where clause for fuzzy search that respects filters
+      let fuzzyWhereClause = { shopId };
+      if (category && category.trim()) {
+        fuzzyWhereClause.product = { category: category.trim() };
+      }
+      if (aisle && aisle.trim()) {
+        fuzzyWhereClause.card_aiel_number = aisle.trim();
+      }
+      
       // Get more products for fuzzy matching
       const allProductsAtShop = await prisma.productAtShop.findMany({
-        where: { shopId },
+        where: fuzzyWhereClause,
         include: {
           product: {
             select: {
@@ -671,10 +682,6 @@ const getProductsAtShop = async (req, res) => {
               rrp: true,
               category: true
             }
-          },
-          promotions: {
-            where: { isActive: true },
-            orderBy: { startDate: 'asc' }
           }
         },
         take: 500
@@ -692,70 +699,26 @@ const getProductsAtShop = async (req, res) => {
       productsAtShop = [...productsAtShop, ...additionalProducts].slice(0, limitNumber);
     }
 
-    // Helper function to get current best price from promotions
-    const getCurrentBestPrice = (promotions, regularPrice) => {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      const activePromotions = promotions.filter(promo => {
-        if (!promo.isActive) return false;
-        const startDate = new Date(promo.startDate);
-        const endDate = new Date(promo.endDate);
-        startDate.setHours(0, 0, 0, 0);
-        endDate.setHours(23, 59, 59, 999);
-        return today >= startDate && today <= endDate;
-      });
-      
-      if (activePromotions.length === 0) {
-        return { offerPrice: null, offerExpiryDate: null };
-      }
-      
-      const lowestPromotion = activePromotions.reduce((lowest, current) => {
-        const currentPrice = parseFloat(current.promotionPrice);
-        const lowestPrice = parseFloat(lowest.promotionPrice);
-        return currentPrice < lowestPrice ? current : lowest;
-      });
-      
-      return {
-        offerPrice: parseFloat(lowestPromotion.promotionPrice),
-        offerExpiryDate: lowestPromotion.endDate
-      };
-    };
-
     // Map the data to a more frontend-friendly format
-    const formattedProducts = productsAtShop.map(item => {
-      // Calculate best price from promotions if available
-      let offerPrice = item.offerPrice;
-      let offerExpiryDate = item.offerExpiryDate;
-      
-      if (item.promotions && item.promotions.length > 0) {
-        const bestPrice = getCurrentBestPrice(item.promotions, item.price);
-        if (bestPrice.offerPrice !== null) {
-          offerPrice = bestPrice.offerPrice;
-          offerExpiryDate = bestPrice.offerExpiryDate;
-        }
-      }
-      
-      return {
-        productId: item.productId,
-        shopId: item.shopId,
-        price: item.price,
-        offerPrice: offerPrice,
-        offerExpiryDate: offerExpiryDate,
-        title: item.product.title,
-        caseSize: item.product.caseSize,
-        packetSize: item.product.packetSize,
-        retailSize: item.product.retailSize,
-        barcode: item.product.barcode,
-        caseBarcode: item.product.caseBarcode,
-        img: item.product.img,
-        rrp: item.product.rrp,
-        category: item.product.category,
-        aiel: item.card_aiel_number,
-        updatedAt: item.updatedAt,
-        promotionsCount: item.promotions ? item.promotions.length : 0
-      };
-    });
+    const formattedProducts = productsAtShop.map(item => ({
+      productId: item.productId,
+      shopId: item.shopId,
+      price: item.price,
+      offerPrice: item.offerPrice,
+      offerExpiryDate: item.offerExpiryDate,
+      title: item.product.title,
+      caseSize: item.product.caseSize,
+      packetSize: item.product.packetSize,
+      retailSize: item.product.retailSize,
+      barcode: item.product.barcode,
+      caseBarcode: item.product.caseBarcode,
+      img: item.product.img,
+      rrp: item.product.rrp,
+      category: item.product.category,
+      aiel: item.card_aiel_number,
+      outOfStock: item.outOfStock || false,
+      updatedAt: item.updatedAt
+    }));
 
     res.status(200).json({
       products: formattedProducts,
@@ -807,54 +770,38 @@ const searchProductsNotInShop = async (req, res) => {
   }
 };
 
-// Get categories and aisles available at a shop
-const getShopFilters = async (req, res) => {
-  const { shopId } = req.params;
+// Toggle out of stock status for a product at shop
+const toggleOutOfStock = async (req, res) => {
+  const { shopId, productId } = req.params;
+  const { outOfStock } = req.body;
 
-  if (!shopId) {
-    return res.status(400).json({ error: "Shop ID is required" });
+  if (!shopId || !productId) {
+    return res.status(400).json({ error: "Shop ID and Product ID are required" });
   }
 
   try {
-    // Get all products at the shop to extract unique categories and aisles
-    const productsAtShop = await prisma.productAtShop.findMany({
-      where: { shopId },
-      select: {
-        card_aiel_number: true,
-        product: {
-          select: {
-            category: true
-          }
-        }
+    const productAtShop = await prisma.productAtShop.findUnique({
+      where: {
+        shopId_productId: { shopId, productId }
       }
     });
 
-    // Extract unique categories (from product)
-    const categories = [...new Set(
-      productsAtShop
-        .map(p => p.product?.category)
-        .filter(Boolean)
-    )].sort();
+    if (!productAtShop) {
+      return res.status(404).json({ error: "Product not found at the specified shop" });
+    }
 
-    // Extract unique aisles (from ProductAtShop)
-    const aisles = [...new Set(
-      productsAtShop
-        .map(p => p.card_aiel_number)
-        .filter(Boolean)
-    )].sort((a, b) => {
-      // Sort numerically if possible
-      const numA = parseInt(a);
-      const numB = parseInt(b);
-      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-      return a.localeCompare(b);
-    });
+    const newOutOfStock = outOfStock !== undefined ? outOfStock : !productAtShop.outOfStock;
+    
+    // Use raw query to update outOfStock field (works even if Prisma client not regenerated)
+    await prisma.$executeRaw`UPDATE "ProductAtShop" SET "outOfStock" = ${newOutOfStock} WHERE "shopId" = ${shopId} AND "productId" = ${productId}`;
 
     res.status(200).json({
-      categories,
-      aisles
+      success: true,
+      outOfStock: newOutOfStock,
+      message: newOutOfStock ? "Product marked as out of stock" : "Product marked as in stock"
     });
   } catch (error) {
-    console.error("Error fetching shop filters:", error);
+    console.error("Error toggling out of stock:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -911,6 +858,50 @@ const removeProductFromShop = async (req, res) => {
   }
 };
 
+// Get shop filters (categories and aisles available at a shop)
+const getShopFilters = async (req, res) => {
+  try {
+    const { shopId } = req.params;
+
+    // Get all unique categories and aisles from products at this shop
+    const productsAtShop = await prisma.productAtShop.findMany({
+      where: { shopId: shopId },
+      include: {
+        product: {
+          select: {
+            category: true,
+          },
+        },
+      },
+    });
+
+    // Extract unique categories from shop products
+    const shopCategories = [...new Set(productsAtShop.map(p => p.product.category).filter(Boolean))].sort();
+    const aisles = [...new Set(productsAtShop.map(p => p.card_aiel_number).filter(Boolean))].sort();
+
+    // Also get all categories from the Category table for complete list
+    let allCategories = shopCategories;
+    try {
+      const categoryRecords = await prisma.category.findMany({
+        orderBy: { name: 'asc' }
+      });
+      allCategories = categoryRecords.map(c => c.name);
+    } catch (e) {
+      // If Category table doesn't exist, fall back to shop categories
+      console.log("Category table not available, using shop categories only");
+    }
+
+    res.json({
+      categories: allCategories.length > 0 ? allCategories : shopCategories,
+      aisles,
+      totalProducts: productsAtShop.length,
+    });
+  } catch (error) {
+    console.error('Error getting shop filters:', error);
+    res.status(500).json({ error: 'Failed to get shop filters' });
+  }
+};
+
 // Export all the handlers
 export {
   addProductAtShop,
@@ -919,5 +910,6 @@ export {
   getProductsAtShop,
   searchProductsNotInShop,
   removeProductFromShop,
+  toggleOutOfStock,
   getShopFilters
 };

@@ -53,7 +53,7 @@ const login = async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials - Password mismatch' });
     }
     
-    // Generate JWT
+    // Generate JWT - Extended to 7 days for better mobile UX
     const token = jwt.sign(
       {
         id: user.id,
@@ -62,13 +62,13 @@ const login = async (req, res) => {
         userType
       },
       process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '24h' }
+      { expiresIn: '7d' }
     );
     
     // CRITICAL: Send token both as cookie AND in response body
     res.cookie('auth_token', token, {
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days to match JWT expiry
       secure: false, // Only for development
       sameSite: 'none', // Try 'none' instead of 'lax'
       path: '/'
@@ -125,7 +125,7 @@ const register = async (req, res) => {
       }
     });
     
-    // Generate JWT
+    // Generate JWT - Extended to 7 days for better mobile UX
     const token = jwt.sign(
       {
         id: customer.id,
@@ -133,13 +133,13 @@ const register = async (req, res) => {
         userType: 'CUSTOMER'
       },
       process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '24h' }
+      { expiresIn: '7d' }
     );
     
     // Set cookie and return response
     res.cookie('auth_token', token, {
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days to match JWT expiry
       secure: false,
       sameSite: 'none',
       path: '/'

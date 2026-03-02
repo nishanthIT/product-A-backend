@@ -122,6 +122,42 @@ const fuzzyMatchWord = (searchWord, text, maxDistance = 2) => {
   return false;
 };
 
+// Get unique categories and aisles from products for filter dropdowns
+const getProductFilters = async (req, res) => {
+  try {
+    // Get unique categories from products
+    const products = await prisma.product.findMany({
+      where: {
+        category: { not: null }
+      },
+      select: { category: true },
+      distinct: ['category']
+    });
+    
+    const categories = products.map(p => p.category).filter(Boolean).sort();
+    
+    // Get unique aisles from ProductAtShop (if needed for shop-specific filtering)
+    const productAtShops = await prisma.productAtShop.findMany({
+      where: {
+        card_aiel_number: { not: null }
+      },
+      select: { card_aiel_number: true },
+      distinct: ['card_aiel_number']
+    });
+    
+    const aisles = productAtShops.map(p => p.card_aiel_number).filter(Boolean).sort();
+    
+    res.status(200).json({
+      success: true,
+      categories,
+      aisles
+    });
+  } catch (error) {
+    console.error("Error getting product filters:", error);
+    res.status(500).json({ error: "Failed to get product filters" });
+  }
+};
+
 // Controller for filtering products with pagination
 const filterProducts = async (req, res) => {
   try {
@@ -133,6 +169,7 @@ const filterProducts = async (req, res) => {
       withoutCaseBarcode, 
       withoutRrp, 
       withoutImage,
+      category,
       page = "10",
      // limit = "100"
     } = req.query;
@@ -147,6 +184,14 @@ const limit = 100
 
     // Build the where clause based on filters
     const whereClause = {};
+    
+    // Category filter
+    if (category) {
+      whereClause.category = {
+        equals: category,
+        mode: "insensitive"
+      };
+    }
     
     // Add search condition if provided - improved fuzzy search with typo tolerance
     if (search) {
@@ -325,4 +370,4 @@ const limit = 100
   }
 };
 
-export { filterProducts };
+export { filterProducts, getProductFilters };

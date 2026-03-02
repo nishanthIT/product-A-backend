@@ -13,9 +13,15 @@ model Admin {
   password         String
   userType         UserType      @default(ADMIN)
   name             String?
+  shopId           String?       // Shop owned/managed by this admin
   resetToken       String?
   resetTokenExpiry DateTime?
   reviewedReports  PriceReport[]
+  employees        Empolyee[]    // Employees created by this admin
+  shop             Shop?         @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  lists            List[]        @relation("AdminLists")
+
+  @@index([shopId])
 }
 
 model Customer {
@@ -32,92 +38,107 @@ model Customer {
   points             Decimal         @default(0)
   resetToken         String?
   resetTokenExpiry   DateTime?
+  shopId             String?         // Shop owned by this customer
   lists              List[]
   priceReports       PriceReport[]
   productsManaged    ProductAtShop[]
+  shop               Shop?           @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  employees          Empolyee[]      @relation("CustomerEmployees") // Employees created by this customer
+  tasksCreated       Task[]          @relation("TasksCreated") // Tasks created by this admin
+
+  @@index([shopId])
 }
 
 model Product {
-  id           String          @id @default(cuid())
-  title        String
-  productUrl   String?
-  caseSize     String?
-  packetSize   String?
-  barcode      String?         @unique
-  img          Json?
-  retailSize   String?
-  caseBarcode  String?
-  rrp          Decimal?
-  category     String?
-  actionLog    ActionLog[]
-  priceReports PriceReport[]
-  shops        ProductAtShop[]
-  promotions   Promotion[]     @relation("ProductToPromotion")
+  id                    String                   @id @default(cuid())
+  title                 String
+  productUrl            String?
+  caseSize              String?
+  packetSize            String?
+  barcode               String?                  @unique
+  img                   Json?
+  retailSize            String?
+  caseBarcode           String?
+  rrp                   Decimal?
+  category              String?
+  actionLog             ActionLog[]
+  priceReports          PriceReport[]
+  shops                 ProductAtShop[]
+  promotions            Promotion[]              @relation("ProductToPromotion")
+  bundleBuyItems        BundlePromotionBuyItem[]
+  bundleGetItems        BundlePromotionGetItem[]
+  expiryProducts        ExpiryProduct[]
 }
 
 model Shop {
-  id           String          @id @default(cuid())
-  name         String
-  address      String
-  mobile       String
-  actionLog    ActionLog[]
-  priceReports PriceReport[]
-  products     ProductAtShop[]
-  promotions   Promotion[]
+  id               String            @id @default(cuid())
+  name             String
+  address          String
+  mobile           String
+  actionLog        ActionLog[]
+  priceReports     PriceReport[]
+  products         ProductAtShop[]
+  promotions       Promotion[]
+  bundlePromotions BundlePromotion[]
+  admins           Admin[]           // Admins managing this shop
+  customers        Customer[]        // Customers (shop owners) of this shop
+  employees        Empolyee[]        // Employees working at this shop
+  groupChatId      String?           // Shop group chat ID
+  expiryProducts   ExpiryProduct[]   // Products with expiry tracking
+  tasks            Task[]            // Tasks created for this shop
+  fridges          Fridge[]          // Fridges in this shop
+  cleaningAreas    CleaningArea[]    // Cleaning areas in this shop
 }
 
 model ProductAtShop {
-  id               String        @id @default(cuid())
+  id               String             @id @default(cuid())
   price            Decimal
   shopId           String
   productId        String
   employeeId       Int?
-  updatedAt        DateTime?     @default(now())
+  updatedAt        DateTime?          @default(now())
   userId           Int?
-  createdAt        DateTime?     @default(now())
+  createdAt        DateTime?          @default(now())
   listId           String?
   card_aiel_number String?
   offerExpiryDate  DateTime?
   offerPrice       Decimal?
+  outOfStock       Boolean            @default(false)
   lists            ListProduct[]
-  promotions       ProductPromotion[]
-  employee         Empolyee?     @relation(fields: [employeeId], references: [id])
-  product          Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
-  shop             Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  customer         Customer?     @relation(fields: [userId], references: [id])
+  employee         Empolyee?          @relation(fields: [employeeId], references: [id])
+  product          Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop             Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  customer         Customer?          @relation(fields: [userId], references: [id])
+  ProductPromotion ProductPromotion[]
 
   @@unique([shopId, productId])
   @@index([employeeId, updatedAt])
 }
 
-// Multiple promotions per product at shop with date ranges
-model ProductPromotion {
-  id              String        @id @default(cuid())
-  productAtShopId String
-  startDate       DateTime
-  endDate         DateTime?     // Optional - null means never expires
-  promotionPrice  Decimal
-  description     String?
-  isActive        Boolean       @default(true)
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
-
-  @@index([productAtShopId, startDate, endDate])
-  @@index([startDate, endDate, isActive])
-}
-
 model Empolyee {
-  id               Int             @id @default(autoincrement())
-  name             String
-  phoneNo          String          @unique
-  email            String          @unique
-  password         String
-  userType         UserType        @default(EMPLOYEE)
-  resetToken       String?
-  resetTokenExpiry DateTime?
-  actionLog        ActionLog[]
-  productAdded     ProductAtShop[]
+  id                  Int              @id @default(autoincrement())
+  name                String
+  phoneNo             String           @unique
+  email               String           @unique
+  password            String
+  userType            UserType         @default(EMPLOYEE)
+  shopId              String?          // Shop this employee belongs to
+  createdByAdminId    Int?             // Admin who created this employee (legacy)
+  createdByCustomerId Int?             // Customer (shop owner) who created this employee
+  resetToken          String?
+  resetTokenExpiry    DateTime?
+  createdAt           DateTime         @default(now())
+  actionLog           ActionLog[]
+  productAdded        ProductAtShop[]
+  shop                Shop?            @relation(fields: [shopId], references: [id], onDelete: SetNull)
+  createdByAdmin      Admin?           @relation(fields: [createdByAdminId], references: [id], onDelete: SetNull)
+  createdByCustomer   Customer?        @relation("CustomerEmployees", fields: [createdByCustomerId], references: [id], onDelete: SetNull)
+  lists               List[]           @relation("EmployeeLists")
+  taskAssignments     TaskAssignment[] // Tasks assigned to this employee
+
+  @@index([shopId])
+  @@index([createdByAdminId])
+  @@index([createdByCustomerId])
 }
 
 model ActionLog {
@@ -137,22 +158,69 @@ model ActionLog {
 }
 
 model List {
-  id          String        @id @default(cuid())
-  name        String
-  description String
-  customerId  Int
-  customer    Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  products    ListProduct[]
+  id           String        @id @default(cuid())
+  name         String
+  description  String
+  customerId   Int?          // For reference (Customer lists - legacy)
+  employeeId   Int?          // Employee who created the list
+  adminId      Int?          // Admin who created/owns the list
+  shopId       String?       // Shop this list belongs to
+  creatorType  UserType      @default(CUSTOMER) // Who created: ADMIN, EMPLOYEE, CUSTOMER
+  copiedFromId String?       // If this list was copied from another list
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime?     @default(now()) @updatedAt
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  employee     Empolyee?     @relation("EmployeeLists", fields: [employeeId], references: [id], onDelete: Cascade)
+  admin        Admin?        @relation("AdminLists", fields: [adminId], references: [id], onDelete: Cascade)
+  products     ListProduct[]
+  sharedMessages Message[]   @relation("SharedListMessages")
+
+  @@index([employeeId])
+  @@index([adminId])
+  @@index([shopId])
+  @@index([creatorType])
 }
 
 model ListProduct {
-  id              String        @id @default(cuid())
-  listId          String
-  productAtShopId String
-  quantity        Int           @default(1)
-  isPurchased     Boolean       @default(false)
-  list            List          @relation(fields: [listId], references: [id], onDelete: Cascade)
-  productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
+  id                String           @id @default(cuid())
+  listId            String
+  productAtShopId   String
+  quantity          Int              @default(1)
+  isPurchased       Boolean          @default(false)
+  isFreeItem        Boolean          @default(false)   // Is this a free item from bundle promotion
+  freeQuantity      Int              @default(0)       // How many of this item are free
+  bundlePromotionId String?                            // Reference to bundle promotion if free
+  list              List             @relation(fields: [listId], references: [id], onDelete: Cascade)
+  productAtShop     ProductAtShop    @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
+  bundlePromotion   BundlePromotion? @relation(fields: [bundlePromotionId], references: [id], onDelete: SetNull)
+
+  @@index([bundlePromotionId])
+}
+
+model ExpiryProduct {
+  id                String    @id @default(cuid())
+  productId         String    // Reference to Product
+  shopId            String    // Shop this expiry tracking belongs to
+  expiryDate        DateTime  // Expiry date of the product
+  quantity          Int       @default(1) // Number of items with this expiry
+  batchNumber       String?   // Optional batch/lot number
+  notes             String?   // Optional notes
+  isDisposed        Boolean   @default(false) // Whether disposed
+  disposedAt        DateTime? // When it was disposed
+  disposedBy        String?   // Who disposed it (userId + userType)
+  notification10Day Boolean   @default(false) // Sent 10 day notification
+  notification7Day  Boolean   @default(false) // Sent 7 day notification
+  notification2Day  Boolean   @default(false) // Sent 2 day notification
+  addedById         Int       // User who added this
+  addedByType       UserType  // CUSTOMER or EMPLOYEE
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop              Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId, expiryDate])
+  @@index([shopId, isDisposed])
+  @@index([expiryDate])
 }
 
 model Chat {
@@ -192,11 +260,14 @@ model Message {
   attachmentUrl  String?
   deletedAt      DateTime?
   messageType    MessageType   @default(TEXT)
+  sharedListId   String?       // ID of shared list (for LIST_SHARE messages)
   chat           Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
   readReceipts   MessageRead[]
+  sharedList     List?         @relation("SharedListMessages", fields: [sharedListId], references: [id], onDelete: SetNull)
 
   @@index([chatId, createdAt])
   @@index([senderId, senderType])
+  @@index([sharedListId])
 }
 
 model MessageRead {
@@ -242,12 +313,12 @@ model Promotion {
   imageUrl    String
   shopId      String
   isActive    Boolean   @default(true)
-  startDate   DateTime  @default(now())    // When promotion starts
-  endDate     DateTime?                     // Optional - null means never expires
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   imageUrls   String[]  @default([])
   pdfUrl      String?
+  endDate     DateTime?
+  startDate   DateTime  @default(now())
   shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
   products    Product[] @relation("ProductToPromotion")
 
@@ -283,6 +354,29 @@ model News {
   @@index([isActive, publishedAt])
 }
 
+model Category {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ProductPromotion {
+  id              String        @id @default(cuid())
+  productAtShopId String
+  startDate       DateTime
+  endDate         DateTime?
+  promotionPrice  Decimal
+  description     String?
+  isActive        Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  ProductAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
+
+  @@index([productAtShopId, startDate, endDate])
+  @@index([startDate, endDate, isActive])
+}
+
 enum UserType {
   ADMIN
   CUSTOMER
@@ -298,6 +392,7 @@ enum MessageType {
   TEXT
   IMAGE
   DOCUMENT
+  LIST_SHARE
 }
 
 enum ReportStatus {
@@ -306,9 +401,168 @@ enum ReportStatus {
   REJECTED
 }
 
-model Category {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// Bundle Promotions - Buy X Get Y Free
+model BundlePromotion {
+  id              String                    @id @default(cuid())
+  shopId          String
+  name            String
+  description     String?
+  promotionType   BundlePromotionType       @default(BUY_X_GET_Y)
+  startDate       DateTime?
+  endDate         DateTime?
+  isActive        Boolean                   @default(true)
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  shop            Shop                      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  buyItems        BundlePromotionBuyItem[]
+  getItems        BundlePromotionGetItem[]
+  listProducts    ListProduct[]             // List products that claimed this bundle
+
+  @@index([shopId, isActive])
+  @@index([startDate, endDate, isActive])
+}
+
+model BundlePromotionBuyItem {
+  id                  String          @id @default(cuid())
+  bundlePromotionId   String
+  productId           String
+  quantity            Int             @default(1)
+  bundlePromotion     BundlePromotion @relation(fields: [bundlePromotionId], references: [id], onDelete: Cascade)
+  product             Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([bundlePromotionId, productId])
+  @@index([productId])
+}
+
+model BundlePromotionGetItem {
+  id                  String          @id @default(cuid())
+  bundlePromotionId   String
+  productId           String
+  quantity            Int             @default(1)
+  bundlePromotion     BundlePromotion @relation(fields: [bundlePromotionId], references: [id], onDelete: Cascade)
+  product             Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([bundlePromotionId, productId])
+  @@index([productId])
+}
+
+enum BundlePromotionType {
+  BOGO              // Buy One Get One
+  BUY_X_GET_Y       // Buy X items Get Y free (same product)
+  MULTI_BUY         // Buy multiple different products, get something free
+}
+
+// ===== TASK ASSIGNMENT SYSTEM =====
+model Task {
+  id          String           @id @default(cuid())
+  title       String
+  description String?
+  dueDate     DateTime?
+  status      TaskStatus       @default(PENDING)
+  shopId      String
+  createdById Int              // Customer (Admin) who created the task
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  shop        Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  createdBy   Customer         @relation("TasksCreated", fields: [createdById], references: [id], onDelete: Cascade)
+  assignments TaskAssignment[]
+
+  @@index([shopId])
+  @@index([createdById])
+  @@index([status])
+  @@index([dueDate])
+}
+
+model TaskAssignment {
+  id          String    @id @default(cuid())
+  taskId      String
+  employeeId  Int
+  isStarted   Boolean   @default(false)
+  startedAt   DateTime?
+  isCompleted Boolean   @default(false)
+  completedAt DateTime?
+  task        Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  employee    Empolyee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, employeeId])
+  @@index([employeeId])
+  @@index([isStarted])
+  @@index([isCompleted])
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// ===== FRIDGE TEMPERATURE MONITORING SYSTEM =====
+model Fridge {
+  id              String                 @id @default(cuid())
+  name            String
+  location        String?                // e.g., "Main Kitchen", "Storage Room"
+  minSafeTemp     Decimal?               @default(-5)  // Minimum safe temperature
+  maxSafeTemp     Decimal?               @default(8)   // Maximum safe temperature
+  shopId          String
+  isActive        Boolean                @default(true)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  shop            Shop                   @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  temperatureLogs FridgeTemperatureLog[]
+
+  @@index([shopId])
+  @@index([isActive])
+}
+
+model FridgeTemperatureLog {
+  id          String      @id @default(cuid())
+  fridgeId    String
+  temperature Decimal
+  entryType   EntryType   // MORNING or EVENING
+  notes       String?
+  recordedById Int        // Can be Customer (Admin) or Employee ID
+  recordedByType UserType // CUSTOMER or EMPLOYEE
+  recordedAt  DateTime    @default(now())
+  fridge      Fridge      @relation(fields: [fridgeId], references: [id], onDelete: Cascade)
+
+  @@index([fridgeId])
+  @@index([recordedAt])
+  @@index([entryType])
+}
+
+enum EntryType {
+  MORNING
+  EVENING
+}
+
+// ===== CLEANING STATUS SYSTEM =====
+model CleaningArea {
+  id          String        @id @default(cuid())
+  name        String        // e.g., "Kitchen", "Storage", "Dining Area"
+  description String?
+  shopId      String
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  shop        Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  cleaningLogs CleaningLog[]
+
+  @@index([shopId])
+  @@index([isActive])
+}
+
+model CleaningLog {
+  id              String       @id @default(cuid())
+  cleaningAreaId  String
+  isCompleted     Boolean      @default(true)
+  notes           String?
+  completedById   Int          // Employee ID who completed
+  completedByType UserType     @default(EMPLOYEE)
+  completedAt     DateTime     @default(now())
+  cleaningArea    CleaningArea @relation(fields: [cleaningAreaId], references: [id], onDelete: Cascade)
+
+  @@index([cleaningAreaId])
+  @@index([completedAt])
+  @@index([completedById])
 }

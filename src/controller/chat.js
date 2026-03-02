@@ -17,26 +17,108 @@ export const getUserChats = async (req, res) => {
       return res.status(200).json({ success: true, chats: cachedChats });
     }
 
-    // Get chats where user is actually a participant OR the main group chat
-    const chats = await prisma.chat.findMany({
-      where: {
-        OR: [
-          // Main group chat (accessible to everyone)
-          { 
-            type: 'GROUP',
-            name: 'ALL Chat'
-          },
-          // Personal chats where user is actually a participant
-          {
-            type: 'PERSONAL',
-            participants: {
-              some: {
-                userId: userId,
-                userType: userType
+    // Get user's shop group chat ID if they belong to a shop
+    let shopGroupChatId = null;
+    let shopId = null;
+    
+    if (userType === 'CUSTOMER') {
+      // Customer has shopId directly on their model
+      const customer = await prisma.customer.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      shopId = customer?.shopId;
+      
+      if (shopId) {
+        const shop = await prisma.shop.findUnique({
+          where: { id: shopId },
+          select: { groupChatId: true, name: true }
+        });
+        shopGroupChatId = shop?.groupChatId;
+        
+        // Auto-create shop group chat if it doesn't exist
+        if (!shopGroupChatId && shop) {
+          console.log('📢 Creating shop group chat for:', shop.name);
+          const groupChat = await prisma.chat.create({
+            data: {
+              name: `${shop.name} - Team Chat`,
+              type: 'GROUP',
+              participants: {
+                create: {
+                  userId: userId,
+                  userType: 'CUSTOMER',
+                  isAdmin: true
+                }
               }
             }
+          });
+          shopGroupChatId = groupChat.id;
+          
+          // Update shop with group chat ID
+          await prisma.shop.update({
+            where: { id: shopId },
+            data: { groupChatId: groupChat.id }
+          });
+          
+          // Add all existing employees to the group chat
+          const employees = await prisma.empolyee.findMany({
+            where: { shopId: shopId },
+            select: { id: true }
+          });
+          
+          for (const emp of employees) {
+            await prisma.chatParticipant.create({
+              data: {
+                chatId: groupChat.id,
+                userId: emp.id,
+                userType: 'EMPLOYEE',
+                isAdmin: false
+              }
+            }).catch(err => console.log('Could not add employee to group:', err.message));
           }
-        ]
+          
+          console.log('✅ Created shop group chat:', groupChat.id);
+        }
+      }
+    } else if (userType === 'EMPLOYEE') {
+      const employee = await prisma.empolyee.findUnique({
+        where: { id: userId },
+        select: { shop: { select: { groupChatId: true } } }
+      });
+      shopGroupChatId = employee?.shop?.groupChatId;
+    }
+
+    // Build OR conditions for chat query
+    const orConditions = [
+      // Common/Global group chat (accessible to everyone)
+      { 
+        type: 'GROUP',
+        name: 'ALL Chat'
+      },
+      // Personal chats where user is actually a participant
+      {
+        type: 'PERSONAL',
+        participants: {
+          some: {
+            userId: userId,
+            userType: userType
+          }
+        }
+      }
+    ];
+
+    // Add shop group chat if user belongs to a shop
+    if (shopGroupChatId) {
+      orConditions.push({
+        id: shopGroupChatId,
+        type: 'GROUP'
+      });
+    }
+
+    // Get chats where user is actually a participant OR the main group chat OR shop group chat
+    const chats = await prisma.chat.findMany({
+      where: {
+        OR: orConditions
       },
       include: {
         participants: {
@@ -149,6 +231,18 @@ export const createChat = async (req, res) => {
 
     if (type === 'GROUP' && !name) {
       return res.status(400).json({ success: false, message: 'Group chat requires a name' });
+    }
+
+    // RESTRICTION: Employees cannot start direct chats with other employees
+    // They can only chat with Admin or in group chats
+    if (type === 'PERSONAL' && userType === 'EMPLOYEE') {
+      const otherParticipant = participantIds[0];
+      if (otherParticipant.userType === 'EMPLOYEE') {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'Employees cannot start private chats with other employees. Please use the shop group chat.' 
+        });
+      }
     }
 
     // For personal chat, check if chat already exists
@@ -353,6 +447,32 @@ export const getChatById = async (req, res) => {
           });
         }
 
+        // Get shared list data if this is a LIST_SHARE message
+        let sharedListData = null;
+        if (msg.messageType === 'LIST_SHARE' && msg.sharedListId) {
+          const list = await prisma.list.findUnique({
+            where: { id: msg.sharedListId },
+            include: {
+              products: {
+                include: {
+                  productAtShop: {
+                    include: {
+                      product: true
+                    }
+                  }
+                }
+              }
+            }
+          });
+          if (list) {
+            sharedListData = {
+              id: list.id,
+              name: list.name,
+              itemCount: list.products.length
+            };
+          }
+        }
+
         return {
           id: msg.id,
           content: msg.content,
@@ -363,6 +483,8 @@ export const getChatById = async (req, res) => {
           attachmentUrl: msg.attachmentUrl,
           attachmentName: msg.attachmentName,
           attachmentSize: msg.attachmentSize,
+          sharedListId: msg.sharedListId,
+          sharedList: sharedListData,
           timestamp: msg.createdAt,
           isOwnMessage: msg.senderId === userId && msg.senderType === userType,
           readBy: msg.readReceipts.map(r => ({ userId: r.userId, userType: r.userType, readAt: r.readAt }))
@@ -441,11 +563,55 @@ export const sendMessage = async (req, res) => {
   try {
     const userId = req.user.id;
     const userType = req.user.userType;
-    const { chatId, content, messageType = 'TEXT', attachmentUrl, attachmentName, attachmentSize } = req.body;
+    const { chatId, content, messageType = 'TEXT', attachmentUrl, attachmentName, attachmentSize, sharedListId } = req.body;
 
     // Validation
     if (!chatId || !content) {
       return res.status(400).json({ success: false, message: 'Chat ID and content are required' });
+    }
+
+    // If sharing a list, verify the user owns the list
+    let sharedListData = null;
+    if (messageType === 'LIST_SHARE' && sharedListId) {
+      let listOwnerCheck;
+      if (userType === 'EMPLOYEE') {
+        listOwnerCheck = { id: sharedListId, employeeId: userId };
+      } else if (userType === 'ADMIN') {
+        listOwnerCheck = { id: sharedListId, adminId: userId };
+      } else {
+        listOwnerCheck = { id: sharedListId, customerId: userId };
+      }
+
+      const list = await prisma.list.findFirst({
+        where: listOwnerCheck,
+        include: {
+          products: {
+            include: {
+              productAtShop: {
+                include: {
+                  product: true,
+                  shop: true
+                }
+              }
+            }
+          }
+        }
+      });
+
+      if (!list) {
+        return res.status(403).json({ success: false, message: 'You can only share your own lists' });
+      }
+
+      sharedListData = {
+        id: list.id,
+        name: list.name,
+        description: list.description,
+        productCount: list.products.length,
+        products: list.products.slice(0, 3).map(p => ({
+          name: p.productAtShop?.product?.title || 'Unknown',
+          price: Number(p.productAtShop?.price) || 0
+        }))
+      };
     }
 
     // Check if user is participant
@@ -457,16 +623,15 @@ export const sendMessage = async (req, res) => {
       }
     });
 
-    // If not a participant, check if this is the ALL Chat group
+    // If not a participant, check if this is a shop group chat or ALL Chat
     if (!participant) {
-      // Get the chat to check if it's the main group chat
       const chat = await prisma.chat.findUnique({
         where: { id: chatId },
         select: { type: true, name: true }
       });
 
-      // If it's the ALL Chat group, automatically add user as participant
-      if (chat && chat.type === 'GROUP' && chat.name === 'ALL Chat') {
+      // If it's a GROUP chat, automatically add user as participant
+      if (chat && chat.type === 'GROUP') {
         participant = await prisma.chatParticipant.create({
           data: {
             chatId,
@@ -489,7 +654,8 @@ export const sendMessage = async (req, res) => {
         messageType,
         attachmentUrl,
         attachmentName,
-        attachmentSize
+        attachmentSize,
+        sharedListId: messageType === 'LIST_SHARE' ? sharedListId : null
       }
     });
 
@@ -527,6 +693,8 @@ export const sendMessage = async (req, res) => {
       attachmentUrl: message.attachmentUrl,
       attachmentName: message.attachmentName,
       attachmentSize: message.attachmentSize,
+      sharedListId: message.sharedListId,
+      sharedList: sharedListData,
       timestamp: message.createdAt,
       isOwnMessage: true
     };
@@ -699,87 +867,167 @@ export const getAllUsers = async (req, res) => {
       ]
     } : {};
 
-    // Get all customers
-    const customers = await prisma.customer.findMany({
-      where: {
-        NOT: {
-          AND: [
-            { id: currentUserId },
-            { userType: 'CUSTOMER' }
-          ]
-        },
-        ...searchFilter
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        userType: true
-      }
-    });
+    let allUsers = [];
 
-    // Get all employees
-    const employees = await prisma.empolyee.findMany({
-      where: {
-        NOT: {
-          AND: [
-            { id: currentUserId },
-            { userType: 'EMPLOYEE' }
-          ]
-        },
-        ...searchFilter
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        userType: true
-      }
-    });
+    // EMPLOYEE users can only see their shop owner (CUSTOMER who created them)
+    if (currentUserType === 'EMPLOYEE') {
+      // Get the employee's shop and createdByCustomerId
+      const employee = await prisma.empolyee.findUnique({
+        where: { id: currentUserId },
+        select: { shopId: true, createdByCustomerId: true }
+      });
 
-    // Get all admins
-    const admins = await prisma.admin.findMany({
-      where: {
-        NOT: {
-          AND: [
-            { id: currentUserId },
-            { userType: 'ADMIN' }
-          ]
+      // Get the Customer (shop owner) who owns this shop or created this employee
+      const customers = await prisma.customer.findMany({
+        where: {
+          OR: [
+            { shopId: employee?.shopId },
+            { id: employee?.createdByCustomerId }
+          ],
+          ...searchFilter
         },
-        ...searchFilter
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        userType: true
-      }
-    });
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          userType: true
+        }
+      });
 
-    // Combine all users
-    const allUsers = [
-      ...customers.map(user => ({
+      allUsers = customers.map(user => ({
         id: user.id.toString(),
-        name: user.name,
-        phone: user.email, // Using email as phone for display
+        name: user.name || 'Shop Owner',
+        phone: user.email,
         userType: 'CUSTOMER',
         isOnline: false
-      })),
-      ...employees.map(user => ({
-        id: user.id.toString(),
-        name: user.name,
-        phone: user.email,
-        userType: 'EMPLOYEE',
-        isOnline: false
-      })),
-      ...admins.map(user => ({
-        id: user.id.toString(),
-        name: user.name || 'Admin',
-        phone: user.email,
-        userType: 'ADMIN',
-        isOnline: false
-      }))
-    ];
+      }));
+
+    } else if (currentUserType === 'ADMIN') {
+      // Admin can see employees in their shop
+      const admin = await prisma.admin.findUnique({
+        where: { id: currentUserId },
+        select: { shopId: true }
+      });
+
+      // Get employees in the same shop
+      const employees = await prisma.empolyee.findMany({
+        where: {
+          shopId: admin?.shopId,
+          ...searchFilter
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          userType: true
+        }
+      });
+
+      // Get other admins in the same shop
+      const admins = await prisma.admin.findMany({
+        where: {
+          shopId: admin?.shopId,
+          NOT: { id: currentUserId },
+          ...searchFilter
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          userType: true
+        }
+      });
+
+      allUsers = [
+        ...employees.map(user => ({
+          id: user.id.toString(),
+          name: user.name,
+          phone: user.email,
+          userType: 'EMPLOYEE',
+          isOnline: false
+        })),
+        ...admins.map(user => ({
+          id: user.id.toString(),
+          name: user.name || 'Admin',
+          phone: user.email,
+          userType: 'ADMIN',
+          isOnline: false
+        }))
+      ];
+
+    } else {
+      // CUSTOMER - only see employees from their own shop + other customers
+      
+      // First get the customer's shop
+      const customer = await prisma.customer.findUnique({
+        where: { id: currentUserId },
+        select: { shopId: true }
+      });
+      
+      const customerShopId = customer?.shopId;
+      
+      // Other customers (for common chat)
+      const customers = await prisma.customer.findMany({
+        where: {
+          NOT: { id: currentUserId },
+          ...searchFilter
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          userType: true
+        }
+      });
+
+      // Employees ONLY from the customer's shop
+      const employees = customerShopId ? await prisma.empolyee.findMany({
+        where: {
+          shopId: customerShopId,
+          ...searchFilter
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          userType: true
+        }
+      }) : [];
+
+      const admins = await prisma.admin.findMany({
+        where: searchFilter,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          userType: true
+        }
+      });
+
+      allUsers = [
+        ...customers.map(user => ({
+          id: user.id.toString(),
+          name: user.name,
+          phone: user.email,
+          userType: 'CUSTOMER',
+          isOnline: false
+        })),
+        ...employees.map(user => ({
+          id: user.id.toString(),
+          name: user.name,
+          phone: user.email,
+          userType: 'EMPLOYEE',
+          isOnline: false
+        })),
+        ...admins.map(user => ({
+          id: user.id.toString(),
+          name: user.name || 'Admin',
+          phone: user.email,
+          userType: 'ADMIN',
+          isOnline: false
+        }))
+      ];
+    }
     
     res.status(200).json({
       success: true,

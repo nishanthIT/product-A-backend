@@ -47,34 +47,85 @@ const authenticateToken = (req, res, next) => {
 // Get all lists for the authenticated user
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const customerId = parseInt(req.user.id);
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
     
-    // Try cache first
-    const cachedLists = await cacheService.getCachedUserLists(customerId);
-    if (cachedLists) {
-      return res.json(cachedLists);
+    // Try cache first (only for CUSTOMER type for backwards compatibility)
+    if (userType === 'CUSTOMER') {
+      const cachedLists = await cacheService.getCachedUserLists(userId);
+      if (cachedLists) {
+        return res.json(cachedLists);
+      }
     }
 
-    const lists = await prisma.list.findMany({
-      where: {
-        customerId: customerId,
-      },
-      include: {
-        products: {
-          include: {
-            productAtShop: {
-              include: {
-                product: true,
-                shop: true,
+    let lists;
+    
+    if (userType === 'EMPLOYEE') {
+      // Employee: get their own lists
+      lists = await prisma.list.findMany({
+        where: {
+          employeeId: userId,
+          creatorType: 'EMPLOYEE'
+        },
+        include: {
+          products: {
+            include: {
+              productAtShop: {
+                include: {
+                  product: true,
+                  shop: true,
+                },
               },
             },
           },
         },
-      },
-    });
+        orderBy: { createdAt: 'desc' }
+      });
+    } else if (userType === 'ADMIN') {
+      // Admin: get their own lists
+      lists = await prisma.list.findMany({
+        where: {
+          adminId: userId,
+          creatorType: 'ADMIN'
+        },
+        include: {
+          products: {
+            include: {
+              productAtShop: {
+                include: {
+                  product: true,
+                  shop: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+    } else {
+      // Customer (default): get customer lists
+      lists = await prisma.list.findMany({
+        where: {
+          customerId: userId,
+        },
+        include: {
+          products: {
+            include: {
+              productAtShop: {
+                include: {
+                  product: true,
+                  shop: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' }
+      });
 
-    // Cache the result
-    await cacheService.cacheUserLists(customerId, lists);
+      // Cache the result for customers
+      await cacheService.cacheUserLists(userId, lists);
+    }
 
     res.json(lists);
   } catch (error) {
@@ -87,16 +138,46 @@ router.get('/', authenticateToken, async (req, res) => {
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
     const listId = req.params.id;
-    const customerId = parseInt(req.user.id);
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
     
     // Skip cache check - always fetch fresh data to avoid race conditions with togglePurchased
     console.log('📦 Fetching list from DATABASE (no cache):', listId);
 
-    const list = await withRetry(() => prisma.list.findFirst({
-      where: {
+    // Build the where clause based on user type
+    let whereClause = { id: listId };
+    
+    // Check ownership or allow Admin to view shop lists
+    if (userType === 'ADMIN') {
+      // Admin can view their own lists OR any employee list in their shop
+      const admin = await prisma.admin.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      
+      whereClause = {
         id: listId,
-        customerId: customerId,
-      },
+        OR: [
+          { adminId: userId },
+          { employee: { shopId: admin?.shopId } }
+        ]
+      };
+    } else if (userType === 'EMPLOYEE') {
+      // Employee can only view their own lists
+      whereClause = {
+        id: listId,
+        employeeId: userId
+      };
+    } else {
+      // Customer can only view their own lists
+      whereClause = {
+        id: listId,
+        customerId: userId
+      };
+    }
+
+    const list = await withRetry(() => prisma.list.findFirst({
+      where: whereClause,
       include: {
         products: {
           include: {
@@ -108,6 +189,12 @@ router.get('/:id', authenticateToken, async (req, res) => {
             },
           },
         },
+        employee: {
+          select: { id: true, name: true }
+        },
+        admin: {
+          select: { id: true, name: true }
+        }
       },
     }));
 
@@ -134,6 +221,10 @@ router.get('/:id', authenticateToken, async (req, res) => {
       img: lp.productAtShop?.product?.img || null,
       quantity: lp.quantity || 1,
       isPurchased: lp.isPurchased || false,
+      // Bundle offer fields
+      isFreeItem: lp.isFreeItem || false,
+      freeQuantity: lp.freeQuantity || 0,
+      bundlePromotionId: lp.bundlePromotionId || null,
     }));
 
     console.log('📦 Database isPurchased states:', transformedProducts.map(p => ({ id: p.id, name: p.productName, isPurchased: p.isPurchased })));
@@ -157,18 +248,43 @@ router.get('/:id', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const { name, description } = req.body;
-    const customerId = parseInt(req.user.id);
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
 
     if (!name) {
       return res.status(400).json({ error: 'List name is required' });
     }
 
+    // Build list data based on user type
+    const listData = {
+      name,
+      description: description || '',
+      creatorType: userType
+    };
+
+    if (userType === 'EMPLOYEE') {
+      // Get employee's shop
+      const employee = await prisma.empolyee.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      listData.employeeId = userId;
+      listData.shopId = employee?.shopId;
+    } else if (userType === 'ADMIN') {
+      // Get admin's shop
+      const admin = await prisma.admin.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      listData.adminId = userId;
+      listData.shopId = admin?.shopId;
+    } else {
+      // Customer (default)
+      listData.customerId = userId;
+    }
+
     const newList = await prisma.list.create({
-      data: {
-        name,
-        description: description || '',
-        customerId,
-      },
+      data: listData,
       include: {
         products: {
           include: {
@@ -183,9 +299,11 @@ router.post('/', authenticateToken, async (req, res) => {
       },
     });
 
-    // Invalidate user's list cache
-    await cacheService.invalidateUserLists(customerId);
-    console.log(`🗑️ Cache invalidated: user ${customerId} lists (new list created)`);
+    // Invalidate user's list cache (for customers)
+    if (userType === 'CUSTOMER') {
+      await cacheService.invalidateUserLists(userId);
+      console.log(`🗑️ Cache invalidated: user ${userId} lists (new list created)`);
+    }
 
     res.status(201).json(newList);
   } catch (error) {
@@ -198,22 +316,30 @@ router.post('/', authenticateToken, async (req, res) => {
 router.post('/addProduct', authenticateToken, async (req, res) => {
   try {
     const { listId, productAtShopId, quantity = 1 } = req.body;
-    const customerId = parseInt(req.user.id);
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
 
     if (!listId || !productAtShopId) {
       return res.status(400).json({ error: 'listId and productAtShopId are required' });
     }
 
+    // Build ownership check based on user type
+    let ownershipCheck;
+    if (userType === 'EMPLOYEE') {
+      ownershipCheck = { id: listId, employeeId: userId };
+    } else if (userType === 'ADMIN') {
+      ownershipCheck = { id: listId, adminId: userId };
+    } else {
+      ownershipCheck = { id: listId, customerId: userId };
+    }
+
     // Verify the list belongs to the user
     const list = await prisma.list.findFirst({
-      where: {
-        id: listId,
-        customerId: customerId,
-      },
+      where: ownershipCheck
     });
 
     if (!list) {
-      return res.status(404).json({ error: 'List not found' });
+      return res.status(404).json({ error: 'List not found or access denied' });
     }
 
     // Check if the product already exists in the list
@@ -243,9 +369,11 @@ router.post('/addProduct', authenticateToken, async (req, res) => {
         },
       });
 
-      // Invalidate caches
-      await cacheService.invalidateUserLists(customerId);
-      await cacheService.invalidateListDetail(listId);
+      // Invalidate caches (only for customers)
+      if (userType === 'CUSTOMER') {
+        await cacheService.invalidateUserLists(userId);
+        await cacheService.invalidateListDetail(listId);
+      }
 
       res.json({ message: 'Product quantity updated', product: updatedProduct });
     } else {
@@ -587,6 +715,486 @@ router.get('/:id/lowest-prices', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error fetching lowest prices:', error);
     res.status(500).json({ error: 'Failed to fetch lowest prices' });
+  }
+});
+
+// Check bundle offers BEFORE adding a product (by productId)
+// This is called before adding to show popup if bundle offer exists
+router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
+  try {
+    const { productId, listId } = req.body;
+    console.log('📦 Check bundle before add:', { productId, listId });
+
+    if (!productId) {
+      return res.status(400).json({ error: 'productId is required', hasOffers: false });
+    }
+
+    // Find the product in all shops (excluding out of stock)
+    const productAtShops = await prisma.productAtShop.findMany({
+      where: {
+        productId,
+        outOfStock: false,
+      },
+      include: {
+        shop: true,
+        product: true,
+      },
+    });
+
+    if (productAtShops.length === 0) {
+      return res.status(404).json({ 
+        error: 'Product not available in any shop',
+        hasOffers: false
+      });
+    }
+
+    // Helper function to get effective price
+    const getEffectivePrice = (productAtShop) => {
+      const now = new Date();
+      const hasActiveOffer = productAtShop.offerPrice !== null && 
+        productAtShop.offerStartDate !== null &&
+        productAtShop.offerEndDate !== null &&
+        new Date(productAtShop.offerStartDate) <= now && 
+        new Date(productAtShop.offerEndDate) >= now;
+      
+      return {
+        price: parseFloat(hasActiveOffer ? productAtShop.offerPrice : productAtShop.price),
+        originalPrice: parseFloat(productAtShop.price),
+        offerPrice: hasActiveOffer ? parseFloat(productAtShop.offerPrice) : null,
+        hasActiveOffer
+      };
+    };
+
+    // Find the shop with the lowest effective price
+    const lowestPriceEntry = productAtShops.reduce((lowest, current) => {
+      const currentEffective = getEffectivePrice(current);
+      const lowestEffective = getEffectivePrice(lowest);
+      return currentEffective.price < lowestEffective.price ? current : lowest;
+    });
+
+    const productAtShopId = lowestPriceEntry.id;
+    const shopId = lowestPriceEntry.shopId;
+    const now = new Date();
+
+    // Find active bundle promotions for this product at this shop
+    const bundlePromotions = await prisma.bundlePromotion.findMany({
+      where: {
+        shopId,
+        isActive: true,
+        OR: [
+          { startDate: null },
+          { startDate: { lte: now } }
+        ],
+        AND: [
+          {
+            OR: [
+              { endDate: null },
+              { endDate: { gte: now } }
+            ]
+          }
+        ],
+        buyItems: {
+          some: {
+            productId
+          }
+        }
+      },
+      include: {
+        buyItems: {
+          include: {
+            product: {
+              select: { id: true, title: true, img: true, barcode: true }
+            }
+          }
+        },
+        getItems: {
+          include: {
+            product: {
+              select: { id: true, title: true, img: true, barcode: true }
+            }
+          }
+        }
+      }
+    });
+
+    const effectivePrice = getEffectivePrice(lowestPriceEntry);
+
+    // If product already in list, check current quantity
+    let currentQuantityInList = 0;
+    if (listId) {
+      const existingProduct = await prisma.listProduct.findFirst({
+        where: { 
+          listId, 
+          productAtShopId: {
+            in: productAtShops.map(p => p.id)
+          }
+        }
+      });
+      if (existingProduct) {
+        currentQuantityInList = existingProduct.quantity || 1;
+      }
+    }
+
+    // Format the response with offer details
+    const offers = bundlePromotions.map(promo => {
+      const buyItem = promo.buyItems.find(bi => bi.productId === productId);
+      const totalBuyQuantity = buyItem?.quantity || 1;
+      const additionalNeeded = Math.max(0, totalBuyQuantity - currentQuantityInList);
+      
+      const freeItems = promo.getItems.map(gi => ({
+        productId: gi.productId,
+        productName: gi.product.title,
+        productImage: gi.product.img,
+        freeQuantity: gi.quantity
+      }));
+
+      return {
+        bundlePromotionId: promo.id,
+        name: promo.name,
+        description: promo.description,
+        promotionType: promo.promotionType,
+        buyQuantityRequired: totalBuyQuantity,
+        currentQuantityInList,
+        additionalNeeded,
+        isEligible: additionalNeeded === 0,
+        freeItems,
+        offerMessage: `Add ${totalBuyQuantity} to get ${freeItems.map(f => `${f.freeQuantity}x ${f.productName}`).join(', ')} FREE!`
+      };
+    });
+
+    res.json({ 
+      productId,
+      productAtShopId,
+      productName: lowestPriceEntry.product.title,
+      productImage: lowestPriceEntry.product.img,
+      productBarcode: lowestPriceEntry.product.barcode,
+      shopId,
+      shopName: lowestPriceEntry.shop.name,
+      price: effectivePrice.price,
+      originalPrice: effectivePrice.originalPrice,
+      offerPrice: effectivePrice.offerPrice,
+      hasActiveOffer: effectivePrice.hasActiveOffer,
+      availableInShops: productAtShops.length,
+      offers,
+      hasOffers: offers.length > 0,
+      currentQuantityInList
+    });
+  } catch (error) {
+    console.error('Error checking bundle before add:', error);
+    res.status(500).json({ error: 'Failed to check bundle offers', hasOffers: false });
+  }
+});
+
+// Check bundle promotions for a product
+router.get('/bundle-offers/:productAtShopId', authenticateToken, async (req, res) => {
+  try {
+    const { productAtShopId } = req.params;
+    const { currentQuantity = 1 } = req.query;
+
+    // Get the product and its shop
+    const productAtShop = await prisma.productAtShop.findUnique({
+      where: { id: productAtShopId },
+      include: {
+        product: true,
+        shop: true,
+      }
+    });
+
+    if (!productAtShop) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const productId = productAtShop.productId;
+    const shopId = productAtShop.shopId;
+    const now = new Date();
+
+    // Find active bundle promotions for this product at this shop
+    const bundlePromotions = await prisma.bundlePromotion.findMany({
+      where: {
+        shopId,
+        isActive: true,
+        OR: [
+          { startDate: null },
+          { startDate: { lte: now } }
+        ],
+        AND: [
+          {
+            OR: [
+              { endDate: null },
+              { endDate: { gte: now } }
+            ]
+          }
+        ],
+        buyItems: {
+          some: {
+            productId
+          }
+        }
+      },
+      include: {
+        buyItems: {
+          include: {
+            product: {
+              select: { id: true, title: true, img: true }
+            }
+          }
+        },
+        getItems: {
+          include: {
+            product: {
+              select: { id: true, title: true, img: true }
+            }
+          }
+        }
+      }
+    });
+
+    // Format the response with offer details
+    const offers = bundlePromotions.map(promo => {
+      const buyItem = promo.buyItems.find(bi => bi.productId === productId);
+      const totalBuyQuantity = buyItem?.quantity || 1;
+      const additionalNeeded = Math.max(0, totalBuyQuantity - parseInt(currentQuantity));
+      
+      const freeItems = promo.getItems.map(gi => ({
+        productId: gi.productId,
+        productName: gi.product.title,
+        productImage: gi.product.img,
+        freeQuantity: gi.quantity
+      }));
+
+      return {
+        bundlePromotionId: promo.id,
+        name: promo.name,
+        description: promo.description,
+        promotionType: promo.promotionType,
+        buyQuantityRequired: totalBuyQuantity,
+        currentQuantity: parseInt(currentQuantity),
+        additionalNeeded,
+        isEligible: additionalNeeded === 0,
+        freeItems,
+        // Generate user-friendly message
+        offerMessage: additionalNeeded > 0 
+          ? `Add ${additionalNeeded} more to get ${freeItems.map(f => `${f.freeQuantity}x ${f.productName}`).join(', ')} FREE!`
+          : `You qualify! Get ${freeItems.map(f => `${f.freeQuantity}x ${f.productName}`).join(', ')} FREE!`
+      };
+    });
+
+    res.json({ 
+      productId,
+      productName: productAtShop.product.title,
+      offers,
+      hasOffers: offers.length > 0
+    });
+  } catch (error) {
+    console.error('Error checking bundle offers:', error);
+    res.status(500).json({ error: 'Failed to check bundle offers' });
+  }
+});
+
+// Claim a bundle offer and add products to list
+router.post('/claim-bundle', authenticateToken, async (req, res) => {
+  try {
+    const { listId, productAtShopId, bundlePromotionId, quantity } = req.body;
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
+
+    if (!listId || !productAtShopId || !bundlePromotionId || !quantity) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Build ownership check
+    let ownershipCheck;
+    if (userType === 'EMPLOYEE') {
+      ownershipCheck = { id: listId, employeeId: userId };
+    } else if (userType === 'ADMIN') {
+      ownershipCheck = { id: listId, adminId: userId };
+    } else {
+      ownershipCheck = { id: listId, customerId: userId };
+    }
+
+    // Verify list ownership
+    const list = await prisma.list.findFirst({
+      where: ownershipCheck
+    });
+
+    if (!list) {
+      return res.status(404).json({ error: 'List not found or access denied' });
+    }
+
+    // Get the bundle promotion with items
+    const bundlePromotion = await prisma.bundlePromotion.findUnique({
+      where: { id: bundlePromotionId },
+      include: {
+        buyItems: {
+          include: {
+            product: true
+          }
+        },
+        getItems: {
+          include: {
+            product: true
+          }
+        }
+      }
+    });
+
+    if (!bundlePromotion || !bundlePromotion.isActive) {
+      return res.status(404).json({ error: 'Bundle promotion not found or inactive' });
+    }
+
+    // Get product details
+    const productAtShop = await prisma.productAtShop.findUnique({
+      where: { id: productAtShopId },
+      include: { product: true, shop: true }
+    });
+
+    if (!productAtShop) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    // Verify quantity meets bundle requirement
+    const buyItem = bundlePromotion.buyItems.find(bi => bi.productId === productAtShop.productId);
+    if (!buyItem || quantity < buyItem.quantity) {
+      return res.status(400).json({ 
+        error: `Need at least ${buyItem?.quantity || 1} items to claim this offer` 
+      });
+    }
+
+    // Calculate free items earned
+    const bundlesEarned = Math.floor(quantity / buyItem.quantity);
+    
+    // Start transaction to add/update products
+    const result = await prisma.$transaction(async (tx) => {
+      // Check if main product already exists in list
+      const existingProduct = await tx.listProduct.findFirst({
+        where: { listId, productAtShopId }
+      });
+
+      let mainProduct;
+      const freeQuantityForMain = bundlePromotion.getItems
+        .filter(gi => gi.productId === productAtShop.productId)
+        .reduce((sum, gi) => sum + (gi.quantity * bundlesEarned), 0);
+
+      if (existingProduct) {
+        // Update existing product
+        mainProduct = await tx.listProduct.update({
+          where: { id: existingProduct.id },
+          data: {
+            quantity,
+            freeQuantity: freeQuantityForMain,
+            bundlePromotionId: freeQuantityForMain > 0 ? bundlePromotionId : existingProduct.bundlePromotionId,
+            isFreeItem: false
+          },
+          include: {
+            productAtShop: {
+              include: { product: true, shop: true }
+            }
+          }
+        });
+      } else {
+        // Create new product entry
+        mainProduct = await tx.listProduct.create({
+          data: {
+            listId,
+            productAtShopId,
+            quantity,
+            freeQuantity: freeQuantityForMain,
+            bundlePromotionId: freeQuantityForMain > 0 ? bundlePromotionId : null,
+            isFreeItem: false
+          },
+          include: {
+            productAtShop: {
+              include: { product: true, shop: true }
+            }
+          }
+        });
+      }
+
+      // Add free items that are different products
+      const freeProducts = [];
+      for (const getItem of bundlePromotion.getItems) {
+        // Skip if it's the same product (already handled above)
+        if (getItem.productId === productAtShop.productId) continue;
+
+        const freeQty = getItem.quantity * bundlesEarned;
+        if (freeQty <= 0) continue;
+
+        // Find productAtShop for the free item in the same shop
+        const freeProductAtShop = await tx.productAtShop.findFirst({
+          where: {
+            productId: getItem.productId,
+            shopId: productAtShop.shopId
+          }
+        });
+
+        if (!freeProductAtShop) continue;
+
+        // Check if free product already in list
+        const existingFreeProduct = await tx.listProduct.findFirst({
+          where: { 
+            listId, 
+            productAtShopId: freeProductAtShop.id 
+          }
+        });
+
+        let freeProduct;
+        if (existingFreeProduct) {
+          freeProduct = await tx.listProduct.update({
+            where: { id: existingFreeProduct.id },
+            data: {
+              quantity: existingFreeProduct.quantity + freeQty,
+              freeQuantity: (existingFreeProduct.freeQuantity || 0) + freeQty,
+              bundlePromotionId,
+              isFreeItem: true
+            },
+            include: {
+              productAtShop: {
+                include: { product: true, shop: true }
+              }
+            }
+          });
+        } else {
+          freeProduct = await tx.listProduct.create({
+            data: {
+              listId,
+              productAtShopId: freeProductAtShop.id,
+              quantity: freeQty,
+              freeQuantity: freeQty,
+              bundlePromotionId,
+              isFreeItem: true
+            },
+            include: {
+              productAtShop: {
+                include: { product: true, shop: true }
+              }
+            }
+          });
+        }
+        freeProducts.push(freeProduct);
+      }
+
+      return { mainProduct, freeProducts };
+    });
+
+    // Invalidate caches
+    if (userType === 'CUSTOMER') {
+      await cacheService.invalidateUserLists(userId);
+      await cacheService.invalidateListDetail(listId);
+    }
+
+    res.json({
+      success: true,
+      message: 'Bundle offer claimed!',
+      mainProduct: result.mainProduct,
+      freeProducts: result.freeProducts,
+      bundlePromotion: {
+        id: bundlePromotion.id,
+        name: bundlePromotion.name
+      }
+    });
+  } catch (error) {
+    console.error('Error claiming bundle offer:', error);
+    res.status(500).json({ error: 'Failed to claim bundle offer' });
   }
 });
 

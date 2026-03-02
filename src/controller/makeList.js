@@ -25,13 +25,13 @@ const getEffectivePrice = (productAtShop) => {
 };
 
 const makeList = async (req, res) => {
-  // Get customerId from authenticated user (from JWT token via middleware)
-  const customerId = req.user?.id;
+  // Get userId from authenticated user (from JWT token via middleware)
+  const userId = req.user?.id;
   const userType = req.user?.userType;
   
-  // Only customers can create lists
-  if (userType !== 'CUSTOMER') {
-    return res.status(403).json({ error: "Only customers can create shopping lists" });
+  // Customers and Employees can create lists
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
+    return res.status(403).json({ error: "Only customers and employees can create shopping lists" });
   }
   
   const { name, description } = req.body;
@@ -41,12 +41,27 @@ const makeList = async (req, res) => {
   }
 
   try {
+    // Build list data based on user type
+    const listData = {
+      name,
+      description: description || '',
+      creatorType: userType,
+    };
+    
+    if (userType === 'EMPLOYEE') {
+      // Get employee's shop
+      const employee = await prisma.empolyee.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      listData.employeeId = userId;
+      listData.shopId = employee?.shopId;
+    } else {
+      listData.customerId = userId;
+    }
+    
     const list = await prisma.list.create({
-      data: {
-        name,
-        description: description || '',
-        customerId,
-      },
+      data: listData,
       include: {
         products: true, // Include products to get count
       },
@@ -62,8 +77,10 @@ const makeList = async (req, res) => {
       updatedAt: list.updatedAt,
     };
     
-    // Invalidate user's lists cache
-    await cacheService.invalidateUserLists(customerId);
+    // Invalidate user's lists cache (for customers)
+    if (userType === 'CUSTOMER') {
+      await cacheService.invalidateUserLists(userId);
+    }
     
     res.status(201).json(formattedList);
   } catch (error) {
@@ -73,13 +90,13 @@ const makeList = async (req, res) => {
 };
 
 const addProductToList = async (req, res) => {
-  const customerId = req.user?.id;
+  const userId = req.user?.id;
   const userType = req.user?.userType;
   const { listId, productId } = req.body;
 
-  // Only customers can add products to lists
-  if (userType !== 'CUSTOMER') {
-    return res.status(403).json({ error: "Only customers can add products to lists" });
+  // Customers and Employees can add products to lists
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
+    return res.status(403).json({ error: "Only customers and employees can add products to lists" });
   }
 
   if (!listId || !productId) {
@@ -87,7 +104,7 @@ const addProductToList = async (req, res) => {
   }
 
   try {
-    // Check if the list exists and belongs to the customer
+    // Check if the list exists and belongs to the user
     const list = await prisma.list.findUnique({
       where: {
         id: listId,
@@ -101,14 +118,20 @@ const addProductToList = async (req, res) => {
       return res.status(404).json({ error: "List not found-e1" });
     }
     
-    if (list.customerId !== customerId) {
+    // Check ownership based on user type
+    const isOwner = userType === 'EMPLOYEE' 
+      ? list.employeeId === userId
+      : list.customerId === userId;
+    
+    if (!isOwner) {
       return res.status(403).json({ error: "You don't have permission to modify this list" });
     }
 
-    // Find the product in all shops
+    // Find the product in all shops (excluding out of stock)
     const productAtShops = await prisma.productAtShop.findMany({
       where: {
         productId,
+        outOfStock: false, // Exclude out of stock products
       },
       include: {
         shop: true,
@@ -116,9 +139,23 @@ const addProductToList = async (req, res) => {
       },
     });
 
-    console.log(`Found ${productAtShops.length} shops with product ${productId}`);
+    console.log(`Found ${productAtShops.length} in-stock shops with product ${productId}`);
 
     if (productAtShops.length === 0) {
+      // Check if product exists but is out of stock everywhere
+      const outOfStockProducts = await prisma.productAtShop.count({
+        where: {
+          productId,
+          outOfStock: true,
+        },
+      });
+      
+      if (outOfStockProducts > 0) {
+        return res.status(404).json({ 
+          error: "This product is currently out of stock in all shops." 
+        });
+      }
+      
       return res.status(404).json({ 
         error: "Product not available in any shop yet. Please ask an employee to add it to a shop first." 
       });
@@ -187,6 +224,13 @@ const addProductToList = async (req, res) => {
       },
     });
 
+    // Invalidate cache for this list and user's lists (before sending response)
+    try {
+      await cacheService.invalidateAllUserListCache(userId, listId);
+    } catch (cacheError) {
+      console.error("Cache invalidation error (non-fatal):", cacheError);
+    }
+
     res.status(200).json({
       success: true,
       message: "Product added to list successfully.",
@@ -201,9 +245,6 @@ const addProductToList = async (req, res) => {
       },
     });
     
-    // Invalidate cache for this list and user's lists
-    await cacheService.invalidateAllUserListCache(customerId, listId);
-    
   } catch (error) {
     console.error("Error adding product to list:", error);
     res.status(500).json({ error: "Internal server error." });
@@ -214,19 +255,32 @@ const addProductToList = async (req, res) => {
 
 // Get lowest price for each product in a list
 const getLowestPricesInList = async (req, res) => {
-  const { listId, customerId } = req.body;
+  const { listId } = req.body;
+  const userId = req.user?.id;
+  const userType = req.user?.userType;
 
   try {
-    // Step 1: Verify the list belongs to the given customer
+    // Step 1: Verify the list belongs to the given user
     const list = await prisma.list.findUnique({
       where: { id: listId },
       include: { customer: true },
     });
 
-    if (!list || list.customerId !== parseInt(customerId, 10)) {
+    if (!list) {
       return res
         .status(404)
-        .json({ error: "List not found or does not belong to the customer." });
+        .json({ error: "List not found." });
+    }
+    
+    // Check ownership based on user type
+    const isOwner = userType === 'EMPLOYEE' 
+      ? list.employeeId === userId
+      : list.customerId === userId;
+    
+    if (!isOwner) {
+      return res
+        .status(403)
+        .json({ error: "You don't have permission to access this list." });
     }
 
     // Step 2: Fetch all products in the list along with their associated shops
@@ -290,21 +344,27 @@ const getLowestPricesInList = async (req, res) => {
 
 const removeProductFromList = async (req, res) => {
   try {
-    const customerId = req.user?.id;
+    const userId = req.user?.id;
+    const userType = req.user?.userType;
     const { listId, productId } = req.body;
     
-    // Verify the list exists and belongs to this customer
+    // Build where clause based on user type
+    const whereClause = {
+      id: listId,
+      ...(userType === 'EMPLOYEE' 
+        ? { employeeId: userId }
+        : { customerId: userId })
+    };
+    
+    // Verify the list exists and belongs to this user
     const list = await prisma.list.findFirst({
-      where: { 
-        id: listId,
-        customerId: customerId 
-      }
+      where: whereClause
     });
 
     console.log('List found?', list ? 'YES' : 'NO');
 
     if (!list) {
-      console.log('ERROR: List not found or does not belong to customer');
+      console.log('ERROR: List not found or does not belong to user');
       return res.status(404).json({ error: "List not found-e2" });
     }
 
@@ -324,8 +384,10 @@ const removeProductFromList = async (req, res) => {
       return res.status(404).json({ error: "Product not found in list" });
     }
 
-    // Invalidate cache for this list and user's lists
-    await cacheService.invalidateAllUserListCache(customerId, listId);
+    // Invalidate cache for this list and user's lists (only for customers)
+    if (userType === 'CUSTOMER') {
+      await cacheService.invalidateAllUserListCache(userId, listId);
+    }
 
     return res.status(200).json({
       success: true,
@@ -340,26 +402,31 @@ const removeProductFromList = async (req, res) => {
 
 // Get all lists for the authenticated user
 const getUserLists = async (req, res) => {
-  const customerId = req.user?.id;
+  const userId = req.user?.id;
   const userType = req.user?.userType;
   
-  // Only customers have lists
-  if (userType !== 'CUSTOMER') {
-    return res.status(403).json({ error: "Only customers can have shopping lists" });
+  // Customers and Employees have lists
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
+    return res.status(403).json({ error: "Only customers and employees can have shopping lists" });
   }
 
   try {
-    // Try cache first
-    const cachedLists = await cacheService.getCachedUserLists(customerId);
-    if (cachedLists) {
-      console.log(`⚡ Returning cached lists for user ${customerId}`);
-      return res.status(200).json(cachedLists);
+    // Try cache first (only for customers)
+    if (userType === 'CUSTOMER') {
+      const cachedLists = await cacheService.getCachedUserLists(userId);
+      if (cachedLists) {
+        console.log(`⚡ Returning cached lists for user ${userId}`);
+        return res.status(200).json({ lists: cachedLists });
+      }
     }
 
+    // Build where clause based on user type
+    const whereClause = userType === 'EMPLOYEE' 
+      ? { employeeId: userId }
+      : { customerId: userId };
+
     const lists = await prisma.list.findMany({
-      where: {
-        customerId,
-      },
+      where: whereClause,
       include: {
         products: {
           include: {
@@ -378,26 +445,45 @@ const getUserLists = async (req, res) => {
     });
 
     // Group products by productId to count unique products
-    const formattedLists = lists.map(list => {
+    const formattedLists = await Promise.all(lists.map(async (list) => {
       const uniqueProducts = new Set();
       list.products.forEach(lp => {
         uniqueProducts.add(lp.productAtShop.productId);
       });
+      
+      // If copied from another list, get the creator name
+      let copiedFromName = null;
+      if (list.copiedFromId) {
+        const originalList = await prisma.list.findUnique({
+          where: { id: list.copiedFromId },
+          include: {
+            employee: { select: { name: true } },
+            customer: { select: { name: true } }
+          }
+        });
+        if (originalList) {
+          copiedFromName = originalList.employee?.name || originalList.customer?.name || 'Unknown';
+        }
+      }
       
       return {
         id: list.id,
         name: list.name,
         description: list.description,
         itemCount: uniqueProducts.size,
+        copiedFromId: list.copiedFromId,
+        copiedFromName: copiedFromName,
         createdAt: list.createdAt,
         updatedAt: list.updatedAt,
       };
-    });
+    }));
 
-    // Cache the result
-    await cacheService.cacheUserLists(customerId, formattedLists);
+    // Cache the result (only for customers)
+    if (userType === 'CUSTOMER') {
+      await cacheService.cacheUserLists(userId, formattedLists);
+    }
 
-    res.status(200).json(formattedLists);
+    res.status(200).json({ lists: formattedLists });
   } catch (error) {
     console.error("Error fetching lists:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -407,20 +493,22 @@ const getUserLists = async (req, res) => {
 // Get a specific list by ID
 const getListById = async (req, res) => {
   console.log("Yes i am printing from here-------")
-  const customerId = req.user?.id;
+  const userId = req.user?.id;
   const userType = req.user?.userType;
   const { listId } = req.params;
   
-  if (userType !== 'CUSTOMER') {
-    return res.status(403).json({ error: "Only customers can access shopping lists" });
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
+    return res.status(403).json({ error: "Only customers and employees can access shopping lists" });
   }
 
   try {
-    // Try cache first
-    const cachedList = await cacheService.getCachedListDetail(listId);
-    if (cachedList && cachedList.customerId === customerId) {
-      console.log(`⚡ Returning cached list detail for ${listId}`);
-      return res.status(200).json(cachedList);
+    // Try cache first (for customers)
+    if (userType === 'CUSTOMER') {
+      const cachedList = await cacheService.getCachedListDetail(listId);
+      if (cachedList && cachedList.customerId === userId) {
+        console.log(`⚡ Returning cached list detail for ${listId}`);
+        return res.status(200).json(cachedList);
+      }
     }
 
     const list = await prisma.list.findUnique({
@@ -445,8 +533,38 @@ const getListById = async (req, res) => {
       return res.status(404).json({ error: "List not found-e3" });
     }
 
-    // Verify the list belongs to the customer
-    if (list.customerId !== customerId) {
+    // Get user's shop to check access
+    let userShopId = null;
+    if (userType === 'EMPLOYEE') {
+      const employee = await prisma.empolyee.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      userShopId = employee?.shopId;
+    } else {
+      const customer = await prisma.customer.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      userShopId = customer?.shopId;
+    }
+
+    // Verify the list belongs to the user OR is from the same shop (for shared lists)
+    const isOwner = userType === 'EMPLOYEE' 
+      ? list.employeeId === userId
+      : list.customerId === userId;
+    
+    // Check if list is from same shop (allows viewing shared lists)
+    const isSameShop = list.shopId === userShopId || 
+      (list.customerId && userShopId && await (async () => {
+        const listOwner = await prisma.customer.findUnique({
+          where: { id: list.customerId },
+          select: { shopId: true }
+        });
+        return listOwner?.shopId === userShopId;
+      })());
+    
+    if (!isOwner && !isSameShop) {
       return res.status(403).json({ error: "You don't have permission to access this list" });
     }
 
@@ -523,16 +641,16 @@ const getListById = async (req, res) => {
 
 // Delete a list
 const deleteList = async (req, res) => {
-  const customerId = req.user?.id;
+  const userId = req.user?.id;
   const userType = req.user?.userType;
   const { listId } = req.params;
   
-  if (userType !== 'CUSTOMER') {
-    return res.status(403).json({ error: "Only customers can delete shopping lists" });
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
+    return res.status(403).json({ error: "Only customers and employees can delete shopping lists" });
   }
 
   try {
-    // First verify the list exists and belongs to the customer
+    // First verify the list exists and belongs to the user
     const list = await prisma.list.findUnique({
       where: { id: listId },
     });
@@ -541,7 +659,12 @@ const deleteList = async (req, res) => {
       return res.status(404).json({ error: "List not found-e4" });
     }
 
-    if (list.customerId !== customerId) {
+    // Check ownership based on user type
+    const isOwner = userType === 'EMPLOYEE' 
+      ? list.employeeId === userId
+      : list.customerId === userId;
+    
+    if (!isOwner) {
       return res.status(403).json({ error: "You don't have permission to delete this list" });
     }
 
@@ -550,8 +673,10 @@ const deleteList = async (req, res) => {
       where: { id: listId },
     });
 
-    // Invalidate cache for this list and user's lists
-    await cacheService.invalidateAllUserListCache(customerId, listId);
+    // Invalidate cache for this list and user's lists (only for customers)
+    if (userType === 'CUSTOMER') {
+      await cacheService.invalidateAllUserListCache(userId, listId);
+    }
 
     res.status(200).json({ 
       success: true,

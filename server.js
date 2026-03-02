@@ -1,15 +1,21 @@
 import express from "express";
 import dotenv from "dotenv";
+import jwt from 'jsonwebtoken';
 import authRoutes from "./src/routes/authRoutes.js";
 import chatRoutes from "./src/routes/chat.js";
 import priceReportsRoutes from "./src/routes/priceReports.js";
 import promotionsRoutes from "./src/routes/promotions.js";
-import productPromotionsRoutes from "./src/routes/productPromotions.js";
 import adminRoutes from "./src/routes/adminRoutes.js";
 import listRoutes from "./src/routes/listRoutes.js";
 import advertisementsRoutes from "./src/routes/advertisements.js";
 import newsRoutes from "./src/routes/news.js";
 import categoryRoutes from "./src/routes/categoryRoutes.js";
+import employeeRoutes from "./src/routes/employeeRoutes.js";
+import shopRoutes from "./src/routes/shopRoutes.js";
+import expiryRoutes from "./src/routes/expiryRoutes.js";
+import taskRoutes from "./src/routes/taskRoutes.js";
+import fridgeRoutes from "./src/routes/fridgeRoutes.js";
+import cleaningRoutes from "./src/routes/cleaningRoutes.js";
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
@@ -61,6 +67,31 @@ app.use('/images', express.static('images'));
 // Socket.IO connection handling - Define userSockets BEFORE using it in middleware
 const userSockets = new Map(); // Map userId to socketId
 
+// Socket.IO authentication middleware
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token;
+  
+  if (!token) {
+    // Allow connection without token for backwards compatibility
+    // but log a warning - socket won't have user context
+    console.log('⚠️ Socket connection without auth token - limited functionality');
+    socket.user = null;
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    socket.user = decoded; // Attach user info to socket
+    console.log(`🔐 Socket authenticated for user ${decoded.email} (ID: ${decoded.id})`);
+    next();
+  } catch (err) {
+    console.log('🔐 Socket auth failed:', err.message);
+    // Emit auth error before rejecting
+    socket.emit('auth_error', { message: 'Token expired or invalid' });
+    return next(new Error('Authentication error: ' + err.message));
+  }
+});
+
 // Make io, userSockets and cacheService available to routes
 app.use((req, res, next) => {
   req.io = io;
@@ -73,12 +104,17 @@ app.use("/api", authRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/price-reports", priceReportsRoutes);
 app.use("/api/promotions", promotionsRoutes);
-app.use("/api/product-promotions", productPromotionsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/lists", listRoutes);
 app.use("/api/advertisements", advertisementsRoutes);
 app.use("/api/news", newsRoutes);
 app.use("/api/categories", categoryRoutes);
+app.use("/api/employees", employeeRoutes);
+app.use("/api/shop", shopRoutes);
+app.use("/api/expiry", expiryRoutes);
+app.use("/api/tasks", taskRoutes);
+app.use("/api/fridges", fridgeRoutes);
+app.use("/api/cleaning", cleaningRoutes);
 
 // Global error handler
 app.use((err, req, res, next) => {
@@ -101,7 +137,16 @@ app.get('/api/health', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log('User connected:', socket.id, socket.user ? `(User: ${socket.user.email})` : '(No auth)');
+
+  // If socket was authenticated, automatically join user room
+  if (socket.user) {
+    const userId = socket.user.id;
+    socket.join(`user_${userId}`);
+    userSockets.set(userId, socket.id);
+    cacheService.setUserOnline(userId, socket.id).catch(err => console.error('Cache error:', err));
+    console.log(`✅ Auto-joined user ${userId} to their personal room via auth token`);
+  }
 
   // Join user to their personal room (for direct messages)
   socket.on('join_user_room', async (userId) => {

@@ -231,7 +231,7 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     console.log('Creating promotion - Body:', req.body);
     console.log('Creating promotion - Files:', req.files);
     
-    const { title, description, shopId, productIds, productPrices, startDate, endDate } = req.body;
+    const { title, description, shopId, productIds } = req.body;
     const files = req.files;
 
     // Check for at least one image (either single 'image' or multiple 'images')
@@ -252,14 +252,6 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
       return res.status(400).json({ error: 'At least one product must be selected' });
     }
 
-    // Parse product prices
-    let parsedPrices = [];
-    try {
-      parsedPrices = JSON.parse(productPrices || '[]');
-    } catch (error) {
-      console.error('Invalid product prices format:', error);
-    }
-
     // Verify shop exists
     const shop = await prisma.shop.findUnique({
       where: { id: shopId }
@@ -278,26 +270,6 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
 
     if (products.length !== parsedProductIds.length) {
       return res.status(404).json({ error: 'One or more products not found' });
-    }
-
-    // Update offer prices in ProductAtShop for each product
-    for (const priceData of parsedPrices) {
-      if (priceData.productId && priceData.offerPrice) {
-        try {
-          await prisma.productAtShop.updateMany({
-            where: {
-              productId: priceData.productId,
-              shopId: shopId
-            },
-            data: {
-              offerPrice: parseFloat(priceData.offerPrice)
-            }
-          });
-          console.log(`Updated offer price for product ${priceData.productId}: £${priceData.offerPrice}`);
-        } catch (priceError) {
-          console.error(`Error updating offer price for product ${priceData.productId}:`, priceError);
-        }
-      }
     }
 
     // Build URLs for uploaded files
@@ -335,8 +307,6 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
         pdfUrl,
         shopId,
         isActive: true,
-        startDate: startDate ? new Date(startDate) : new Date(),
-        endDate: endDate ? new Date(endDate) : null, // null = never expires
         products: {
           connect: parsedProductIds.map(id => ({ id }))
         }
@@ -412,80 +382,21 @@ router.put('/:id/toggle', authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // PUT /api/promotions/:id - Update promotion
-router.put('/:id', authenticateToken, requireAdmin, handleUpload, async (req, res) => {
+router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
-      title, 
-      description, 
-      shopId, 
-      productIds, 
-      productPrices,
-      keepExistingImageUrls,
-      keepExistingPrimaryImage,
-      keepExistingPdf,
-      startDate,
-      endDate
-    } = req.body;
-    const files = req.files;
-
-    console.log('Updating promotion:', id);
-    console.log('Body:', req.body);
-    console.log('Files:', files);
-
-    // Get current promotion to handle image cleanup
-    const currentPromotion = await prisma.promotion.findUnique({
-      where: { id }
-    });
-
-    if (!currentPromotion) {
-      return res.status(404).json({ error: 'Promotion not found' });
-    }
+    const { title, description, shopId, productIds } = req.body;
 
     const updateData = {
       title,
       description,
-      shopId,
-      ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : new Date() }),
-      ...(endDate !== undefined && { endDate: endDate ? new Date(endDate) : null })
+      shopId
     };
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-
-    // Handle primary image
-    if (files?.image?.length > 0) {
-      // New primary image uploaded
-      updateData.imageUrl = `${baseUrl}/uploads/promotions/${files.image[0].filename}`;
-    } else if (keepExistingPrimaryImage !== 'true') {
-      // Primary image was removed
-      updateData.imageUrl = null;
+    // If new image uploaded, update imageUrl
+    if (req.file) {
+      updateData.imageUrl = `${req.protocol}://${req.get('host')}/uploads/promotions/${req.file.filename}`;
     }
-    // else: keep existing imageUrl (don't update)
-
-    // Handle carousel images
-    let existingUrls = [];
-    try {
-      existingUrls = JSON.parse(keepExistingImageUrls || '[]');
-    } catch (e) {
-      existingUrls = [];
-    }
-
-    // Add new uploaded images to the list
-    let newImageUrls = [];
-    if (files?.images?.length > 0) {
-      newImageUrls = files.images.map(f => `${baseUrl}/uploads/promotions/${f.filename}`);
-    }
-
-    // Combine existing and new images
-    updateData.imageUrls = [...existingUrls, ...newImageUrls];
-
-    // Handle PDF
-    if (files?.pdf?.length > 0) {
-      updateData.pdfUrl = `${baseUrl}/uploads/promotions/${files.pdf[0].filename}`;
-    } else if (keepExistingPdf !== 'true') {
-      updateData.pdfUrl = null;
-    }
-    // else: keep existing pdfUrl
 
     // Handle product updates
     if (productIds) {
@@ -496,40 +407,10 @@ router.put('/:id', authenticateToken, requireAdmin, handleUpload, async (req, re
         return res.status(400).json({ error: 'Invalid product IDs format' });
       }
 
-      // Update products connection
+      // Disconnect all products and reconnect new ones
       updateData.products = {
         set: parsedProductIds.map(productId => ({ id: productId }))
       };
-
-      // Handle product prices if provided
-      if (productPrices) {
-        let parsedPrices = [];
-        try {
-          parsedPrices = JSON.parse(productPrices);
-        } catch (error) {
-          console.error('Invalid product prices format:', error);
-        }
-
-        // Update ProductAtShop prices for each product
-        for (const priceData of parsedPrices) {
-          if (priceData.productId && (priceData.price || priceData.offerPrice)) {
-            try {
-              await prisma.productAtShop.updateMany({
-                where: {
-                  productId: priceData.productId,
-                  shopId: shopId
-                },
-                data: {
-                  ...(priceData.price && { price: parseFloat(priceData.price) }),
-                  ...(priceData.offerPrice && { offerPrice: parseFloat(priceData.offerPrice) })
-                }
-              });
-            } catch (priceError) {
-              console.error(`Error updating price for product ${priceData.productId}:`, priceError);
-            }
-          }
-        }
-      }
     }
 
     const promotion = await prisma.promotion.update({
@@ -595,58 +476,6 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   } catch (error) {
     console.error('Error deleting promotion:', error);
     res.status(500).json({ error: 'Failed to delete promotion' });
-  }
-});
-
-// POST /api/promotions/auto-deactivate - Automatically deactivate expired promotions
-// Can be called by a cron job daily
-router.post('/auto-deactivate', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const today = new Date();
-    today.setHours(23, 59, 59, 999);
-    
-    // Find all promotions that have an end date that has passed and are still active
-    const expiredPromotions = await prisma.promotion.findMany({
-      where: {
-        isActive: true,
-        endDate: {
-          not: null,
-          lt: today
-        }
-      }
-    });
-    
-    if (expiredPromotions.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No expired promotions found',
-        deactivatedCount: 0
-      });
-    }
-    
-    // Deactivate all expired promotions
-    const result = await prisma.promotion.updateMany({
-      where: {
-        isActive: true,
-        endDate: {
-          not: null,
-          lt: today
-        }
-      },
-      data: {
-        isActive: false
-      }
-    });
-    
-    res.status(200).json({
-      success: true,
-      message: `Deactivated ${result.count} expired promotions`,
-      deactivatedCount: result.count,
-      expiredPromotionIds: expiredPromotions.map(p => p.id)
-    });
-  } catch (error) {
-    console.error('Error auto-deactivating promotions:', error);
-    res.status(500).json({ error: 'Failed to auto-deactivate promotions' });
   }
 });
 
