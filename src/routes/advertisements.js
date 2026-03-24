@@ -8,6 +8,30 @@ import fs from 'fs';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://backend.h7tex.com').replace(/\/+$/, '');
+
+const normalizeAssetUrl = (url) => {
+  if (!url) return null;
+
+  let normalized = String(url).trim();
+  if (!normalized) return null;
+
+  if (normalized.startsWith('/')) {
+    return `${PUBLIC_BASE_URL}${normalized}`;
+  }
+
+  normalized = normalized.replace(/^http:\/\/localhost:\d+/i, PUBLIC_BASE_URL);
+  normalized = normalized.replace(/^http:\/\/backend\.h7tex\.com/i, PUBLIC_BASE_URL);
+  normalized = normalized.replace(/^http:\/\//i, 'https://');
+
+  return normalized;
+};
+
+const normalizeAdvertisement = (item) => ({
+  ...item,
+  imageUrl: normalizeAssetUrl(item.imageUrl),
+});
+
 // Configure multer for image uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -73,7 +97,7 @@ router.get('/', async (req, res) => {
       orderBy: { sortOrder: 'asc' }
     });
 
-    res.json({ advertisements });
+    res.json({ advertisements: advertisements.map(normalizeAdvertisement) });
   } catch (error) {
     console.error('Error fetching advertisements:', error);
     res.status(500).json({ error: 'Failed to fetch advertisements' });
@@ -89,8 +113,7 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
       return res.status(400).json({ error: 'Title and image are required' });
     }
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const imageUrl = `${baseUrl}/uploads/advertisements/${req.file.filename}`;
+    const imageUrl = normalizeAssetUrl(`/uploads/advertisements/${req.file.filename}`);
 
     const advertisement = await prisma.advertisement.create({
       data: {
@@ -102,7 +125,7 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
       }
     });
 
-    res.status(201).json({ advertisement });
+    res.status(201).json({ advertisement: normalizeAdvertisement(advertisement) });
   } catch (error) {
     console.error('Error creating advertisement:', error);
     res.status(500).json({ error: 'Failed to create advertisement' });
@@ -122,8 +145,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
     if (isActive !== undefined) updateData.isActive = isActive === 'true' || isActive === true;
 
     if (req.file) {
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      updateData.imageUrl = `${baseUrl}/uploads/advertisements/${req.file.filename}`;
+      updateData.imageUrl = normalizeAssetUrl(`/uploads/advertisements/${req.file.filename}`);
     }
 
     const advertisement = await prisma.advertisement.update({
@@ -131,7 +153,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
       data: updateData
     });
 
-    res.json({ advertisement });
+    res.json({ advertisement: normalizeAdvertisement(advertisement) });
   } catch (error) {
     console.error('Error updating advertisement:', error);
     res.status(500).json({ error: 'Failed to update advertisement' });

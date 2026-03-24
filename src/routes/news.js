@@ -8,6 +8,30 @@ import fs from 'fs';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://backend.h7tex.com').replace(/\/+$/, '');
+
+const normalizeAssetUrl = (url) => {
+  if (!url) return null;
+
+  let normalized = String(url).trim();
+  if (!normalized) return null;
+
+  if (normalized.startsWith('/')) {
+    return `${PUBLIC_BASE_URL}${normalized}`;
+  }
+
+  normalized = normalized.replace(/^http:\/\/localhost:\d+/i, PUBLIC_BASE_URL);
+  normalized = normalized.replace(/^http:\/\/backend\.h7tex\.com/i, PUBLIC_BASE_URL);
+  normalized = normalized.replace(/^http:\/\//i, 'https://');
+
+  return normalized;
+};
+
+const normalizeNews = (item) => ({
+  ...item,
+  imageUrl: normalizeAssetUrl(item.imageUrl),
+});
+
 // Configure multer for image uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -74,7 +98,7 @@ router.get('/', async (req, res) => {
       take: limit ? parseInt(limit) : undefined
     });
 
-    res.json({ news });
+    res.json({ news: news.map(normalizeNews) });
   } catch (error) {
     console.error('Error fetching news:', error);
     res.status(500).json({ error: 'Failed to fetch news' });
@@ -94,7 +118,7 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'News not found' });
     }
 
-    res.json({ news });
+    res.json({ news: normalizeNews(news) });
   } catch (error) {
     console.error('Error fetching news:', error);
     res.status(500).json({ error: 'Failed to fetch news' });
@@ -112,8 +136,7 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
 
     let imageUrl = null;
     if (req.file) {
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      imageUrl = `${baseUrl}/uploads/news/${req.file.filename}`;
+      imageUrl = normalizeAssetUrl(`/uploads/news/${req.file.filename}`);
     }
 
     const news = await prisma.news.create({
@@ -127,7 +150,7 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
       }
     });
 
-    res.status(201).json({ news });
+    res.status(201).json({ news: normalizeNews(news) });
   } catch (error) {
     console.error('Error creating news:', error);
     res.status(500).json({ error: 'Failed to create news' });
@@ -148,8 +171,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
     if (publishedAt) updateData.publishedAt = new Date(publishedAt);
 
     if (req.file) {
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      updateData.imageUrl = `${baseUrl}/uploads/news/${req.file.filename}`;
+      updateData.imageUrl = normalizeAssetUrl(`/uploads/news/${req.file.filename}`);
     }
 
     const news = await prisma.news.update({
@@ -157,7 +179,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
       data: updateData
     });
 
-    res.json({ news });
+    res.json({ news: normalizeNews(news) });
   } catch (error) {
     console.error('Error updating news:', error);
     res.status(500).json({ error: 'Failed to update news' });

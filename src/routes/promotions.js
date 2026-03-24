@@ -8,8 +8,33 @@ import fs from 'fs';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Ensure stored asset URLs are always HTTPS
-const toHttps = (url) => (url ? url.replace(/^http:\/\//i, 'https://') : url);
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://backend.h7tex.com').replace(/\/+$/, '');
+
+const normalizeAssetUrl = (url) => {
+  if (!url) return null;
+
+  let normalized = String(url).trim();
+  if (!normalized) return null;
+
+  if (normalized.startsWith('/')) {
+    return `${PUBLIC_BASE_URL}${normalized}`;
+  }
+
+  normalized = normalized.replace(/^http:\/\/localhost:\d+/i, PUBLIC_BASE_URL);
+  normalized = normalized.replace(/^http:\/\/backend\.h7tex\.com/i, PUBLIC_BASE_URL);
+  normalized = normalized.replace(/^http:\/\//i, 'https://');
+
+  return normalized;
+};
+
+const normalizePromotionAssets = (promotion) => ({
+  ...promotion,
+  imageUrl: normalizeAssetUrl(promotion.imageUrl),
+  imageUrls: Array.isArray(promotion.imageUrls)
+    ? promotion.imageUrls.map((url) => normalizeAssetUrl(url)).filter(Boolean)
+    : [],
+  pdfUrl: normalizeAssetUrl(promotion.pdfUrl),
+});
 
 // Configure multer for image and PDF uploads
 const storage = multer.diskStorage({
@@ -153,10 +178,10 @@ router.get('/', async (req, res) => {
           })
         );
 
-        return {
+        return normalizePromotionAssets({
           ...promotion,
           products: enrichedProducts
-        };
+        });
       })
     );
 
@@ -210,7 +235,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Promotion not found' });
     }
 
-    res.json({ promotion });
+    res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
     console.error('Error fetching promotion:', error);
     res.status(500).json({ error: 'Failed to fetch promotion' });
@@ -276,18 +301,18 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     }
 
     // Build URLs for uploaded files
-    const baseUrl = toHttps(`${req.protocol}://${req.get('host')}`);
+    const baseUrl = PUBLIC_BASE_URL;
     
     // Primary image URL (from 'image' field or first of 'images')
     let imageUrl;
     let imageUrls = [];
     
     if (files?.image?.length > 0) {
-      imageUrl = toHttps(`${baseUrl}/uploads/promotions/${files.image[0].filename}`);
+      imageUrl = normalizeAssetUrl(`${baseUrl}/uploads/promotions/${files.image[0].filename}`);
     }
     
     if (files?.images?.length > 0) {
-      imageUrls = files.images.map(f => toHttps(`${baseUrl}/uploads/promotions/${f.filename}`));
+      imageUrls = files.images.map(f => normalizeAssetUrl(`${baseUrl}/uploads/promotions/${f.filename}`));
       // If no single image provided, use first of multiple as primary
       if (!imageUrl) {
         imageUrl = imageUrls[0];
@@ -297,7 +322,7 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     // PDF URL if provided
     let pdfUrl = null;
     if (files?.pdf?.length > 0) {
-      pdfUrl = toHttps(`${baseUrl}/uploads/promotions/${files.pdf[0].filename}`);
+      pdfUrl = normalizeAssetUrl(`${baseUrl}/uploads/promotions/${files.pdf[0].filename}`);
     }
 
     // Create promotion
@@ -335,7 +360,7 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
       }
     });
 
-    res.status(201).json({ promotion });
+    res.status(201).json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
     console.error('Error creating promotion:', error);
     console.error('Error details:', error.message);
@@ -377,7 +402,7 @@ router.put('/:id/toggle', authenticateToken, requireAdmin, async (req, res) => {
       }
     });
 
-    res.json({ promotion });
+    res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
     console.error('Error toggling promotion:', error);
     res.status(500).json({ error: 'Failed to update promotion' });
@@ -398,7 +423,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
 
     // If new image uploaded, update imageUrl
     if (req.file) {
-      updateData.imageUrl = toHttps(`${req.protocol}://${req.get('host')}/uploads/promotions/${req.file.filename}`);
+      updateData.imageUrl = normalizeAssetUrl(`${PUBLIC_BASE_URL}/uploads/promotions/${req.file.filename}`);
     }
 
     // Handle product updates
@@ -440,7 +465,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
       }
     });
 
-    res.json({ promotion });
+    res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
     console.error('Error updating promotion:', error);
     res.status(500).json({ error: 'Failed to update promotion' });

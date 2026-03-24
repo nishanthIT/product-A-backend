@@ -28,6 +28,9 @@ dotenv.config();
 const app = express();
 const server = createServer(app);
 
+// Respect reverse-proxy headers in production (protocol/host forwarding).
+app.set('trust proxy', 1);
+
 // Initialize Redis connection
 (async () => {
   const connected = await redisService.connect();
@@ -63,6 +66,7 @@ app.use(express.json());
 
 // Serve uploaded files
 app.use('/uploads', express.static('uploads'));
+app.use('/api/uploads', express.static('uploads'));
 app.use('/images', express.static('images'));
 
 // Socket.IO connection handling - Define userSockets BEFORE using it in middleware
