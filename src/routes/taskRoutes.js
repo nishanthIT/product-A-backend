@@ -136,7 +136,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'At least one employee must be assigned' });
     }
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -199,7 +199,7 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const taskId = req.params.id;
     const { title, description, dueDate, status, employeeIds } = req.body;
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -299,7 +299,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const customerId = req.user.id;
     const taskId = req.params.id;
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }

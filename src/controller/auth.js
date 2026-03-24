@@ -89,7 +89,7 @@ const login = async (req, res) => {
 
 const register = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password, shopName, shopAddress, shopMobile } = req.body;
     console.log("Registration attempt:", email);
     
     if (!name || !email || !password) {
@@ -112,6 +112,18 @@ const register = async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
     
+    // Create a personal shop for the user, using their name if no shop name is provided
+    const shopNameToCreate = shopName || `${name}'s Shop`;
+    const customerShop = await prisma.shop.create({
+      data: {
+        name: shopNameToCreate.trim(),
+        address: shopAddress?.trim() || '',
+        mobile: shopMobile?.trim() || '',
+        shopType: 'CUSTOMER' // This is a customer retail shop
+      }
+    });
+    console.log('Created CUSTOMER shop:', customerShop.id);
+    
     // Create new customer with free trial
     const customer = await prisma.customer.create({
       data: {
@@ -122,8 +134,32 @@ const register = async (req, res) => {
         subscriptionStatus: 'free_trial', // Set as free trial (lowercase to match schema default)
         trialStartDate: new Date(),
         trialEndDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days from now
+        shopId: customerShop?.id // Link to the created shop
       }
     });
+    
+    // If shop was created, create a group chat for it
+    if (customerShop) {
+      const groupChat = await prisma.chat.create({
+        data: {
+          name: `${customerShop.name} - Team Chat`,
+          type: 'GROUP',
+          participants: {
+            create: {
+              userId: customer.id,
+              userType: 'CUSTOMER',
+              isAdmin: true
+            }
+          }
+        }
+      });
+      
+      // Update shop with group chat ID
+      await prisma.shop.update({
+        where: { id: customerShop.id },
+        data: { groupChatId: groupChat.id }
+      });
+    }
     
     // Generate JWT - Extended to 7 days for better mobile UX
     const token = jwt.sign(
@@ -149,6 +185,7 @@ const register = async (req, res) => {
     return res.status(201).json({
       message: 'Registration successful - Welcome to your free trial!',
       user: { ...customerWithoutPassword, userType: 'CUSTOMER' },
+      shop: customerShop ? { id: customerShop.id, name: customerShop.name, shopType: 'CUSTOMER' } : null,
       token: token
     });
   } catch (error) {

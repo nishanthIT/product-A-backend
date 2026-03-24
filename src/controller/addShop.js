@@ -64,6 +64,7 @@ const addShop = async (req, res) => {
       name,
       address,
       mobile,
+      shopType: 'WHOLESALE' // Admin creates WHOLESALE shops (suppliers)
     };
 
     const newShop = await prisma.shop.create({
@@ -148,21 +149,25 @@ const getShopById = async (req, res) => {
 
 const getAllShops = async (req, res) => {
   try {
+    // Admin dashboard should only see WHOLESALE shops
     const shops = await prisma.shop.findMany({
+      where: {
+        shopType: 'WHOLESALE'
+      },
       include: {
         _count: {
-          select: { products: true }, // Count the number of related products for each shop
+          select: { products: true },
         },
       },
     });
 
-    // Map the result to include the total products count
     const shopsWithProductCount = shops.map((shop) => ({
       id: shop.id,
       name: shop.name,
       address: shop.address,
       mobile: shop.mobile,
-      totalProducts: shop._count.products, // Include the total products count
+      shopType: shop.shopType,
+      totalProducts: shop._count.products,
     }));
 
     res.status(200).json(shopsWithProductCount);

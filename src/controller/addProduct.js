@@ -1,5 +1,30 @@
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
+const USER_SUBMITTED_PENDING_CATEGORY = 'USER_SUBMITTED_PENDING';
+
+const getOrCreateUnknownShop = async () => {
+  const UNKNOWN_SHOP_NAME = 'Unknown Shop';
+
+  let unknownShop = await prisma.shop.findFirst({
+    where: {
+      name: UNKNOWN_SHOP_NAME,
+      shopType: 'WHOLESALE',
+    },
+  });
+
+  if (!unknownShop) {
+    unknownShop = await prisma.shop.create({
+      data: {
+        name: UNKNOWN_SHOP_NAME,
+        address: 'Unknown',
+        mobile: 'N/A',
+        shopType: 'WHOLESALE',
+      },
+    });
+  }
+
+  return unknownShop;
+};
 
 // Levenshtein distance function for fuzzy matching
 function levenshteinDistance(str1, str2) {
@@ -561,6 +586,157 @@ const getProductByBarcode = async (req, res) => {
   }
 };
 
+const quickAddProductFromScan = async (req, res) => {
+  try {
+    const { barcode, title, retailSize } = req.body;
+
+    if (!barcode || !title || !retailSize) {
+      return res.status(400).json({
+        error: "barcode, title and retailSize are required.",
+      });
+    }
+
+    const cleanBarcode = String(barcode).trim();
+    const cleanTitle = String(title).trim();
+    const cleanRetailSize = String(retailSize).trim();
+
+    if (!cleanBarcode || !cleanTitle || !cleanRetailSize) {
+      return res.status(400).json({
+        error: "barcode, title and retailSize cannot be empty.",
+      });
+    }
+
+    const existingProduct = await prisma.product.findFirst({
+      where: {
+        OR: [
+          { barcode: cleanBarcode },
+          { caseBarcode: cleanBarcode },
+        ],
+      },
+    });
+
+    if (existingProduct) {
+      return res.status(409).json({
+        error: "Product already exists for this barcode.",
+        data: existingProduct,
+      });
+    }
+
+    const unknownShop = await getOrCreateUnknownShop();
+
+    const createdProduct = await prisma.product.create({
+      data: {
+        title: cleanTitle,
+        barcode: cleanBarcode,
+        retailSize: cleanRetailSize,
+        caseSize: '1',
+        packetSize: '1',
+        category: USER_SUBMITTED_PENDING_CATEGORY,
+      },
+    });
+
+    const productAtShop = await prisma.productAtShop.upsert({
+      where: {
+        shopId_productId: {
+          shopId: unknownShop.id,
+          productId: createdProduct.id,
+        },
+      },
+      update: {},
+      create: {
+        shopId: unknownShop.id,
+        productId: createdProduct.id,
+        price: 0,
+        outOfStock: false,
+      },
+      include: {
+        shop: true,
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        ...createdProduct,
+        productAtShopId: productAtShop.id,
+        shopName: productAtShop.shop.name,
+      },
+    });
+  } catch (error) {
+    console.error("Error quick adding product from scan:", error);
+    return res.status(500).json({ error: "Internal server error." });
+  }
+};
+
+const getPendingSubmittedProducts = async (req, res) => {
+  try {
+    const products = await prisma.product.findMany({
+      where: {
+        category: USER_SUBMITTED_PENDING_CATEGORY,
+      },
+      include: {
+        shops: {
+          include: {
+            shop: true,
+          },
+        },
+      },
+      orderBy: {
+        title: 'asc',
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: products.length,
+      data: products,
+    });
+  } catch (error) {
+    console.error("Error fetching pending submitted products:", error);
+    return res.status(500).json({ error: "Internal server error." });
+  }
+};
+
+const approveSubmittedProduct = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { category, rrp, caseSize, packetSize, retailSize } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: "Product ID is required." });
+    }
+
+    const product = await prisma.product.findUnique({ where: { id } });
+    if (!product) {
+      return res.status(404).json({ error: "Product not found." });
+    }
+
+    if (product.category !== USER_SUBMITTED_PENDING_CATEGORY) {
+      return res.status(400).json({ error: "Product is not pending approval." });
+    }
+
+    const approvedProduct = await prisma.product.update({
+      where: { id },
+      data: {
+        category: category && String(category).trim() ? String(category).trim() : 'Uncategorized',
+        rrp: rrp !== undefined && rrp !== null && rrp !== '' ? parseFloat(rrp) : product.rrp,
+        caseSize: caseSize !== undefined ? String(caseSize) : product.caseSize,
+        packetSize: packetSize !== undefined ? String(packetSize) : product.packetSize,
+        retailSize: retailSize !== undefined ? String(retailSize) : product.retailSize,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: 'Product approved and added to product database.',
+      data: approvedProduct,
+    });
+  } catch (error) {
+    console.error('Error approving submitted product:', error);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+};
+
 // Search products by title/name with fuzzy matching (for customers adding to lists)
 const searchProducts = async (req, res) => {
   try {
@@ -732,4 +908,14 @@ const deleteProduct = async (req, res) => {
   }
 };
 
-export { addProduct, editProduct, getProductById, getProductByBarcode, searchProducts, deleteProduct };
+export {
+  addProduct,
+  editProduct,
+  getProductById,
+  getProductByBarcode,
+  searchProducts,
+  deleteProduct,
+  quickAddProductFromScan,
+  getPendingSubmittedProducts,
+  approveSubmittedProduct,
+};

@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
+import expiryNotificationService from '../services/expiryNotificationService.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -92,26 +93,42 @@ router.get('/', authenticateToken, async (req, res) => {
             category: true,
             rrp: true
           }
+        },
+        category: {
+          select: {
+            id: true,
+            name: true,
+            reminderDays: true
+          }
         }
       },
       orderBy: { expiryDate: 'asc' }
     });
 
-    // Calculate days until expiry and status for each product
+    // Calculate days until expiry and status for each product.
+    // Status thresholds follow category reminder days when configured.
     const formattedProducts = expiryProducts.map(ep => {
       const expiryDate = new Date(ep.expiryDate);
       const daysUntilExpiry = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
+
+      const reminderDays = Array.isArray(ep.category?.reminderDays) && ep.category.reminderDays.length > 0
+        ? [...ep.category.reminderDays].sort((a, b) => b - a)
+        : [10, 7, 3];
+
+      const noticeDay = reminderDays[0] ?? 10;
+      const warningDay = reminderDays[1] ?? Math.max(noticeDay - 3, 1);
+      const criticalDay = reminderDays[2] ?? Math.max(warningDay - 2, 1);
       
       let status = 'OK';
       if (ep.isDisposed) {
         status = 'DISPOSED';
       } else if (daysUntilExpiry < 0) {
         status = 'EXPIRED';
-      } else if (daysUntilExpiry <= 2) {
+      } else if (daysUntilExpiry <= criticalDay) {
         status = 'CRITICAL';
-      } else if (daysUntilExpiry <= 7) {
+      } else if (daysUntilExpiry <= warningDay) {
         status = 'WARNING';
-      } else if (daysUntilExpiry <= 10) {
+      } else if (daysUntilExpiry <= noticeDay) {
         status = 'NOTICE';
       }
 
@@ -123,6 +140,9 @@ router.get('/', authenticateToken, async (req, res) => {
         productImage: ep.product.img,
         productCategory: ep.product.category,
         productRrp: ep.product.rrp,
+        categoryId: ep.categoryId,
+        categoryName: ep.category?.name,
+        categoryReminderDays: ep.category?.reminderDays,
         expiryDate: ep.expiryDate,
         quantity: ep.quantity,
         batchNumber: ep.batchNumber,
@@ -175,7 +195,7 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'No shop associated with user' });
     }
 
-    const { productId, expiryDate, quantity = 1, batchNumber, notes } = req.body;
+    const { productId, expiryDate, quantity = 1, batchNumber, notes, categoryId } = req.body;
 
     if (!productId || !expiryDate) {
       return res.status(400).json({ error: 'Product ID and expiry date are required' });
@@ -191,10 +211,22 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Product not found' });
     }
 
+    // Verify category exists if provided
+    if (categoryId) {
+      const category = await prisma.expiryCategory.findFirst({
+        where: { id: categoryId, shopId }
+      });
+
+      if (!category) {
+        return res.status(404).json({ error: 'Expiry category not found' });
+      }
+    }
+
     const expiryProduct = await prisma.expiryProduct.create({
       data: {
         productId,
         shopId,
+        categoryId,
         expiryDate: new Date(expiryDate),
         quantity,
         batchNumber,
@@ -211,6 +243,13 @@ router.post('/', authenticateToken, async (req, res) => {
             img: true,
             category: true
           }
+        },
+        category: {
+          select: {
+            id: true,
+            name: true,
+            reminderDays: true
+          }
         }
       }
     });
@@ -225,6 +264,9 @@ router.post('/', authenticateToken, async (req, res) => {
         productBarcode: expiryProduct.product.barcode,
         productImage: expiryProduct.product.img,
         productCategory: expiryProduct.product.category,
+        categoryId: expiryProduct.categoryId,
+        categoryName: expiryProduct.category?.name,
+        categoryReminderDays: expiryProduct.category?.reminderDays,
         expiryDate: expiryProduct.expiryDate,
         quantity: expiryProduct.quantity,
         batchNumber: expiryProduct.batchNumber,
@@ -361,14 +403,11 @@ router.get('/notifications', authenticateToken, async (req, res) => {
 
     const now = new Date();
     
-    // Get products expiring soon (within 10 days) that aren't disposed
+    // Build reminder notifications using each category's reminder day configuration.
     const expiringProducts = await prisma.expiryProduct.findMany({
       where: {
         shopId,
         isDisposed: false,
-        expiryDate: {
-          lte: new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000)
-        }
       },
       include: {
         product: {
@@ -378,30 +417,49 @@ router.get('/notifications', authenticateToken, async (req, res) => {
             barcode: true,
             img: true
           }
+        },
+        category: {
+          select: {
+            id: true,
+            name: true,
+            reminderDays: true,
+            isActive: true
+          }
         }
       },
       orderBy: { expiryDate: 'asc' }
     });
 
-    const notifications = expiringProducts.map(ep => {
+    const notifications = expiringProducts
+      .map(ep => {
       const expiryDate = new Date(ep.expiryDate);
       const daysUntilExpiry = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
+
+      const reminderDays = ep.category && ep.category.isActive && Array.isArray(ep.category.reminderDays) && ep.category.reminderDays.length > 0
+        ? [...ep.category.reminderDays].sort((a, b) => b - a)
+        : [10, 7, 3];
+
+      const shouldNotify = daysUntilExpiry < 0 || reminderDays.includes(daysUntilExpiry);
+      if (!shouldNotify) return null;
       
       let priority = 'low';
       let message = '';
+      const noticeDay = reminderDays[0] ?? 10;
+      const warningDay = reminderDays[1] ?? Math.max(noticeDay - 3, 1);
+      const criticalDay = reminderDays[2] ?? Math.max(warningDay - 2, 1);
       
       if (daysUntilExpiry < 0) {
         priority = 'critical';
         message = `${ep.product.title} has EXPIRED!`;
-      } else if (daysUntilExpiry <= 2) {
+      } else if (daysUntilExpiry <= criticalDay) {
         priority = 'critical';
         message = `${ep.product.title} expires in ${daysUntilExpiry} day(s)!`;
-      } else if (daysUntilExpiry <= 7) {
+      } else if (daysUntilExpiry <= warningDay) {
         priority = 'high';
         message = `${ep.product.title} expires in ${daysUntilExpiry} days`;
       } else {
         priority = 'medium';
-        message = `${ep.product.title} expires in ${daysUntilExpiry} days`;
+        message = `${ep.product.title} reaches reminder day (${daysUntilExpiry} days left)`;
       }
 
       return {
@@ -415,7 +473,8 @@ router.get('/notifications', authenticateToken, async (req, res) => {
         message,
         quantity: ep.quantity
       };
-    });
+    })
+    .filter(Boolean);
 
     res.json({
       success: true,
@@ -472,6 +531,228 @@ router.get('/search-product', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error searching products:', error);
     res.status(500).json({ error: 'Failed to search products' });
+  }
+});
+
+// POST /api/expiry/trigger-notifications - Manual trigger for testing (ADMIN only)
+router.post('/trigger-notifications', authenticateToken, async (req, res) => {
+  try {
+    // Only allow ADMIN users to trigger manually
+    if (req.user.userType !== 'ADMIN') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    console.log('[API] Manual notification trigger requested by admin:', req.user.email);
+    
+    // Trigger the notification check
+    await expiryNotificationService.triggerManually();
+    
+    res.json({
+      success: true,
+      message: 'Expiry notification check triggered successfully'
+    });
+  } catch (error) {
+    console.error('Error triggering notifications:', error);
+    res.status(500).json({ error: 'Failed to trigger notifications' });
+  }
+});
+
+// ===== EXPIRY CATEGORY MANAGEMENT =====
+
+// GET /api/expiry/categories - Get all expiry categories for user's shop
+router.get('/categories', authenticateToken, async (req, res) => {
+  try {
+    const { id: userId, userType } = req.user;
+    const shopId = await getUserShopId(userId, userType);
+    
+    if (!shopId) {
+      return res.status(400).json({ error: 'No shop associated with user' });
+    }
+
+    const categories = await prisma.expiryCategory.findMany({
+      where: { shopId },
+      include: {
+        _count: {
+          select: { products: true }
+        }
+      },
+      orderBy: { name: 'asc' }
+    });
+
+    res.json({
+      success: true,
+      categories: categories.map(cat => ({
+        id: cat.id,
+        name: cat.name,
+        description: cat.description,
+        reminderDays: cat.reminderDays,
+        isActive: cat.isActive,
+        productCount: cat._count.products,
+        createdAt: cat.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching expiry categories:', error);
+    res.status(500).json({ error: 'Failed to fetch expiry categories' });
+  }
+});
+
+// POST /api/expiry/categories - Create a new expiry category
+router.post('/categories', authenticateToken, async (req, res) => {
+  try {
+    const { id: userId, userType } = req.user;
+    const shopId = await getUserShopId(userId, userType);
+    
+    if (!shopId) {
+      return res.status(400).json({ error: 'No shop associated with user' });
+    }
+
+    const { name, description, reminderDays } = req.body;
+
+    if (!name || !reminderDays || !Array.isArray(reminderDays)) {
+      return res.status(400).json({ error: 'Category name and reminderDays array are required' });
+    }
+
+    // Validate reminderDays
+    if (reminderDays.length === 0) {
+      return res.status(400).json({ error: 'At least one reminder day is required' });
+    }
+
+    const invalidDays = reminderDays.filter(day => typeof day !== 'number' || day < 0);
+    if (invalidDays.length > 0) {
+      return res.status(400).json({ error: 'Reminder days must be positive numbers' });
+    }
+
+    // Check for duplicate category name in this shop
+    const existingCategory = await prisma.expiryCategory.findFirst({
+      where: { shopId, name: name.trim() }
+    });
+
+    if (existingCategory) {
+      return res.status(400).json({ error: 'Category with this name already exists' });
+    }
+
+    const category = await prisma.expiryCategory.create({
+      data: {
+        name: name.trim(),
+        description: description?.trim(),
+        shopId,
+        reminderDays: reminderDays.sort((a, b) => b - a) // Sort descending
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Expiry category created successfully',
+      category
+    });
+  } catch (error) {
+    console.error('Error creating expiry category:', error);
+    res.status(500).json({ error: 'Failed to create expiry category' });
+  }
+});
+
+// PUT /api/expiry/categories/:id - Update an expiry category
+router.put('/categories/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id: userId, userType } = req.user;
+    const shopId = await getUserShopId(userId, userType);
+    const categoryId = req.params.id;
+    
+    if (!shopId) {
+      return res.status(400).json({ error: 'No shop associated with user' });
+    }
+
+    // Verify the category belongs to user's shop
+    const existingCategory = await prisma.expiryCategory.findFirst({
+      where: { id: categoryId, shopId }
+    });
+
+    if (!existingCategory) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    const { name, description, reminderDays, isActive } = req.body;
+
+    const updateData = {};
+    if (name !== undefined) {
+      // Check for duplicate name
+      const duplicateCategory = await prisma.expiryCategory.findFirst({
+        where: { 
+          shopId, 
+          name: name.trim(),
+          id: { not: categoryId }
+        }
+      });
+
+      if (duplicateCategory) {
+        return res.status(400).json({ error: 'Category with this name already exists' });
+      }
+
+      updateData.name = name.trim();
+    }
+    if (description !== undefined) updateData.description = description?.trim();
+    if (isActive !== undefined) updateData.isActive = isActive;
+    if (reminderDays !== undefined) {
+      if (!Array.isArray(reminderDays) || reminderDays.length === 0) {
+        return res.status(400).json({ error: 'reminderDays must be a non-empty array' });
+      }
+      updateData.reminderDays = reminderDays.sort((a, b) => b - a);
+    }
+
+    const updatedCategory = await prisma.expiryCategory.update({
+      where: { id: categoryId },
+      data: updateData
+    });
+
+    res.json({
+      success: true,
+      message: 'Expiry category updated successfully',
+      category: updatedCategory
+    });
+  } catch (error) {
+    console.error('Error updating expiry category:', error);
+    res.status(500).json({ error: 'Failed to update expiry category' });
+  }
+});
+
+// DELETE /api/expiry/categories/:id - Delete an expiry category
+router.delete('/categories/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id: userId, userType } = req.user;
+    const shopId = await getUserShopId(userId, userType);
+    const categoryId = req.params.id;
+    
+    if (!shopId) {
+      return res.status(400).json({ error: 'No shop associated with user' });
+    }
+
+    // Verify the category belongs to user's shop
+    const existingCategory = await prisma.expiryCategory.findFirst({
+      where: { id: categoryId, shopId },
+      include: {
+        _count: {
+          select: { products: true }
+        }
+      }
+    });
+
+    if (!existingCategory) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    // Note: Products will have their categoryId set to null (SetNull cascade)
+    await prisma.expiryCategory.delete({
+      where: { id: categoryId }
+    });
+
+    res.json({
+      success: true,
+      message: `Category deleted. ${existingCategory._count.products} product(s) unassigned from this category.`
+    });
+  } catch (error) {
+    console.error('Error deleting expiry category:', error);
+    res.status(500).json({ error: 'Failed to delete expiry category' });
   }
 });
 

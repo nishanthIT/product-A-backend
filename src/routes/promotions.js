@@ -8,6 +8,9 @@ import fs from 'fs';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+// Ensure stored asset URLs are always HTTPS
+const toHttps = (url) => (url ? url.replace(/^http:\/\//i, 'https://') : url);
+
 // Configure multer for image and PDF uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -273,18 +276,18 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     }
 
     // Build URLs for uploaded files
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = toHttps(`${req.protocol}://${req.get('host')}`);
     
     // Primary image URL (from 'image' field or first of 'images')
     let imageUrl;
     let imageUrls = [];
     
     if (files?.image?.length > 0) {
-      imageUrl = `${baseUrl}/uploads/promotions/${files.image[0].filename}`;
+      imageUrl = toHttps(`${baseUrl}/uploads/promotions/${files.image[0].filename}`);
     }
     
     if (files?.images?.length > 0) {
-      imageUrls = files.images.map(f => `${baseUrl}/uploads/promotions/${f.filename}`);
+      imageUrls = files.images.map(f => toHttps(`${baseUrl}/uploads/promotions/${f.filename}`));
       // If no single image provided, use first of multiple as primary
       if (!imageUrl) {
         imageUrl = imageUrls[0];
@@ -294,7 +297,7 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
     // PDF URL if provided
     let pdfUrl = null;
     if (files?.pdf?.length > 0) {
-      pdfUrl = `${baseUrl}/uploads/promotions/${files.pdf[0].filename}`;
+      pdfUrl = toHttps(`${baseUrl}/uploads/promotions/${files.pdf[0].filename}`);
     }
 
     // Create promotion
@@ -395,7 +398,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
 
     // If new image uploaded, update imageUrl
     if (req.file) {
-      updateData.imageUrl = `${req.protocol}://${req.get('host')}/uploads/promotions/${req.file.filename}`;
+      updateData.imageUrl = toHttps(`${req.protocol}://${req.get('host')}/uploads/promotions/${req.file.filename}`);
     }
 
     // Handle product updates

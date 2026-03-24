@@ -108,7 +108,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'Fridge name is required' });
     }
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -141,7 +141,7 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const fridgeId = req.params.id;
     const { name, location, minSafeTemp, maxSafeTemp, isActive } = req.body;
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -184,7 +184,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const customerId = req.user.id;
     const fridgeId = req.params.id;
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }

@@ -6,6 +6,55 @@ import { removeBackground } from "@imgly/background-removal-node";
 
 const prisma = new PrismaClient();
 
+const getOrCreateUnknownProductAtShop = async (productId) => {
+  const UNKNOWN_SHOP_NAME = 'Unknown Shop';
+
+  let unknownShop = await prisma.shop.findFirst({
+    where: {
+      name: UNKNOWN_SHOP_NAME,
+      shopType: 'WHOLESALE',
+    },
+  });
+
+  if (!unknownShop) {
+    unknownShop = await prisma.shop.create({
+      data: {
+        name: UNKNOWN_SHOP_NAME,
+        address: 'Unknown',
+        mobile: 'N/A',
+        shopType: 'WHOLESALE',
+      },
+    });
+  }
+
+  let unknownProductAtShop = await prisma.productAtShop.findFirst({
+    where: {
+      productId,
+      shopId: unknownShop.id,
+    },
+  });
+
+  if (!unknownProductAtShop) {
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { rrp: true },
+    });
+
+    const fallbackPrice = product?.rrp ? parseFloat(product.rrp) : 0;
+
+    unknownProductAtShop = await prisma.productAtShop.create({
+      data: {
+        productId,
+        shopId: unknownShop.id,
+        price: fallbackPrice,
+        outOfStock: false,
+      },
+    });
+  }
+
+  return unknownProductAtShop;
+};
+
 // Levenshtein distance function for fuzzy matching (typo tolerance)
 const levenshteinDistance = (str1, str2) => {
   const m = str1.length;
@@ -831,7 +880,19 @@ const removeProductFromShop = async (req, res) => {
       });
     }
 
-    // Delete the product from the shop
+    // Preserve list references by moving them to Unknown Shop before deletion
+    const unknownProductAtShop = await getOrCreateUnknownProductAtShop(productId);
+
+    await prisma.listProduct.updateMany({
+      where: {
+        productAtShopId: productAtShop.id,
+      },
+      data: {
+        productAtShopId: unknownProductAtShop.id,
+      },
+    });
+
+    // Now remove the product from this specific shop inventory
     await prisma.productAtShop.delete({
       where: {
         shopId_productId: { shopId, productId }

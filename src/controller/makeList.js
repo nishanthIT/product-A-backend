@@ -24,6 +24,64 @@ const getEffectivePrice = (productAtShop) => {
   };
 };
 
+// Ensure a stable fallback shop/inventory row exists for unavailable products
+const getOrCreateUnknownProductAtShop = async (productId) => {
+  const UNKNOWN_SHOP_NAME = 'Unknown Shop';
+
+  let unknownShop = await prisma.shop.findFirst({
+    where: {
+      name: UNKNOWN_SHOP_NAME,
+      shopType: 'WHOLESALE',
+    },
+  });
+
+  if (!unknownShop) {
+    unknownShop = await prisma.shop.create({
+      data: {
+        name: UNKNOWN_SHOP_NAME,
+        address: 'Unknown',
+        mobile: 'N/A',
+        shopType: 'WHOLESALE',
+      },
+    });
+  }
+
+  let productAtShop = await prisma.productAtShop.findFirst({
+    where: {
+      productId,
+      shopId: unknownShop.id,
+    },
+    include: {
+      shop: true,
+      product: true,
+    },
+  });
+
+  if (!productAtShop) {
+    const product = await prisma.product.findUnique({
+      where: { id: productId },
+      select: { rrp: true },
+    });
+
+    const fallbackPrice = product?.rrp ? parseFloat(product.rrp) : 0;
+
+    productAtShop = await prisma.productAtShop.create({
+      data: {
+        productId,
+        shopId: unknownShop.id,
+        price: fallbackPrice,
+        outOfStock: false,
+      },
+      include: {
+        shop: true,
+        product: true,
+      },
+    });
+  }
+
+  return productAtShop;
+};
+
 const makeList = async (req, res) => {
   // Get userId from authenticated user (from JWT token via middleware)
   const userId = req.user?.id;
@@ -94,9 +152,9 @@ const addProductToList = async (req, res) => {
   const userType = req.user?.userType;
   const { listId, productId } = req.body;
 
-  // Customers and Employees can add products to lists
-  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
-    return res.status(403).json({ error: "Only customers and employees can add products to lists" });
+  // Customers, Employees and Admins can add products to lists
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE' && userType !== 'ADMIN') {
+    return res.status(403).json({ error: "Only customers, employees and admins can add products to lists" });
   }
 
   if (!listId || !productId) {
@@ -119,19 +177,37 @@ const addProductToList = async (req, res) => {
     }
     
     // Check ownership based on user type
-    const isOwner = userType === 'EMPLOYEE' 
+    const isOwner = userType === 'EMPLOYEE'
       ? list.employeeId === userId
+      : userType === 'ADMIN'
+      ? list.adminId === userId
       : list.customerId === userId;
-    
-    if (!isOwner) {
+
+    // Allow trackers to modify shared lists too
+    let isTracking = false;
+    if (!isOwner && prisma.trackedList?.findFirst) {
+      const tracked = await prisma.trackedList.findFirst({
+        where: {
+          listId,
+          userId,
+          userType,
+        },
+      });
+      isTracking = !!tracked;
+    }
+
+    if (!isOwner && !isTracking) {
       return res.status(403).json({ error: "You don't have permission to modify this list" });
     }
 
-    // Find the product in all shops (excluding out of stock)
+    // Find the product in all WHOLESALE shops (excluding out of stock)
     const productAtShops = await prisma.productAtShop.findMany({
       where: {
         productId,
-        outOfStock: false, // Exclude out of stock products
+        outOfStock: false,
+        shop: {
+          shopType: 'WHOLESALE'
+        }
       },
       include: {
         shop: true,
@@ -141,47 +217,35 @@ const addProductToList = async (req, res) => {
 
     console.log(`Found ${productAtShops.length} in-stock shops with product ${productId}`);
 
-    if (productAtShops.length === 0) {
-      // Check if product exists but is out of stock everywhere
-      const outOfStockProducts = await prisma.productAtShop.count({
-        where: {
-          productId,
-          outOfStock: true,
-        },
-      });
-      
-      if (outOfStockProducts > 0) {
-        return res.status(404).json({ 
-          error: "This product is currently out of stock in all shops." 
-        });
-      }
-      
-      return res.status(404).json({ 
-        error: "Product not available in any shop yet. Please ask an employee to add it to a shop first." 
-      });
+    let candidateProductAtShops = productAtShops;
+
+    if (candidateProductAtShops.length === 0) {
+      // Keep product listable even when unavailable in active shops.
+      // This preserves list behavior for out-of-stock or removed inventory scenarios.
+      const unknownProductAtShop = await getOrCreateUnknownProductAtShop(productId);
+      candidateProductAtShops = [unknownProductAtShop];
+      console.log(`No active shop stock for ${productId}. Using Unknown Shop fallback.`);
     }
 
-    // Check if product is already in the list
-    const existingProducts = await prisma.listProduct.findMany({
+    // Check if the same logical product is already in the list (regardless of shop row)
+    const existingEntry = await prisma.listProduct.findFirst({
       where: {
         listId,
-        productAtShopId: {
-          in: productAtShops.map(p => p.id),
+        productAtShop: {
+          productId,
         },
-      },
+      }
     });
 
-    if (existingProducts.length > 0) {
-      // Product already exists - return success without error
-      console.log(`Product ${productId} already in list ${listId} - returning success`);
-      
-      // Get the existing product details
-      const existingEntry = await prisma.listProduct.findFirst({
-        where: {
-          listId,
-          productAtShopId: {
-            in: productAtShops.map(p => p.id),
-          },
+    if (existingEntry) {
+      // Product already exists - increase quantity instead of creating duplicate entry
+      console.log(`Product ${productId} already in list ${listId} - increasing quantity`);
+
+      // Increase quantity on the existing row
+      const updatedEntry = await prisma.listProduct.update({
+        where: { id: existingEntry.id },
+        data: {
+          quantity: (existingEntry.quantity || 1) + 1,
         },
         include: {
           productAtShop: {
@@ -193,21 +257,31 @@ const addProductToList = async (req, res) => {
         },
       });
 
+      // Invalidate cache for this list and user's lists
+      try {
+        await cacheService.invalidateAllUserListCache(userId, listId);
+      } catch (cacheError) {
+        console.error("Cache invalidation error (non-fatal):", cacheError);
+      }
+
       return res.status(200).json({
         success: true,
-        message: "Product is already in this list",
+        message: "Product quantity increased",
         alreadyExists: true,
         data: {
-          productName: existingEntry.productAtShop.product.title,
-          lowestPrice: parseFloat(existingEntry.productAtShop.price),
-          shopName: existingEntry.productAtShop.shop.name,
+          listProductId: updatedEntry.id,
+          productAtShopId: updatedEntry.productAtShopId,
+          quantity: updatedEntry.quantity || 1,
+          productName: updatedEntry.productAtShop.product.title,
+          lowestPrice: parseFloat(updatedEntry.productAtShop.price),
+          shopName: updatedEntry.productAtShop.shop.name,
           availableInShops: productAtShops.length,
         },
       });
     }
 
     // Find the shop with the lowest effective price (considering offers)
-    const lowestPriceEntry = productAtShops.reduce((lowest, current) => {
+    const lowestPriceEntry = candidateProductAtShops.reduce((lowest, current) => {
       const currentEffective = getEffectivePrice(current);
       const lowestEffective = getEffectivePrice(lowest);
       return currentEffective.price < lowestEffective.price ? current : lowest;
@@ -235,6 +309,9 @@ const addProductToList = async (req, res) => {
       success: true,
       message: "Product added to list successfully.",
       data: {
+        listProductId: listProduct.id,
+        productAtShopId: lowestPriceEntry.id,
+        quantity: 1,
         productName: lowestPriceEntry.product.title,
         lowestPrice: finalEffectivePrice.price,
         originalPrice: finalEffectivePrice.originalPrice,
@@ -347,25 +424,44 @@ const removeProductFromList = async (req, res) => {
     const userId = req.user?.id;
     const userType = req.user?.userType;
     const { listId, productId } = req.body;
-    
-    // Build where clause based on user type
-    const whereClause = {
-      id: listId,
-      ...(userType === 'EMPLOYEE' 
-        ? { employeeId: userId }
-        : { customerId: userId })
-    };
-    
-    // Verify the list exists and belongs to this user
-    const list = await prisma.list.findFirst({
-      where: whereClause
-    });
+
+    if (!listId || !productId) {
+      return res.status(400).json({ error: 'listId and productId are required' });
+    }
+
+    // Verify list exists
+    const list = await prisma.list.findUnique({ where: { id: listId } });
 
     console.log('List found?', list ? 'YES' : 'NO');
 
     if (!list) {
       console.log('ERROR: List not found or does not belong to user');
       return res.status(404).json({ error: "List not found-e2" });
+    }
+
+    // Owner check by creator type
+    const isOwner = userType === 'EMPLOYEE'
+      ? list.employeeId === userId
+      : userType === 'ADMIN'
+      ? list.adminId === userId
+      : list.customerId === userId;
+
+    // Tracked users are allowed to modify shared lists too
+    let isTracking = false;
+    if (!isOwner && prisma.trackedList?.findFirst) {
+      const tracked = await prisma.trackedList.findFirst({
+        where: {
+          listId,
+          userId,
+          userType,
+        },
+      });
+      isTracking = !!tracked;
+    }
+
+    if (!isOwner && !isTracking) {
+      console.log('ERROR: List not found or does not belong to user');
+      return res.status(403).json({ error: "You don't have permission to modify this list" });
     }
 
     // Delete all ListProduct entries for this product in this list
@@ -384,7 +480,8 @@ const removeProductFromList = async (req, res) => {
       return res.status(404).json({ error: "Product not found in list" });
     }
 
-    // Invalidate cache for this list and user's lists (only for customers)
+    // Invalidate cache for this list and user's lists
+    await cacheService.invalidateListDetail(listId);
     if (userType === 'CUSTOMER') {
       await cacheService.invalidateAllUserListCache(userId, listId);
     }
@@ -405,9 +502,9 @@ const getUserLists = async (req, res) => {
   const userId = req.user?.id;
   const userType = req.user?.userType;
   
-  // Customers and Employees have lists
-  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE') {
-    return res.status(403).json({ error: "Only customers and employees can have shopping lists" });
+  // Customers, Employees and Admins can have or track lists
+  if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE' && userType !== 'ADMIN') {
+    return res.status(403).json({ error: "Only customers, employees and admins can have shopping lists" });
   }
 
   try {
@@ -420,14 +517,19 @@ const getUserLists = async (req, res) => {
       }
     }
 
-    // Build where clause based on user type
-    const whereClause = userType === 'EMPLOYEE' 
+    // Build ownership clause based on user type
+    const ownedWhereClause = userType === 'EMPLOYEE'
       ? { employeeId: userId }
+      : userType === 'ADMIN'
+      ? { adminId: userId }
       : { customerId: userId };
 
-    const lists = await prisma.list.findMany({
-      where: whereClause,
+    const ownedLists = await prisma.list.findMany({
+      where: ownedWhereClause,
       include: {
+        employee: { select: { id: true, name: true } },
+        admin: { select: { id: true, name: true } },
+        customer: { select: { id: true, name: true } },
         products: {
           include: {
             productAtShop: {
@@ -444,26 +546,58 @@ const getUserLists = async (req, res) => {
       },
     });
 
+    // Fetch tracked lists if tracking model exists
+    let trackedSourceLists = [];
+    const trackedListIdSet = new Set();
+    if (prisma.trackedList?.findMany) {
+      const trackedRows = await prisma.trackedList.findMany({
+        where: {
+          userId,
+          userType,
+        },
+        include: {
+          list: {
+            include: {
+              employee: { select: { id: true, name: true } },
+              admin: { select: { id: true, name: true } },
+              customer: { select: { id: true, name: true } },
+              products: {
+                include: {
+                  productAtShop: {
+                    include: {
+                      product: true,
+                      shop: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      trackedSourceLists = trackedRows.map((row) => row.list).filter(Boolean);
+      trackedRows.forEach((row) => {
+        if (row.listId) trackedListIdSet.add(row.listId);
+      });
+    }
+
+    // Merge owned + tracked source lists without duplicates
+    const mergedMap = new Map();
+    for (const list of [...ownedLists, ...trackedSourceLists]) {
+      mergedMap.set(list.id, list);
+    }
+
     // Group products by productId to count unique products
-    const formattedLists = await Promise.all(lists.map(async (list) => {
+    const formattedLists = await Promise.all(Array.from(mergedMap.values()).map(async (list) => {
       const uniqueProducts = new Set();
       list.products.forEach(lp => {
         uniqueProducts.add(lp.productAtShop.productId);
       });
       
-      // If copied from another list, get the creator name
+      // If tracked from another owner, surface creator name for UI tag
       let copiedFromName = null;
-      if (list.copiedFromId) {
-        const originalList = await prisma.list.findUnique({
-          where: { id: list.copiedFromId },
-          include: {
-            employee: { select: { name: true } },
-            customer: { select: { name: true } }
-          }
-        });
-        if (originalList) {
-          copiedFromName = originalList.employee?.name || originalList.customer?.name || 'Unknown';
-        }
+      if (trackedListIdSet.has(list.id)) {
+        copiedFromName = list.employee?.name || list.admin?.name || list.customer?.name || null;
       }
       
       return {
@@ -477,6 +611,8 @@ const getUserLists = async (req, res) => {
         updatedAt: list.updatedAt,
       };
     }));
+
+    formattedLists.sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
 
     // Cache the result (only for customers)
     if (userType === 'CUSTOMER') {

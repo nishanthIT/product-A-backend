@@ -22,6 +22,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import redisService from './src/services/redisService.js';
 import cacheService from './src/services/cacheService.js';
+import expiryNotificationService from './src/services/expiryNotificationService.js';
 
 dotenv.config();
 const app = express();
@@ -206,6 +207,20 @@ io.on('connection', (socket) => {
     socket.to(`chat_${chatId}`).emit('user_stopped_typing', userInfo);
   });
 
+  // Join shop list room for real-time list sync (employees + shop owners)
+  socket.on('join_shop_lists', (shopId) => {
+    if (!shopId) return;
+    socket.join(`shop_${shopId}_lists`);
+    console.log(`✅ Socket ${socket.id} joined shop list room: shop_${shopId}_lists`);
+  });
+
+  // Leave shop list room
+  socket.on('leave_shop_lists', (shopId) => {
+    if (!shopId) return;
+    socket.leave(`shop_${shopId}_lists`);
+    console.log(`User left shop list room: shop_${shopId}_lists`);
+  });
+
   // Handle disconnection
   socket.on('disconnect', async () => {
     console.log('User disconnected:', socket.id);
@@ -224,4 +239,11 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
+  
+  // Start expiry notification service
+  expiryNotificationService.start();
+  console.log('✅ Expiry notification service started');
 });
+
+// Allow expiry notification service to push realtime events to connected users.
+expiryNotificationService.setRealtimeContext(io);

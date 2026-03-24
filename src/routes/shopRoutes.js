@@ -100,12 +100,13 @@ router.post('/assign', authenticateToken, requireCustomer, async (req, res) => {
         return res.status(404).json({ error: 'Shop not found' });
       }
     } else if (shopName) {
-      // Create new shop
+      // Create new CUSTOMER shop (not a wholesale shop)
       shop = await prisma.shop.create({
         data: {
           name: shopName,
           address: shopAddress || '',
-          mobile: shopMobile || ''
+          mobile: shopMobile || '',
+          shopType: 'CUSTOMER' // This is a customer retail shop
         }
       });
     } else {
@@ -322,7 +323,7 @@ router.get('/all-lists', authenticateToken, requireCustomer, async (req, res) =>
   }
 });
 
-// POST /api/shop/copy-list/:listId - Customer copies an employee's list to their own
+// POST /api/shop/copy-list/:listId - Customer tracks a shop list (no duplicate copy)
 router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req, res) => {
   try {
     const customerId = req.user.id;
@@ -366,33 +367,26 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
       return res.status(403).json({ error: 'Access denied - list belongs to a different shop' });
     }
 
-    // Create a copy of the list for the customer
-    const copiedList = await prisma.list.create({
+    if (!prisma.trackedList?.findFirst || !prisma.trackedList?.create) {
+      return res.status(500).json({
+        error: 'Tracking model is not available. Please run Prisma migration and generate client.'
+      });
+    }
+
+    // Prevent duplicate tracking for the same user/list
+    const existingTrack = await prisma.trackedList.findFirst({
+      where: {
+        listId: sourceList.id,
+        userId: customerId,
+        userType: req.user.userType,
+      }
+    });
+
+    const tracking = existingTrack || await prisma.trackedList.create({
       data: {
-        name: sourceList.name,
-        description: sourceList.description || '',
-        customerId: customerId,
-        creatorType: 'CUSTOMER',
-        copiedFromId: sourceList.id,
-        products: {
-          create: sourceList.products.map(p => ({
-            productAtShopId: p.productAtShopId,
-            quantity: p.quantity,
-            isPurchased: false
-          }))
-        }
-      },
-      include: {
-        products: {
-          include: {
-            productAtShop: {
-              include: {
-                product: true,
-                shop: true
-              }
-            }
-          }
-        }
+        listId: sourceList.id,
+        userId: customerId,
+        userType: req.user.userType,
       }
     });
 
@@ -401,8 +395,10 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
 
     res.json({ 
       success: true, 
-      message: 'List copied successfully',
-      list: copiedList 
+      message: existingTrack ? 'Already tracking this list' : 'Live tracking enabled',
+      list: sourceList,
+      tracking,
+      alreadyTracked: !!existingTrack,
     });
   } catch (error) {
     console.error('Error copying list:', error);
@@ -410,7 +406,7 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
   }
 });
 
-// POST /api/shop/employee-copy-list/:listId - Employee copies a list (from admin or other employee) to their own
+// POST /api/shop/employee-copy-list/:listId - Employee tracks a list (no duplicate copy)
 router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, async (req, res) => {
   try {
     const employeeId = req.user.id;
@@ -458,41 +454,35 @@ router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, a
       return res.status(403).json({ error: 'Access denied - list belongs to a different shop' });
     }
 
-    // Create a copy of the list for the employee
-    const copiedList = await prisma.list.create({
+    if (!prisma.trackedList?.findFirst || !prisma.trackedList?.create) {
+      return res.status(500).json({
+        error: 'Tracking model is not available. Please run Prisma migration and generate client.'
+      });
+    }
+
+    // Prevent duplicate tracking for the same user/list
+    const existingTrack = await prisma.trackedList.findFirst({
+      where: {
+        listId: sourceList.id,
+        userId: employeeId,
+        userType: req.user.userType,
+      }
+    });
+
+    const tracking = existingTrack || await prisma.trackedList.create({
       data: {
-        name: sourceList.name,
-        description: sourceList.description || '',
-        employeeId: employeeId,
-        shopId: employee.shopId,
-        creatorType: 'EMPLOYEE',
-        copiedFromId: sourceList.id,
-        products: {
-          create: sourceList.products.map(p => ({
-            productAtShopId: p.productAtShopId,
-            quantity: p.quantity,
-            isPurchased: false
-          }))
-        }
-      },
-      include: {
-        products: {
-          include: {
-            productAtShop: {
-              include: {
-                product: true,
-                shop: true
-              }
-            }
-          }
-        }
+        listId: sourceList.id,
+        userId: employeeId,
+        userType: req.user.userType,
       }
     });
 
     res.json({ 
       success: true, 
-      message: 'List copied successfully',
-      list: copiedList 
+      message: existingTrack ? 'Already tracking this list' : 'Live tracking enabled',
+      list: sourceList,
+      tracking,
+      alreadyTracked: !!existingTrack,
     });
   } catch (error) {
     console.error('Error copying list for employee:', error);

@@ -75,6 +75,9 @@ model Shop {
   name             String
   address          String
   mobile           String
+  shopType         ShopType          @default(WHOLESALE) // WHOLESALE or CUSTOMER shop
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @default(now()) @updatedAt
   actionLog        ActionLog[]
   priceReports     PriceReport[]
   products         ProductAtShop[]
@@ -85,9 +88,12 @@ model Shop {
   employees        Empolyee[]        // Employees working at this shop
   groupChatId      String?           // Shop group chat ID
   expiryProducts   ExpiryProduct[]   // Products with expiry tracking
+  expiryCategories ExpiryCategory[]  // Expiry categories for this shop
   tasks            Task[]            // Tasks created for this shop
   fridges          Fridge[]          // Fridges in this shop
   cleaningAreas    CleaningArea[]    // Cleaning areas in this shop
+
+  @@index([shopType])
 }
 
 model ProductAtShop {
@@ -166,6 +172,7 @@ model List {
   adminId      Int?          // Admin who created/owns the list
   shopId       String?       // Shop this list belongs to
   creatorType  UserType      @default(CUSTOMER) // Who created: ADMIN, EMPLOYEE, CUSTOMER
+  isTracking   Boolean       @default(false) // Is this a tracked list?
   copiedFromId String?       // If this list was copied from another list
   createdAt    DateTime      @default(now())
   updatedAt    DateTime?     @default(now()) @updatedAt
@@ -174,11 +181,24 @@ model List {
   admin        Admin?        @relation("AdminLists", fields: [adminId], references: [id], onDelete: Cascade)
   products     ListProduct[]
   sharedMessages Message[]   @relation("SharedListMessages")
+  trackedBy    TrackedList[] // Which users are tracking this list
 
   @@index([employeeId])
   @@index([adminId])
   @@index([shopId])
   @@index([creatorType])
+}
+
+model TrackedList {
+  id         String   @id @default(cuid())
+  listId     String   // The original list being tracked
+  userId     Int      // The user who is tracking the list
+  userType   UserType // The type of user tracking (ADMIN or CUSTOMER)
+  createdAt  DateTime @default(now())
+  list       List     @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  @@unique([listId, userId, userType]) // A user can only track a list once
+  @@index([userId, userType])
 }
 
 model ListProduct {
@@ -198,29 +218,48 @@ model ListProduct {
 }
 
 model ExpiryProduct {
-  id                String    @id @default(cuid())
-  productId         String    // Reference to Product
-  shopId            String    // Shop this expiry tracking belongs to
-  expiryDate        DateTime  // Expiry date of the product
-  quantity          Int       @default(1) // Number of items with this expiry
-  batchNumber       String?   // Optional batch/lot number
-  notes             String?   // Optional notes
-  isDisposed        Boolean   @default(false) // Whether disposed
-  disposedAt        DateTime? // When it was disposed
-  disposedBy        String?   // Who disposed it (userId + userType)
-  notification10Day Boolean   @default(false) // Sent 10 day notification
-  notification7Day  Boolean   @default(false) // Sent 7 day notification
-  notification2Day  Boolean   @default(false) // Sent 2 day notification
-  addedById         Int       // User who added this
-  addedByType       UserType  // CUSTOMER or EMPLOYEE
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
-  shop              Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  id                String          @id @default(cuid())
+  productId         String          // Reference to Product
+  shopId            String          // Shop this expiry tracking belongs to
+  categoryId        String?         // Optional: Expiry category this product belongs to
+  expiryDate        DateTime        // Expiry date of the product
+  quantity          Int             @default(1) // Number of items with this expiry
+  batchNumber       String?         // Optional batch/lot number
+  notes             String?         // Optional notes
+  isDisposed        Boolean         @default(false) // Whether disposed
+  disposedAt        DateTime?       // When it was disposed
+  disposedBy        String?         // Who disposed it (userId + userType)
+  notificationsSent Json?           // Track which notifications were sent: { "10": true, "7": true, "3": true }
+  addedById         Int             // User who added this
+  addedByType       UserType        // CUSTOMER or EMPLOYEE
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  product           Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  shop              Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  category          ExpiryCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
   @@index([shopId, expiryDate])
   @@index([shopId, isDisposed])
   @@index([expiryDate])
+  @@index([categoryId])
+}
+
+// Expiry Categories with configurable reminder settings
+model ExpiryCategory {
+  id              String          @id @default(cuid())
+  name            String          // e.g., "Milk Products", "Fresh Produce"
+  description     String?
+  shopId          String          // Shop this category belongs to
+  reminderDays    Int[]           // Days before expiry to send notifications (e.g., [10, 7, 3])
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  shop            Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  products        ExpiryProduct[] // Products in this category
+
+  @@unique([shopId, name]) // Unique category name per shop
+  @@index([shopId])
+  @@index([isActive])
 }
 
 model Chat {
@@ -381,6 +420,11 @@ enum UserType {
   ADMIN
   CUSTOMER
   EMPLOYEE
+}
+
+enum ShopType {
+  WHOLESALE  // Platform wholesale shops managed by admin
+  CUSTOMER   // Customer retail shops owned by registered users
 }
 
 enum ChatType {

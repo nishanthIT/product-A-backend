@@ -3,7 +3,17 @@ import multer from "multer";
 import path from "path";
 import fs from 'fs';
 import { filterProducts, getProductFilters } from "../controller/filterProducts.js";
-import { addProduct, editProduct, getProductByBarcode, getProductById, searchProducts, deleteProduct } from "../controller/addProduct.js";
+import {
+  addProduct,
+  editProduct,
+  getProductByBarcode,
+  getProductById,
+  searchProducts,
+  deleteProduct,
+  quickAddProductFromScan,
+  getPendingSubmittedProducts,
+  approveSubmittedProduct,
+} from "../controller/addProduct.js";
 import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../controller/addShop.js";
 import {
   addProductAtShop,
@@ -119,6 +129,9 @@ router.delete("/deleteProduct/:id",isAuthenticated,isAdmin, deleteProduct); // A
 // Customer product search routes (for adding to lists)
 router.get("/products/barcode/:barcode",isAuthenticated, getProductByBarcode); // Allow customers to search
 router.get("/products/search",isAuthenticated, searchProducts); // Search products by name
+router.post("/products/quick-add", isAuthenticated, quickAddProductFromScan);
+router.get("/products/pending-submissions", isAuthenticated, isEmployee, getPendingSubmittedProducts);
+router.put("/products/pending-submissions/:id/approve", isAuthenticated, isAdmin, approveSubmittedProduct);
 router.get("/products/:id",isAuthenticated, getProductById); // Allow customers to view products
 
 
