@@ -326,4 +326,240 @@ const getSubscriptionStats = async (req, res) => {
   }
 };
 
-export { getDashboardOverview, getAllCustomers, getSubscriptionStats, updateCustomerSubscription, processExpiredTrials }
+const parseBoolean = (value) => {
+  if (typeof value !== 'string') return false;
+  return ['1', 'true', 'yes'].includes(value.toLowerCase());
+};
+
+const normalizeSearchValue = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/[^a-z0-9]/g, '');
+
+const getListItemsSummary = async (req, res) => {
+  try {
+    const adminId = parseInt(req.user.id);
+    const admin = await prisma.admin.findUnique({
+      where: { id: adminId },
+      select: { shopId: true }
+    });
+
+    const search = String(req.query.search || '').trim().toLowerCase();
+    const missingCaseBarcodeOnly = parseBoolean(String(req.query.missingCaseBarcode || 'false'));
+    const sortBy = String(req.query.sortBy || 'lastUpdated');
+    const sortOrder = String(req.query.sortOrder || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '25', 10), 1), 100);
+
+    const whereClause = admin?.shopId
+      ? {
+          list: {
+            shopId: admin.shopId
+          }
+        }
+      : {};
+
+    const listProducts = await prisma.listProduct.findMany({
+      where: whereClause,
+      select: {
+        listId: true,
+        list: {
+          select: {
+            updatedAt: true,
+            createdAt: true
+          }
+        },
+        productAtShop: {
+          select: {
+            updatedAt: true,
+            createdAt: true,
+            product: {
+              select: {
+                id: true,
+                title: true,
+                caseBarcode: true,
+                barcode: true,
+                img: true,
+                caseSize: true,
+                packetSize: true,
+                retailSize: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    const dedupedItems = new Map();
+
+    for (const row of listProducts) {
+      const product = row.productAtShop?.product;
+      if (!product) continue;
+
+      const fallbackKey = [
+        product.title || '',
+        product.retailSize || '',
+        product.caseSize || '',
+        product.packetSize || ''
+      ]
+        .map((part) => String(part).toLowerCase().trim())
+        .join('|');
+
+      const dedupeKey = product.id || fallbackKey;
+      if (!dedupeKey) continue;
+
+      const listUpdatedAt = row.list?.updatedAt || row.list?.createdAt || null;
+      const productAtShopUpdatedAt = row.productAtShop?.updatedAt || row.productAtShop?.createdAt || null;
+      const rowUpdatedAt = [listUpdatedAt, productAtShopUpdatedAt]
+        .filter(Boolean)
+        .map((date) => new Date(date).getTime())
+        .sort((a, b) => b - a)[0];
+
+      if (!dedupedItems.has(dedupeKey)) {
+        dedupedItems.set(dedupeKey, {
+          itemId: product.id || null,
+          dedupeKey,
+          itemName: product.title || 'Unnamed Item',
+          barcode: product.barcode || null,
+          caseBarcode: product.caseBarcode || null,
+          img: product.img || null,
+          listIds: new Set(),
+          lastUpdatedTs: rowUpdatedAt || 0
+        });
+      }
+
+      const entry = dedupedItems.get(dedupeKey);
+      entry.listIds.add(row.listId);
+      if ((rowUpdatedAt || 0) > entry.lastUpdatedTs) {
+        entry.lastUpdatedTs = rowUpdatedAt || entry.lastUpdatedTs;
+      }
+
+      if (!entry.itemId && product.id) entry.itemId = product.id;
+      if (!entry.caseBarcode && product.caseBarcode) entry.caseBarcode = product.caseBarcode;
+      if (!entry.barcode && product.barcode) entry.barcode = product.barcode;
+      if (!entry.img && product.img) entry.img = product.img;
+    }
+
+    let items = Array.from(dedupedItems.values()).map((entry) => ({
+      itemId: entry.itemId,
+      dedupeKey: entry.dedupeKey,
+      itemName: entry.itemName,
+      barcode: entry.barcode,
+      caseBarcode: entry.caseBarcode,
+      img: entry.img,
+      listCount: entry.listIds.size,
+      lastUpdated: entry.lastUpdatedTs ? new Date(entry.lastUpdatedTs).toISOString() : null
+    }));
+
+    if (search) {
+      const normalizedSearch = normalizeSearchValue(search);
+      items = items.filter((item) => {
+        const name = String(item.itemName || '').toLowerCase();
+        const id = String(item.itemId || '').toLowerCase();
+        const barcode = String(item.barcode || '').toLowerCase();
+        const caseBarcode = String(item.caseBarcode || '').toLowerCase();
+        const normalizedId = normalizeSearchValue(id);
+        const normalizedBarcode = normalizeSearchValue(barcode);
+        const normalizedCaseBarcode = normalizeSearchValue(caseBarcode);
+
+        return (
+          name.includes(search) ||
+          id.includes(search) ||
+          barcode.includes(search) ||
+          caseBarcode.includes(search) ||
+          (normalizedSearch && normalizedId.includes(normalizedSearch)) ||
+          (normalizedSearch && normalizedBarcode.includes(normalizedSearch)) ||
+          (normalizedSearch && normalizedCaseBarcode.includes(normalizedSearch))
+        );
+      });
+    }
+
+    if (missingCaseBarcodeOnly) {
+      items = items.filter((item) => !item.caseBarcode || !String(item.caseBarcode).trim());
+    }
+
+    const sorters = {
+      itemName: (a, b) => a.itemName.localeCompare(b.itemName),
+      itemId: (a, b) => String(a.itemId || '').localeCompare(String(b.itemId || '')),
+      caseBarcode: (a, b) => String(a.caseBarcode || '').localeCompare(String(b.caseBarcode || '')),
+      listCount: (a, b) => a.listCount - b.listCount,
+      lastUpdated: (a, b) => {
+        const aTs = a.lastUpdated ? new Date(a.lastUpdated).getTime() : 0;
+        const bTs = b.lastUpdated ? new Date(b.lastUpdated).getTime() : 0;
+        return aTs - bTs;
+      }
+    };
+
+    const selectedSorter = sorters[sortBy] || sorters.lastUpdated;
+    items.sort((a, b) => {
+      const result = selectedSorter(a, b);
+      return sortOrder === 'asc' ? result : -result;
+    });
+
+    const total = items.length;
+    const totalPages = Math.max(Math.ceil(total / limit), 1);
+    const start = (page - 1) * limit;
+    const paginatedItems = items.slice(start, start + limit);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        items: paginatedItems,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching deduplicated user-list items:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch list items summary' });
+  }
+};
+
+const updateGlobalCaseBarcode = async (req, res) => {
+  try {
+    const { itemId, caseBarcode } = req.body;
+
+    if (!itemId || typeof itemId !== 'string') {
+      return res.status(400).json({ success: false, error: 'Valid itemId is required' });
+    }
+
+    const normalizedCaseBarcode = String(caseBarcode || '').trim();
+
+    const updatedProduct = await prisma.product.update({
+      where: { id: itemId },
+      data: {
+        caseBarcode: normalizedCaseBarcode || null
+      },
+      select: {
+        id: true,
+        title: true,
+        caseBarcode: true
+      }
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Case barcode updated globally for this item',
+      data: updatedProduct
+    });
+  } catch (error) {
+    console.error('Error updating global case barcode:', error);
+    if (error.code === 'P2025') {
+      return res.status(404).json({ success: false, error: 'Item not found' });
+    }
+    res.status(500).json({ success: false, error: 'Failed to update case barcode' });
+  }
+};
+
+export {
+  getDashboardOverview,
+  getAllCustomers,
+  getSubscriptionStats,
+  updateCustomerSubscription,
+  processExpiredTrials,
+  getListItemsSummary,
+  updateGlobalCaseBarcode
+}
