@@ -226,6 +226,95 @@ const updateCustomerSubscription = async (req, res) => {
 };
 
 /**
+ * Delete customer and all related linked data
+ */
+const deleteCustomerWithRelatedData = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const id = parseInt(customerId, 10);
+
+    if (Number.isNaN(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid customer ID' });
+    }
+
+    const existingCustomer = await prisma.customer.findUnique({
+      where: { id },
+      select: { id: true, name: true, email: true }
+    });
+
+    if (!existingCustomer) {
+      return res.status(404).json({ success: false, error: 'Customer not found' });
+    }
+
+    const participations = await prisma.chatParticipant.findMany({
+      where: {
+        userId: id,
+        userType: 'CUSTOMER'
+      },
+      select: {
+        chatId: true
+      }
+    });
+
+    const participantChatIds = [...new Set(participations.map((p) => p.chatId))];
+
+    await prisma.$transaction([
+      prisma.messageRead.deleteMany({
+        where: {
+          userId: id,
+          userType: 'CUSTOMER'
+        }
+      }),
+      prisma.message.deleteMany({
+        where: {
+          senderId: id,
+          senderType: 'CUSTOMER'
+        }
+      }),
+      prisma.chatParticipant.deleteMany({
+        where: {
+          userId: id,
+          userType: 'CUSTOMER'
+        }
+      }),
+      prisma.productAtShop.updateMany({
+        where: { userId: id },
+        data: { userId: null }
+      }),
+      prisma.trackedList.deleteMany({
+        where: {
+          userId: id,
+          userType: 'CUSTOMER'
+        }
+      }),
+      prisma.customer.delete({
+        where: { id }
+      })
+    ]);
+
+    if (participantChatIds.length > 0) {
+      await prisma.chat.deleteMany({
+        where: {
+          id: { in: participantChatIds },
+          participants: { none: {} }
+        }
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Customer and related data deleted successfully',
+      data: {
+        customer: existingCustomer
+      }
+    });
+  } catch (error) {
+    console.error('Error deleting customer:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+};
+
+/**
  * Process expired trials and update statuses
  */
 const processExpiredTrials = async (req, res) => {
@@ -559,6 +648,7 @@ export {
   getAllCustomers,
   getSubscriptionStats,
   updateCustomerSubscription,
+  deleteCustomerWithRelatedData,
   processExpiredTrials,
   getListItemsSummary,
   updateGlobalCaseBarcode

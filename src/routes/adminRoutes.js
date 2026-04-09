@@ -4,6 +4,7 @@ import {
 	getAllCustomers,
 	getSubscriptionStats,
 	updateCustomerSubscription,
+	deleteCustomerWithRelatedData,
 	processExpiredTrials,
 	getListItemsSummary,
 	updateGlobalCaseBarcode
@@ -17,6 +18,7 @@ router.get('/dashboard', getDashboardOverview);
 
 // Customer management routes
 router.get('/customers', getAllCustomers);
+router.delete('/customers/:customerId', deleteCustomerWithRelatedData);
 
 // Subscription statistics
 router.get('/subscription-stats', getSubscriptionStats);

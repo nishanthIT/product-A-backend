@@ -661,20 +661,64 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
 router.put('/togglePurchased', authenticateToken, async (req, res) => {
   try {
     const { listId, listProductId } = req.body;
-    const customerId = parseInt(req.user.id);
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
 
-    console.log('✅ Toggle purchased request:', { listId, listProductId, customerId });
+    console.log('✅ Toggle purchased request:', { listId, listProductId, userId, userType });
 
     if (!listId || !listProductId) {
       return res.status(400).json({ error: 'listId and listProductId are required' });
     }
 
-    // Verify the list belongs to the user (with retry for Neon cold starts)
-    const list = await withRetry(() => prisma.list.findFirst({
-      where: {
+    const trackingSupported = !!prisma.trackedList?.findFirst;
+
+    // Build a role-aware ownership check (same policy as GET /lists/:id)
+    let whereClause = { id: listId };
+
+    if (userType === 'ADMIN') {
+      const admin = await prisma.admin.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+
+      whereClause = {
         id: listId,
-        customerId: customerId,
-      },
+        OR: [
+          { adminId: userId },
+          { employee: { shopId: admin?.shopId } }
+        ]
+      };
+    } else if (userType === 'EMPLOYEE') {
+      whereClause = trackingSupported
+        ? {
+            id: listId,
+            OR: [
+              { employeeId: userId },
+              { trackedBy: { some: { userId, userType } } }
+            ]
+          }
+        : {
+            id: listId,
+            employeeId: userId
+          };
+    } else {
+      whereClause = trackingSupported
+        ? {
+            id: listId,
+            OR: [
+              { customerId: userId },
+              { trackedBy: { some: { userId, userType } } }
+            ]
+          }
+        : {
+            id: listId,
+            customerId: userId
+          };
+    }
+
+    // Verify the list is accessible by current user (with retry for Neon cold starts)
+    const list = await withRetry(() => prisma.list.findFirst({
+      where: whereClause,
     }));
 
     if (!list) {
