@@ -49,6 +49,31 @@ const getUserShopId = async (userId, userType) => {
   return null;
 };
 
+const toNullableFloat = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const toFloatWithDefault = (value, fallback) => {
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? fallback : parsed;
+};
+
+const getRangeForCompartment = (fridge, compartment) => {
+  if (compartment === 'FREEZER') {
+    const minSafe = toFloatWithDefault(fridge.freezerMinSafeTemp, -22);
+    const maxSafe = toFloatWithDefault(fridge.freezerMaxSafeTemp, -15);
+    return { minSafe, maxSafe };
+  }
+
+  const minSafe = toFloatWithDefault(fridge.minSafeTemp, -5);
+  const maxSafe = toFloatWithDefault(fridge.maxSafeTemp, 8);
+  return { minSafe, maxSafe };
+};
+
 // ===== FRIDGE MANAGEMENT (Admin) =====
 
 // GET /api/fridges - Get all fridges for the shop
@@ -84,8 +109,12 @@ router.get('/', authenticateToken, async (req, res) => {
       id: fridge.id,
       name: fridge.name,
       location: fridge.location,
-      minSafeTemp: fridge.minSafeTemp,
-      maxSafeTemp: fridge.maxSafeTemp,
+      minSafeTemp: toFloatWithDefault(fridge.minSafeTemp, -5),
+      maxSafeTemp: toFloatWithDefault(fridge.maxSafeTemp, 8),
+      hasFreezer: fridge.hasFreezer,
+      freezerTargetTemp: toNullableFloat(fridge.freezerTargetTemp),
+      freezerMinSafeTemp: toNullableFloat(fridge.freezerMinSafeTemp),
+      freezerMaxSafeTemp: toNullableFloat(fridge.freezerMaxSafeTemp),
       isActive: fridge.isActive,
       createdAt: fridge.createdAt,
       latestReading: fridge.temperatureLogs[0] || null
@@ -102,7 +131,16 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, requireCustomer, async (req, res) => {
   try {
     const customerId = req.user.id;
-    const { name, location, minSafeTemp, maxSafeTemp } = req.body;
+    const {
+      name,
+      location,
+      minSafeTemp,
+      maxSafeTemp,
+      hasFreezer,
+      freezerTargetTemp,
+      freezerMinSafeTemp,
+      freezerMaxSafeTemp
+    } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Fridge name is required' });
@@ -113,12 +151,43 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
 
+    const parsedHasFreezer = hasFreezer === true || hasFreezer === 'true';
+    const parsedMinSafeTemp = toFloatWithDefault(minSafeTemp, -5);
+    const parsedMaxSafeTemp = toFloatWithDefault(maxSafeTemp, 8);
+
+    if (parsedMinSafeTemp >= parsedMaxSafeTemp) {
+      return res.status(400).json({ error: 'Fridge minimum temperature must be less than maximum' });
+    }
+
+    const parsedFreezerMinSafeTemp = parsedHasFreezer
+      ? toFloatWithDefault(freezerMinSafeTemp, -22)
+      : null;
+    const parsedFreezerMaxSafeTemp = parsedHasFreezer
+      ? toFloatWithDefault(freezerMaxSafeTemp, -15)
+      : null;
+    const parsedFreezerTargetTemp = parsedHasFreezer
+      ? toFloatWithDefault(freezerTargetTemp, -18)
+      : null;
+
+    if (
+      parsedHasFreezer &&
+      parsedFreezerMinSafeTemp !== null &&
+      parsedFreezerMaxSafeTemp !== null &&
+      parsedFreezerMinSafeTemp >= parsedFreezerMaxSafeTemp
+    ) {
+      return res.status(400).json({ error: 'Freezer minimum temperature must be less than maximum' });
+    }
+
     const fridge = await prisma.fridge.create({
       data: {
         name,
         location: location || null,
-        minSafeTemp: minSafeTemp !== undefined ? parseFloat(minSafeTemp) : -5,
-        maxSafeTemp: maxSafeTemp !== undefined ? parseFloat(maxSafeTemp) : 8,
+        minSafeTemp: parsedMinSafeTemp,
+        maxSafeTemp: parsedMaxSafeTemp,
+        hasFreezer: parsedHasFreezer,
+        freezerTargetTemp: parsedFreezerTargetTemp,
+        freezerMinSafeTemp: parsedFreezerMinSafeTemp,
+        freezerMaxSafeTemp: parsedFreezerMaxSafeTemp,
         shopId
       }
     });
@@ -139,7 +208,17 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
   try {
     const customerId = req.user.id;
     const fridgeId = req.params.id;
-    const { name, location, minSafeTemp, maxSafeTemp, isActive } = req.body;
+    const {
+      name,
+      location,
+      minSafeTemp,
+      maxSafeTemp,
+      isActive,
+      hasFreezer,
+      freezerTargetTemp,
+      freezerMinSafeTemp,
+      freezerMaxSafeTemp
+    } = req.body;
 
     const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
@@ -158,8 +237,62 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (location !== undefined) updateData.location = location;
-    if (minSafeTemp !== undefined) updateData.minSafeTemp = parseFloat(minSafeTemp);
-    if (maxSafeTemp !== undefined) updateData.maxSafeTemp = parseFloat(maxSafeTemp);
+
+    const resolvedFridgeMin = minSafeTemp !== undefined
+      ? toFloatWithDefault(minSafeTemp, -5)
+      : toFloatWithDefault(existingFridge.minSafeTemp, -5);
+    const resolvedFridgeMax = maxSafeTemp !== undefined
+      ? toFloatWithDefault(maxSafeTemp, 8)
+      : toFloatWithDefault(existingFridge.maxSafeTemp, 8);
+
+    if (resolvedFridgeMin >= resolvedFridgeMax) {
+      return res.status(400).json({ error: 'Fridge minimum temperature must be less than maximum' });
+    }
+
+    if (minSafeTemp !== undefined) updateData.minSafeTemp = resolvedFridgeMin;
+    if (maxSafeTemp !== undefined) updateData.maxSafeTemp = resolvedFridgeMax;
+
+    const resolvedHasFreezer = hasFreezer !== undefined
+      ? (hasFreezer === true || hasFreezer === 'true')
+      : existingFridge.hasFreezer;
+
+    if (hasFreezer !== undefined) {
+      updateData.hasFreezer = resolvedHasFreezer;
+    }
+
+    if (resolvedHasFreezer) {
+      const resolvedFreezerMin = freezerMinSafeTemp !== undefined
+        ? toFloatWithDefault(freezerMinSafeTemp, -22)
+        : toFloatWithDefault(existingFridge.freezerMinSafeTemp, -22);
+      const resolvedFreezerMax = freezerMaxSafeTemp !== undefined
+        ? toFloatWithDefault(freezerMaxSafeTemp, -15)
+        : toFloatWithDefault(existingFridge.freezerMaxSafeTemp, -15);
+
+      if (resolvedFreezerMin >= resolvedFreezerMax) {
+        return res.status(400).json({ error: 'Freezer minimum temperature must be less than maximum' });
+      }
+
+      const resolvedFreezerTarget = freezerTargetTemp !== undefined
+        ? toFloatWithDefault(freezerTargetTemp, -18)
+        : (existingFridge.freezerTargetTemp !== null
+          ? toFloatWithDefault(existingFridge.freezerTargetTemp, -18)
+          : -18);
+
+      if (freezerMinSafeTemp !== undefined || (hasFreezer !== undefined && resolvedHasFreezer)) {
+        updateData.freezerMinSafeTemp = resolvedFreezerMin;
+      }
+      if (freezerMaxSafeTemp !== undefined || (hasFreezer !== undefined && resolvedHasFreezer)) {
+        updateData.freezerMaxSafeTemp = resolvedFreezerMax;
+      }
+      if (freezerTargetTemp !== undefined || (hasFreezer !== undefined && resolvedHasFreezer)) {
+        updateData.freezerTargetTemp = resolvedFreezerTarget;
+      }
+    } else if (hasFreezer !== undefined && !resolvedHasFreezer) {
+      updateData.freezerTargetTemp = null;
+      updateData.freezerMinSafeTemp = null;
+      updateData.freezerMaxSafeTemp = null;
+    }
+
     if (isActive !== undefined) updateData.isActive = isActive;
 
     const fridge = await prisma.fridge.update({
@@ -276,18 +409,19 @@ router.get('/:id/logs', authenticateToken, async (req, res) => {
 
       // Check if temperature is within safe range
       const temp = parseFloat(log.temperature);
-      const minSafe = parseFloat(fridge.minSafeTemp);
-      const maxSafe = parseFloat(fridge.maxSafeTemp);
+      const compartment = log.compartment || 'FRIDGE';
+      const { minSafe, maxSafe } = getRangeForCompartment(fridge, compartment);
       const isAlert = temp < minSafe || temp > maxSafe;
 
       return {
         ...log,
+        compartment,
         recordedByName,
         isAlert,
         alertMessage: isAlert 
           ? temp < minSafe 
-            ? `Temperature too low (below ${minSafe}°C)` 
-            : `Temperature too high (above ${maxSafe}°C)`
+            ? `${compartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too low (below ${minSafe}°C)` 
+            : `${compartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too high (above ${maxSafe}°C)`
           : null
       };
     }));
@@ -297,8 +431,12 @@ router.get('/:id/logs', authenticateToken, async (req, res) => {
       fridge: {
         id: fridge.id,
         name: fridge.name,
-        minSafeTemp: fridge.minSafeTemp,
-        maxSafeTemp: fridge.maxSafeTemp
+        minSafeTemp: toFloatWithDefault(fridge.minSafeTemp, -5),
+        maxSafeTemp: toFloatWithDefault(fridge.maxSafeTemp, 8),
+        hasFreezer: fridge.hasFreezer,
+        freezerTargetTemp: toNullableFloat(fridge.freezerTargetTemp),
+        freezerMinSafeTemp: toNullableFloat(fridge.freezerMinSafeTemp),
+        freezerMaxSafeTemp: toNullableFloat(fridge.freezerMaxSafeTemp)
       },
       logs: logsWithUsers 
     });
@@ -313,7 +451,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
     const fridgeId = req.params.id;
-    const { temperature, entryType, notes } = req.body;
+    const { temperature, entryType, notes, compartment } = req.body;
 
     if (temperature === undefined || temperature === null) {
       return res.status(400).json({ error: 'Temperature is required' });
@@ -321,6 +459,11 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
 
     if (!entryType || !['MORNING', 'EVENING'].includes(entryType)) {
       return res.status(400).json({ error: 'Entry type must be MORNING or EVENING' });
+    }
+
+    const parsedCompartment = (compartment || 'FRIDGE').toUpperCase();
+    if (!['FRIDGE', 'FREEZER'].includes(parsedCompartment)) {
+      return res.status(400).json({ error: 'Compartment must be FRIDGE or FREEZER' });
     }
 
     const shopId = await getUserShopId(userId, userType);
@@ -337,6 +480,10 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Fridge not found or inactive' });
     }
 
+    if (parsedCompartment === 'FREEZER' && !fridge.hasFreezer) {
+      return res.status(400).json({ error: 'This fridge does not have a freezer configured' });
+    }
+
     // Check if already logged for this entry type today
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -347,6 +494,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
       where: {
         fridgeId,
         entryType,
+        compartment: parsedCompartment,
         recordedAt: {
           gte: today,
           lt: tomorrow
@@ -356,7 +504,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
 
     if (existingLog) {
       return res.status(400).json({ 
-        error: `${entryType.toLowerCase()} temperature already recorded for today` 
+        error: `${entryType.toLowerCase()} ${parsedCompartment.toLowerCase()} temperature already recorded for today` 
       });
     }
 
@@ -365,6 +513,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
         fridgeId,
         temperature: parseFloat(temperature),
         entryType,
+        compartment: parsedCompartment,
         notes: notes || null,
         recordedById: userId,
         recordedByType: userType
@@ -373,8 +522,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
 
     // Check if temperature is within safe range
     const temp = parseFloat(temperature);
-    const minSafe = parseFloat(fridge.minSafeTemp);
-    const maxSafe = parseFloat(fridge.maxSafeTemp);
+    const { minSafe, maxSafe } = getRangeForCompartment(fridge, parsedCompartment);
     const isAlert = temp < minSafe || temp > maxSafe;
 
     res.status(201).json({ 
@@ -382,11 +530,12 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
       message: 'Temperature logged successfully',
       log: {
         ...log,
+        compartment: parsedCompartment,
         isAlert,
         alertMessage: isAlert 
           ? temp < minSafe 
-            ? `⚠️ Temperature too low (below ${minSafe}°C)` 
-            : `⚠️ Temperature too high (above ${maxSafe}°C)`
+            ? `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too low (below ${minSafe}°C)` 
+            : `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too high (above ${maxSafe}°C)`
           : null
       }
     });
@@ -410,7 +559,16 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
     // Get all fridges for this shop
     const fridges = await prisma.fridge.findMany({
       where: { shopId },
-      select: { id: true, name: true, minSafeTemp: true, maxSafeTemp: true }
+      select: {
+        id: true,
+        name: true,
+        minSafeTemp: true,
+        maxSafeTemp: true,
+        hasFreezer: true,
+        freezerTargetTemp: true,
+        freezerMinSafeTemp: true,
+        freezerMaxSafeTemp: true
+      }
     });
 
     const fridgeIds = fridgeId ? [fridgeId] : fridges.map(f => f.id);
@@ -456,12 +614,13 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
       }
 
       const temp = parseFloat(log.temperature);
-      const minSafe = parseFloat(fridge?.minSafeTemp || -5);
-      const maxSafe = parseFloat(fridge?.maxSafeTemp || 8);
+      const compartment = log.compartment || 'FRIDGE';
+      const { minSafe, maxSafe } = getRangeForCompartment(fridge || {}, compartment);
       const isAlert = temp < minSafe || temp > maxSafe;
 
       return {
         ...log,
+        compartment,
         fridgeName: fridge?.name || 'Unknown Fridge',
         recordedByName,
         isAlert
@@ -512,13 +671,37 @@ router.get('/today-status', authenticateToken, async (req, res) => {
 
       const morningLog = todayLogs.find(l => l.entryType === 'MORNING');
       const eveningLog = todayLogs.find(l => l.entryType === 'EVENING');
+      const morningFridgeLog = todayLogs.find(
+        l => l.entryType === 'MORNING' && (l.compartment || 'FRIDGE') === 'FRIDGE'
+      );
+      const eveningFridgeLog = todayLogs.find(
+        l => l.entryType === 'EVENING' && (l.compartment || 'FRIDGE') === 'FRIDGE'
+      );
+      const morningFreezerLog = todayLogs.find(
+        l => l.entryType === 'MORNING' && l.compartment === 'FREEZER'
+      );
+      const eveningFreezerLog = todayLogs.find(
+        l => l.entryType === 'EVENING' && l.compartment === 'FREEZER'
+      );
 
       return {
         id: fridge.id,
         name: fridge.name,
         location: fridge.location,
-        minSafeTemp: fridge.minSafeTemp,
-        maxSafeTemp: fridge.maxSafeTemp,
+        minSafeTemp: toFloatWithDefault(fridge.minSafeTemp, -5),
+        maxSafeTemp: toFloatWithDefault(fridge.maxSafeTemp, 8),
+        hasFreezer: fridge.hasFreezer,
+        freezerTargetTemp: toNullableFloat(fridge.freezerTargetTemp),
+        freezerMinSafeTemp: toNullableFloat(fridge.freezerMinSafeTemp),
+        freezerMaxSafeTemp: toNullableFloat(fridge.freezerMaxSafeTemp),
+        morningFridgeLogged: !!morningFridgeLog,
+        morningFridgeTemp: morningFridgeLog?.temperature || null,
+        eveningFridgeLogged: !!eveningFridgeLog,
+        eveningFridgeTemp: eveningFridgeLog?.temperature || null,
+        morningFreezerLogged: !!morningFreezerLog,
+        morningFreezerTemp: morningFreezerLog?.temperature || null,
+        eveningFreezerLogged: !!eveningFreezerLog,
+        eveningFreezerTemp: eveningFreezerLog?.temperature || null,
         morningLogged: !!morningLog,
         morningTemp: morningLog?.temperature || null,
         eveningLogged: !!eveningLog,

@@ -424,6 +424,11 @@ const normalizeSearchValue = (value) => String(value || '')
   .toLowerCase()
   .replace(/[^a-z0-9]/g, '');
 
+const UNKNOWN_SHOP_VALUE = '__UNKNOWN_SHOP__';
+const UNKNOWN_SHOP_LABEL = 'Unknown Shop';
+const NO_AISLE_VALUE = '__NO_AISLE__';
+const NO_AISLE_LABEL = 'No Aisle';
+
 const getListItemsSummary = async (req, res) => {
   try {
     const adminId = parseInt(req.user.id);
@@ -436,6 +441,8 @@ const getListItemsSummary = async (req, res) => {
     const missingCaseBarcodeOnly = parseBoolean(String(req.query.missingCaseBarcode || 'false'));
     const sortBy = String(req.query.sortBy || 'lastUpdated');
     const sortOrder = String(req.query.sortOrder || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const shopId = String(req.query.shopId || '').trim();
+    const aisle = String(req.query.aisle || '').trim();
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '25', 10), 1), 100);
 
@@ -453,14 +460,23 @@ const getListItemsSummary = async (req, res) => {
         listId: true,
         list: {
           select: {
+            shopId: true,
             updatedAt: true,
             createdAt: true
           }
         },
         productAtShop: {
           select: {
+            shopId: true,
+            card_aiel_number: true,
             updatedAt: true,
             createdAt: true,
+            shop: {
+              select: {
+                id: true,
+                name: true
+              }
+            },
             product: {
               select: {
                 id: true,
@@ -481,8 +497,18 @@ const getListItemsSummary = async (req, res) => {
     const dedupedItems = new Map();
 
     for (const row of listProducts) {
-      const product = row.productAtShop?.product;
+      const productAtShop = row.productAtShop;
+      const product = productAtShop?.product;
       if (!product) continue;
+
+      const resolvedShopId = String(productAtShop?.shopId || row.list?.shopId || '').trim();
+      const resolvedShopName = String(productAtShop?.shop?.name || '').trim();
+      const shopBucketValue = resolvedShopId || UNKNOWN_SHOP_VALUE;
+      const shopBucketLabel = resolvedShopName || UNKNOWN_SHOP_LABEL;
+
+      const aisleValue = String(productAtShop?.card_aiel_number || '').trim();
+      const aisleBucketValue = aisleValue || NO_AISLE_VALUE;
+      const aisleBucketLabel = aisleValue || NO_AISLE_LABEL;
 
       const fallbackKey = [
         product.title || '',
@@ -493,11 +519,13 @@ const getListItemsSummary = async (req, res) => {
         .map((part) => String(part).toLowerCase().trim())
         .join('|');
 
-      const dedupeKey = product.id || fallbackKey;
-      if (!dedupeKey) continue;
+      const productKey = product.id || fallbackKey;
+      if (!productKey) continue;
+
+      const dedupeKey = `${shopBucketValue}::${productKey}`;
 
       const listUpdatedAt = row.list?.updatedAt || row.list?.createdAt || null;
-      const productAtShopUpdatedAt = row.productAtShop?.updatedAt || row.productAtShop?.createdAt || null;
+      const productAtShopUpdatedAt = productAtShop?.updatedAt || productAtShop?.createdAt || null;
       const rowUpdatedAt = [listUpdatedAt, productAtShopUpdatedAt]
         .filter(Boolean)
         .map((date) => new Date(date).getTime())
@@ -511,6 +539,10 @@ const getListItemsSummary = async (req, res) => {
           barcode: product.barcode || null,
           caseBarcode: product.caseBarcode || null,
           img: product.img || null,
+          shopId: shopBucketValue,
+          shopName: shopBucketLabel,
+          aisle: aisleBucketLabel,
+          aisleValue: aisleBucketValue,
           listIds: new Set(),
           lastUpdatedTs: rowUpdatedAt || 0
         });
@@ -526,6 +558,9 @@ const getListItemsSummary = async (req, res) => {
       if (!entry.caseBarcode && product.caseBarcode) entry.caseBarcode = product.caseBarcode;
       if (!entry.barcode && product.barcode) entry.barcode = product.barcode;
       if (!entry.img && product.img) entry.img = product.img;
+      if (!entry.shopName && shopBucketLabel) entry.shopName = shopBucketLabel;
+      if (!entry.aisle && aisleBucketLabel) entry.aisle = aisleBucketLabel;
+      if (!entry.aisleValue && aisleBucketValue) entry.aisleValue = aisleBucketValue;
     }
 
     let items = Array.from(dedupedItems.values()).map((entry) => ({
@@ -535,6 +570,10 @@ const getListItemsSummary = async (req, res) => {
       barcode: entry.barcode,
       caseBarcode: entry.caseBarcode,
       img: entry.img,
+      shopId: entry.shopId,
+      shopName: entry.shopName,
+      aisle: entry.aisle,
+      aisleValue: entry.aisleValue,
       listCount: entry.listIds.size,
       lastUpdated: entry.lastUpdatedTs ? new Date(entry.lastUpdatedTs).toISOString() : null
     }));
@@ -566,6 +605,64 @@ const getListItemsSummary = async (req, res) => {
       items = items.filter((item) => !item.caseBarcode || !String(item.caseBarcode).trim());
     }
 
+    const shopOptionMap = new Map();
+    for (const item of items) {
+      const key = item.shopId || UNKNOWN_SHOP_VALUE;
+      const existing = shopOptionMap.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        shopOptionMap.set(key, {
+          value: key,
+          label: item.shopName || UNKNOWN_SHOP_LABEL,
+          count: 1
+        });
+      }
+    }
+
+    const shopOptions = Array.from(shopOptionMap.values()).sort((a, b) => {
+      if (a.value === UNKNOWN_SHOP_VALUE) return 1;
+      if (b.value === UNKNOWN_SHOP_VALUE) return -1;
+      return a.label.localeCompare(b.label);
+    });
+
+    if (shopId) {
+      if (shopId === UNKNOWN_SHOP_VALUE) {
+        items = items.filter((item) => (item.shopId || UNKNOWN_SHOP_VALUE) === UNKNOWN_SHOP_VALUE);
+      } else {
+        items = items.filter((item) => item.shopId === shopId);
+      }
+    }
+
+    const aisleOptionMap = new Map();
+    for (const item of items) {
+      const key = item.aisleValue || NO_AISLE_VALUE;
+      const existing = aisleOptionMap.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        aisleOptionMap.set(key, {
+          value: key,
+          label: item.aisle || NO_AISLE_LABEL,
+          count: 1
+        });
+      }
+    }
+
+    const aisleOptions = Array.from(aisleOptionMap.values()).sort((a, b) => {
+      if (a.value === NO_AISLE_VALUE) return 1;
+      if (b.value === NO_AISLE_VALUE) return -1;
+      return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
+    });
+
+    if (aisle) {
+      if (aisle === NO_AISLE_VALUE) {
+        items = items.filter((item) => (item.aisleValue || NO_AISLE_VALUE) === NO_AISLE_VALUE);
+      } else {
+        items = items.filter((item) => item.aisleValue === aisle);
+      }
+    }
+
     const sorters = {
       itemName: (a, b) => a.itemName.localeCompare(b.itemName),
       itemId: (a, b) => String(a.itemId || '').localeCompare(String(b.itemId || '')),
@@ -593,6 +690,12 @@ const getListItemsSummary = async (req, res) => {
       success: true,
       data: {
         items: paginatedItems,
+        filters: {
+          shops: shopOptions,
+          aisles: aisleOptions,
+          selectedShop: shopId || null,
+          selectedAisle: aisle || null
+        },
         pagination: {
           page,
           limit,

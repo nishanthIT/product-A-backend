@@ -16,7 +16,10 @@ import expiryRoutes from "./src/routes/expiryRoutes.js";
 import taskRoutes from "./src/routes/taskRoutes.js";
 import fridgeRoutes from "./src/routes/fridgeRoutes.js";
 import cleaningRoutes from "./src/routes/cleaningRoutes.js";
+import incidentRoutes from "./src/routes/incidentRoutes.js";
+import certificateRoutes from "./src/routes/certificateRoutes.js";
 import cors from 'cors';
+import wasteRoutes from './src/routes/wasteRoutes.js';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -120,6 +123,9 @@ app.use("/api/expiry", expiryRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/fridges", fridgeRoutes);
 app.use("/api/cleaning", cleaningRoutes);
+app.use("/api/incidents", incidentRoutes);
+app.use("/api/certificates", certificateRoutes);
+app.use('/api/waste', wasteRoutes);
 
 // Global error handler
 app.use((err, req, res, next) => {

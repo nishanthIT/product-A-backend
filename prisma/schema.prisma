@@ -68,6 +68,7 @@ model Product {
   bundleBuyItems        BundlePromotionBuyItem[]
   bundleGetItems        BundlePromotionGetItem[]
   expiryProducts        ExpiryProduct[]
+  wasteRecords          WasteRecord[]
 }
 
 model Shop {
@@ -92,6 +93,9 @@ model Shop {
   tasks            Task[]            // Tasks created for this shop
   fridges          Fridge[]          // Fridges in this shop
   cleaningAreas    CleaningArea[]    // Cleaning areas in this shop
+  incidentLogs     IncidentLog[]     // Incident and accident logs in this shop
+  wasteRecords     WasteRecord[]     // Waste/disposal records in this shop
+  certificates     ShopCertificate[] // Shop certificates and documents
 
   @@index([shopType])
 }
@@ -548,6 +552,10 @@ model Fridge {
   location        String?                // e.g., "Main Kitchen", "Storage Room"
   minSafeTemp     Decimal?               @default(-5)  // Minimum safe temperature
   maxSafeTemp     Decimal?               @default(8)   // Maximum safe temperature
+  hasFreezer      Boolean                @default(false)
+  freezerTargetTemp Decimal?
+  freezerMinSafeTemp Decimal?
+  freezerMaxSafeTemp Decimal?
   shopId          String
   isActive        Boolean                @default(true)
   createdAt       DateTime               @default(now())
@@ -564,6 +572,7 @@ model FridgeTemperatureLog {
   fridgeId    String
   temperature Decimal
   entryType   EntryType   // MORNING or EVENING
+  compartment CompartmentType @default(FRIDGE)
   notes       String?
   recordedById Int        // Can be Customer (Admin) or Employee ID
   recordedByType UserType // CUSTOMER or EMPLOYEE
@@ -578,6 +587,11 @@ model FridgeTemperatureLog {
 enum EntryType {
   MORNING
   EVENING
+}
+
+enum CompartmentType {
+  FRIDGE
+  FREEZER
 }
 
 // ===== CLEANING STATUS SYSTEM =====
@@ -609,4 +623,107 @@ model CleaningLog {
   @@index([cleaningAreaId])
   @@index([completedAt])
   @@index([completedById])
+}
+
+// ===== INCIDENT & ACCIDENT LOGS =====
+model IncidentLog {
+  id           String           @id @default(cuid())
+  shopId       String
+  incidentAt   DateTime
+  description  String
+  imageUrl     String?
+  severity     IncidentSeverity @default(MEDIUM)
+  createdById  Int
+  createdByType UserType
+  updatedById  Int?
+  updatedByType UserType?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  shop         Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([incidentAt])
+  @@index([severity])
+  @@index([createdById, createdByType])
+}
+
+// ===== WASTE MANAGEMENT RECORDS =====
+model WasteRecord {
+  id                       String      @id @default(cuid())
+  shopId                   String
+  productId                String?
+  itemName                 String
+  quantityWasted           Decimal
+  originalPrice            Decimal
+  reducedPrice             Decimal?
+  finalPrice               Decimal
+  totalLoss                Decimal
+  priceReduced             Boolean     @default(false)
+  priceReducedBy           String?
+  priceReductionReason     WasteReason?
+  priceReductionReasonNote String?
+  disposedBy               String
+  disposedAt               DateTime
+  createdById              Int
+  createdByType            UserType
+  createdAt                DateTime    @default(now())
+  updatedAt                DateTime    @updatedAt
+  shop                     Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  product                  Product?    @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([shopId])
+  @@index([disposedAt])
+  @@index([priceReductionReason])
+  @@index([createdById, createdByType])
+}
+
+enum WasteReason {
+  DAMAGED
+  NEAR_EXPIRY
+  SPOILED
+  OTHER
+}
+
+enum IncidentSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// ===== CERTIFICATE MANAGEMENT =====
+model ShopCertificate {
+  id                  String          @id @default(cuid())
+  shopId              String
+  type                CertificateType
+  imagePath           String
+  issuedDate          DateTime?
+  expiryDate          DateTime?
+  renewalDate         DateTime?
+  premiumAmount       Decimal?
+  companyDetails      String?
+  unitRate            Decimal?
+  readingDateDay      DateTime?
+  readingDateNight    DateTime?
+  contractRenewalDate DateTime?
+  reminderDays        Int             @default(7)
+  createdById         Int
+  createdByType       UserType
+  updatedById         Int?
+  updatedByType       UserType?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  shop                Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([type])
+  @@index([renewalDate])
+  @@index([expiryDate])
+  @@index([contractRenewalDate])
+}
+
+enum CertificateType {
+  INSPECTION
+  INSURANCE
+  ELECTRIC
+  HYGIENE
 }
