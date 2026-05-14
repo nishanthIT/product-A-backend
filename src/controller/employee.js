@@ -275,64 +275,69 @@ const getAllEmployees = async (req, res) => {
       },
     });
 
-    // Get all employee activity data
-    const employeeActivity = await Promise.all(
-      employees.map(async (employee) => {
-        // Fetch action logs for this employee
-        const actionLogs = await prisma.actionLog.findMany({
-          where: {
-            employeeId: employee.id,
-            actionType: "ADD",
-          },
-          select: {
-            timestamp: true,
-          },
-        });
+    const employeeIds = employees.map((employee) => employee.id);
+    const activitiesByEmployee = new Map();
 
-        // Process logs to organize by date and hour
-        const activitiesByDate = {};
+    if (employeeIds.length > 0) {
+      const actionLogs = await prisma.actionLog.findMany({
+        where: {
+          employeeId: { in: employeeIds },
+          actionType: "ADD",
+        },
+        select: {
+          employeeId: true,
+          timestamp: true,
+        },
+      });
 
-        actionLogs.forEach((log) => {
-          const date = new Date(log.timestamp).toISOString().split("T")[0];
-          const hour = new Date(log.timestamp).getHours();
-          const hourKey = `${hour}:00`;
+      actionLogs.forEach((log) => {
+        const date = new Date(log.timestamp).toISOString().split("T")[0];
+        const hour = new Date(log.timestamp).getHours();
+        const hourKey = `${hour}:00`;
 
-          if (!activitiesByDate[date]) {
-            activitiesByDate[date] = {
-              date,
-              totalProducts: 0,
-              hourlyBreakdown: {}
-            };
-          }
+        if (!activitiesByEmployee.has(log.employeeId)) {
+          activitiesByEmployee.set(log.employeeId, {});
+        }
 
-          activitiesByDate[date].totalProducts += 1;
+        const activitiesByDate = activitiesByEmployee.get(log.employeeId);
 
-          if (!activitiesByDate[date].hourlyBreakdown[hourKey]) {
-            activitiesByDate[date].hourlyBreakdown[hourKey] = 0;
-          }
-          
-          activitiesByDate[date].hourlyBreakdown[hourKey] += 1;
-        });
+        if (!activitiesByDate[date]) {
+          activitiesByDate[date] = {
+            date,
+            totalProducts: 0,
+            hourlyBreakdown: {}
+          };
+        }
 
-        // Convert to the expected format
-        const activities = Object.values(activitiesByDate).map(dateData => ({
-          date: dateData.date,
-          totalProducts: dateData.totalProducts,
-          hourlyBreakdown: Object.entries(dateData.hourlyBreakdown).map(([hour, count]) => ({
-            hour,
-            count
-          }))
-        }));
+        activitiesByDate[date].totalProducts += 1;
 
-        return {
-          id: employee.id,
-          name: employee.name,
-          phone: employee.phoneNo,
-          email: employee.email,
-          activities,
-        };
-      })
-    );
+        if (!activitiesByDate[date].hourlyBreakdown[hourKey]) {
+          activitiesByDate[date].hourlyBreakdown[hourKey] = 0;
+        }
+
+        activitiesByDate[date].hourlyBreakdown[hourKey] += 1;
+      });
+    }
+
+    const employeeActivity = employees.map((employee) => {
+      const activitiesByDate = activitiesByEmployee.get(employee.id) || {};
+      const activities = Object.values(activitiesByDate).map((dateData) => ({
+        date: dateData.date,
+        totalProducts: dateData.totalProducts,
+        hourlyBreakdown: Object.entries(dateData.hourlyBreakdown).map(([hour, count]) => ({
+          hour,
+          count
+        }))
+      }));
+
+      return {
+        id: employee.id,
+        name: employee.name,
+        phone: employee.phoneNo,
+        email: employee.email,
+        activities,
+      };
+    });
 
     res.status(200).json({
       success: true,

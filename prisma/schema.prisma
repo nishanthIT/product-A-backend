@@ -157,6 +157,8 @@ model ActionLog {
   shopId     String
   productId  String
   actionType String
+  beforeData Json?
+  afterData  Json?
   timestamp  DateTime @default(now())
   employee   Empolyee @relation(fields: [employeeId], references: [id])
   product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)

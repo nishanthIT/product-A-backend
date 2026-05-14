@@ -25,6 +25,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import redisService from './src/services/redisService.js';
 import cacheService from './src/services/cacheService.js';
+import multiLayerCache from './src/services/multiLayerCache.js';
 import expiryNotificationService from './src/services/expiryNotificationService.js';
 
 dotenv.config();
@@ -143,6 +144,7 @@ app.get('/api/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     cache: status,
+    inventoryCache: multiLayerCache.getStats(),
     uptime: process.uptime()
   });
 });

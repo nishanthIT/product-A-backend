@@ -49,7 +49,7 @@ import {
   deleteList,
 } from "../controller/makeList.js";
 import { login, register, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword } from "../controller/auth.js";
-import { emp_dash_handler } from "../controller/dashbord/employ.js";
+import { emp_dash_handler, getEmployeeListItemUpdates } from "../controller/dashbord/employ.js";
 import { getDashboardOverview } from "../controller/dashbord/admin.js";
 import { isAdmin, isAuthenticated, isEmployee } from "../middleware/authware.js";
 import { requireActiveSubscription, softSubscriptionCheck } from "../middleware/subscriptionCheck.js";
@@ -444,6 +444,7 @@ router.post('/product-promotions/:shopId/:productId/apply', isAuthenticated, isE
 
 // dashboard
 router.get("/employee/dashboard-data",isAuthenticated,isEmployee,emp_dash_handler)
+router.get("/employee/list-item-updates",isAuthenticated,isEmployee,getEmployeeListItemUpdates)
 router.get("/admin/dashboard/overview",isAuthenticated,isAdmin,getDashboardOverview)
 
 

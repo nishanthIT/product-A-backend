@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { Jimp } from 'jimp';
 import { removeBackground } from "@imgly/background-removal-node";
+import multiLayerCache from '../services/multiLayerCache.js';
 
 const prisma = new PrismaClient();
 
@@ -98,6 +99,42 @@ const fuzzyMatchWord = (searchWord, text, maxDistance = 2) => {
     }
   }
   return false;
+};
+
+const PRODUCT_CACHE_TTL_SECONDS = 180;
+
+const getProductsCacheKey = ({ shopId, page, search, category, aisle, stockStatus, limit }) => {
+  return [
+    'products-at-shop',
+    shopId,
+    `page=${page}`,
+    `limit=${limit}`,
+    `search=${encodeURIComponent(search || '')}`,
+    `category=${encodeURIComponent(category || '')}`,
+    `aisle=${encodeURIComponent(aisle || '')}`,
+    `stock=${encodeURIComponent(stockStatus || '')}`,
+  ].join(':');
+};
+
+const getProductsCacheGroupKey = (shopId) => `products-at-shop:${shopId}`;
+
+const getShopFiltersCacheKey = (shopId) => `shop-filters:${shopId}`;
+
+const getShopFiltersCacheGroupKey = (shopId) => `shop-filters:${shopId}`;
+
+const invalidateShopInventoryCache = async (shopId) => {
+  if (!shopId) {
+    return;
+  }
+
+  try {
+    await Promise.all([
+      multiLayerCache.invalidateGroup(getProductsCacheGroupKey(shopId)),
+      multiLayerCache.invalidateGroup(getShopFiltersCacheGroupKey(shopId)),
+    ]);
+  } catch (error) {
+    console.warn(`Cache invalidation failed for shop ${shopId}:`, error.message);
+  }
 };
 
 // Add a product at a shop
@@ -398,6 +435,8 @@ const updateProductPriceAtShop = async (req, res) => {
       },
     });
 
+    await invalidateShopInventoryCache(shopId);
+
     res.status(200).json({
       success: true,
       message: "Product price and offer updated successfully.",
@@ -553,6 +592,8 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           },
         });
       }
+
+      await invalidateShopInventoryCache(shopId);
       
       res.status(200).json({
         success: true,
@@ -584,6 +625,8 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           },
         });
       }
+
+      await invalidateShopInventoryCache(shopId);
       
       res.status(201).json({
         success: true,
@@ -613,170 +656,195 @@ const getProductsAtShop = async (req, res) => {
   const pageNumber = parseInt(page);
   const limitNumber = parseInt(limit);
   const offset = (pageNumber - 1) * limitNumber;
+  const cacheKey = getProductsCacheKey({
+    shopId,
+    page: pageNumber,
+    search,
+    category,
+    aisle,
+    stockStatus,
+    limit: limitNumber,
+  });
+  const cacheGroupKey = getProductsCacheGroupKey(shopId);
 
   try {
-    // Check if shop exists
-    const shopExists = await prisma.shop.findUnique({
-      where: { id: shopId },
-    });
-
-    if (!shopExists) {
-      return res.status(404).json({ error: "Shop not found" });
-    }
-
-    // Build search conditions for fuzzy matching
-    let whereClause = { shopId };
-    
-    // Add stock status filter
-    if (stockStatus === "in-stock") {
-      whereClause.outOfStock = false;
-    } else if (stockStatus === "out-of-stock") {
-      whereClause.outOfStock = true;
-    }
-    
-    // Add category filter
-    if (category && category.trim()) {
-      whereClause.product = {
-        ...whereClause.product,
-        category: category.trim()
-      };
-    }
-    
-    // Add aisle filter
-    if (aisle && aisle.trim()) {
-      whereClause.card_aiel_number = aisle.trim();
-    }
-    
-    if (search && search.trim()) {
-      const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
-      
-      if (searchWords.length > 0) {
-        // Build OR conditions for each word to match title OR barcode
-        const searchConditions = searchWords.map(word => {
-          const conditions = [
-            { product: { title: { contains: word, mode: "insensitive" } } },
-            { product: { barcode: { contains: word, mode: "insensitive" } } },
-            { product: { caseBarcode: { contains: word, mode: "insensitive" } } }
-          ];
-          
-          // For words longer than 3 characters, also try matching with first part
-          if (word.length > 3) {
-            const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
-            if (partialWord.length >= 3) {
-              conditions.push({ product: { title: { contains: partialWord, mode: "insensitive" } } });
-            }
-          }
-          
-          return { OR: conditions };
+    const responseData = await multiLayerCache.readThrough({
+      key: cacheKey,
+      groupKey: cacheGroupKey,
+      ttlSeconds: PRODUCT_CACHE_TTL_SECONDS,
+      loader: async () => {
+        // Check if shop exists
+        const shopExists = await prisma.shop.findUnique({
+          where: { id: shopId },
         });
-        
-        whereClause.AND = searchConditions;
-      }
-    }
 
-    // Get total count
-    const totalCount = await prisma.productAtShop.count({ where: whereClause });
+        if (!shopExists) {
+          const shopError = new Error("Shop not found");
+          shopError.statusCode = 404;
+          throw shopError;
+        }
 
-    // Get products with pagination and search
-    let productsAtShop = await prisma.productAtShop.findMany({
-      where: whereClause,
-      include: {
-        product: {
-          select: {
-            title: true,
-            caseSize: true,
-            packetSize: true,
-            retailSize: true,
-            barcode: true,
-            caseBarcode: true,
-            img: true,
-            rrp: true,
-            category: true
+        // Build search conditions for fuzzy matching
+        let whereClause = { shopId };
+
+        // Add stock status filter
+        if (stockStatus === "in-stock") {
+          whereClause.outOfStock = false;
+        } else if (stockStatus === "out-of-stock") {
+          whereClause.outOfStock = true;
+        }
+
+        // Add category filter
+        if (category && category.trim()) {
+          whereClause.product = {
+            ...whereClause.product,
+            category: category.trim()
+          };
+        }
+
+        // Add aisle filter
+        if (aisle && aisle.trim()) {
+          whereClause.card_aiel_number = aisle.trim();
+        }
+
+        if (search && search.trim()) {
+          const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
+
+          if (searchWords.length > 0) {
+            // Build OR conditions for each word to match title OR barcode
+            const searchConditions = searchWords.map(word => {
+              const conditions = [
+                { product: { title: { contains: word, mode: "insensitive" } } },
+                { product: { barcode: { contains: word, mode: "insensitive" } } },
+                { product: { caseBarcode: { contains: word, mode: "insensitive" } } }
+              ];
+
+              // For words longer than 3 characters, also try matching with first part
+              if (word.length > 3) {
+                const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
+                if (partialWord.length >= 3) {
+                  conditions.push({ product: { title: { contains: partialWord, mode: "insensitive" } } });
+                }
+              }
+
+              return { OR: conditions };
+            });
+
+            whereClause.AND = searchConditions;
           }
         }
-      },
-      skip: offset,
-      take: limitNumber,
-      orderBy: {
-        updatedAt: 'desc'
+
+        // Get total count
+        const totalCount = await prisma.productAtShop.count({ where: whereClause });
+
+        // Get products with pagination and search
+        let productsAtShop = await prisma.productAtShop.findMany({
+          where: whereClause,
+          include: {
+            product: {
+              select: {
+                title: true,
+                caseSize: true,
+                packetSize: true,
+                retailSize: true,
+                barcode: true,
+                caseBarcode: true,
+                img: true,
+                rrp: true,
+                category: true
+              }
+            }
+          },
+          skip: offset,
+          take: limitNumber,
+          orderBy: {
+            updatedAt: 'desc'
+          }
+        });
+
+        // If search provided and few results, apply fuzzy matching
+        if (search && search.trim() && productsAtShop.length < 10) {
+          const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
+
+          // Build where clause for fuzzy search that respects filters
+          let fuzzyWhereClause = { shopId };
+          if (category && category.trim()) {
+            fuzzyWhereClause.product = { category: category.trim() };
+          }
+          if (aisle && aisle.trim()) {
+            fuzzyWhereClause.card_aiel_number = aisle.trim();
+          }
+
+          // Get more products for fuzzy matching
+          const allProductsAtShop = await prisma.productAtShop.findMany({
+            where: fuzzyWhereClause,
+            include: {
+              product: {
+                select: {
+                  title: true,
+                  caseSize: true,
+                  packetSize: true,
+                  retailSize: true,
+                  barcode: true,
+                  caseBarcode: true,
+                  img: true,
+                  rrp: true,
+                  category: true
+                }
+              }
+            },
+            take: 500
+          });
+
+          // Apply fuzzy matching
+          const fuzzyMatched = allProductsAtShop.filter(item => {
+            const searchableText = `${item.product.title || ''} ${item.product.barcode || ''} ${item.product.caseBarcode || ''}`;
+            return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
+          });
+
+          // Merge results
+          const existingIds = new Set(productsAtShop.map(p => p.productId));
+          const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.productId));
+          productsAtShop = [...productsAtShop, ...additionalProducts].slice(0, limitNumber);
+        }
+
+        // Map the data to a more frontend-friendly format
+        const formattedProducts = productsAtShop.map(item => ({
+          productId: item.productId,
+          shopId: item.shopId,
+          price: item.price,
+          offerPrice: item.offerPrice,
+          offerExpiryDate: item.offerExpiryDate,
+          title: item.product.title,
+          caseSize: item.product.caseSize,
+          packetSize: item.product.packetSize,
+          retailSize: item.product.retailSize,
+          barcode: item.product.barcode,
+          caseBarcode: item.product.caseBarcode,
+          img: item.product.img,
+          rrp: item.product.rrp,
+          category: item.product.category,
+          aiel: item.card_aiel_number,
+          outOfStock: item.outOfStock || false,
+          updatedAt: item.updatedAt
+        }));
+
+        return {
+          products: formattedProducts,
+          total: Math.max(totalCount, formattedProducts.length),
+          page: pageNumber,
+          limit: limitNumber,
+          totalPages: Math.ceil(Math.max(totalCount, formattedProducts.length) / limitNumber)
+        };
       }
     });
 
-    // If search provided and few results, apply fuzzy matching
-    if (search && search.trim() && productsAtShop.length < 10) {
-      const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
-      
-      // Build where clause for fuzzy search that respects filters
-      let fuzzyWhereClause = { shopId };
-      if (category && category.trim()) {
-        fuzzyWhereClause.product = { category: category.trim() };
-      }
-      if (aisle && aisle.trim()) {
-        fuzzyWhereClause.card_aiel_number = aisle.trim();
-      }
-      
-      // Get more products for fuzzy matching
-      const allProductsAtShop = await prisma.productAtShop.findMany({
-        where: fuzzyWhereClause,
-        include: {
-          product: {
-            select: {
-              title: true,
-              caseSize: true,
-              packetSize: true,
-              retailSize: true,
-              barcode: true,
-              caseBarcode: true,
-              img: true,
-              rrp: true,
-              category: true
-            }
-          }
-        },
-        take: 500
-      });
-      
-      // Apply fuzzy matching
-      const fuzzyMatched = allProductsAtShop.filter(item => {
-        const searchableText = `${item.product.title || ''} ${item.product.barcode || ''} ${item.product.caseBarcode || ''}`;
-        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
-      });
-      
-      // Merge results
-      const existingIds = new Set(productsAtShop.map(p => p.productId));
-      const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.productId));
-      productsAtShop = [...productsAtShop, ...additionalProducts].slice(0, limitNumber);
+    res.status(200).json(responseData);
+  } catch (error) {
+    if (error.statusCode === 404) {
+      return res.status(404).json({ error: error.message });
     }
 
-    // Map the data to a more frontend-friendly format
-    const formattedProducts = productsAtShop.map(item => ({
-      productId: item.productId,
-      shopId: item.shopId,
-      price: item.price,
-      offerPrice: item.offerPrice,
-      offerExpiryDate: item.offerExpiryDate,
-      title: item.product.title,
-      caseSize: item.product.caseSize,
-      packetSize: item.product.packetSize,
-      retailSize: item.product.retailSize,
-      barcode: item.product.barcode,
-      caseBarcode: item.product.caseBarcode,
-      img: item.product.img,
-      rrp: item.product.rrp,
-      category: item.product.category,
-      aiel: item.card_aiel_number,
-      outOfStock: item.outOfStock || false,
-      updatedAt: item.updatedAt
-    }));
-
-    res.status(200).json({
-      products: formattedProducts,
-      total: Math.max(totalCount, formattedProducts.length),
-      page: pageNumber,
-      limit: limitNumber,
-      totalPages: Math.ceil(Math.max(totalCount, formattedProducts.length) / limitNumber)
-    });
-  } catch (error) {
     console.error("Error fetching products at shop:", error);
     res.status(500).json({ error: "Internal server error" });
   }
@@ -844,6 +912,8 @@ const toggleOutOfStock = async (req, res) => {
     // Use raw query to update outOfStock field (works even if Prisma client not regenerated)
     await prisma.$executeRaw`UPDATE "ProductAtShop" SET "outOfStock" = ${newOutOfStock} WHERE "shopId" = ${shopId} AND "productId" = ${productId}`;
 
+    await invalidateShopInventoryCache(shopId);
+
     res.status(200).json({
       success: true,
       outOfStock: newOutOfStock,
@@ -909,6 +979,8 @@ const removeProductFromShop = async (req, res) => {
       },
     });
 
+    await invalidateShopInventoryCache(shopId);
+
     res.status(200).json({
       success: true,
       message: "Product removed from shop successfully."
@@ -924,39 +996,48 @@ const getShopFilters = async (req, res) => {
   try {
     const { shopId } = req.params;
 
-    // Get all unique categories and aisles from products at this shop
-    const productsAtShop = await prisma.productAtShop.findMany({
-      where: { shopId: shopId },
-      include: {
-        product: {
-          select: {
-            category: true,
+    const responseData = await multiLayerCache.readThrough({
+      key: getShopFiltersCacheKey(shopId),
+      groupKey: getShopFiltersCacheGroupKey(shopId),
+      ttlSeconds: PRODUCT_CACHE_TTL_SECONDS,
+      loader: async () => {
+        // Get all unique categories and aisles from products at this shop
+        const productsAtShop = await prisma.productAtShop.findMany({
+          where: { shopId: shopId },
+          include: {
+            product: {
+              select: {
+                category: true,
+              },
+            },
           },
-        },
-      },
+        });
+
+        // Extract unique categories from shop products
+        const shopCategories = [...new Set(productsAtShop.map(p => p.product.category).filter(Boolean))].sort();
+        const aisles = [...new Set(productsAtShop.map(p => p.card_aiel_number).filter(Boolean))].sort();
+
+        // Also get all categories from the Category table for complete list
+        let allCategories = shopCategories;
+        try {
+          const categoryRecords = await prisma.category.findMany({
+            orderBy: { name: 'asc' }
+          });
+          allCategories = categoryRecords.map(c => c.name);
+        } catch (e) {
+          // If Category table doesn't exist, fall back to shop categories
+          console.log("Category table not available, using shop categories only");
+        }
+
+        return {
+          categories: allCategories.length > 0 ? allCategories : shopCategories,
+          aisles,
+          totalProducts: productsAtShop.length,
+        };
+      }
     });
 
-    // Extract unique categories from shop products
-    const shopCategories = [...new Set(productsAtShop.map(p => p.product.category).filter(Boolean))].sort();
-    const aisles = [...new Set(productsAtShop.map(p => p.card_aiel_number).filter(Boolean))].sort();
-
-    // Also get all categories from the Category table for complete list
-    let allCategories = shopCategories;
-    try {
-      const categoryRecords = await prisma.category.findMany({
-        orderBy: { name: 'asc' }
-      });
-      allCategories = categoryRecords.map(c => c.name);
-    } catch (e) {
-      // If Category table doesn't exist, fall back to shop categories
-      console.log("Category table not available, using shop categories only");
-    }
-
-    res.json({
-      categories: allCategories.length > 0 ? allCategories : shopCategories,
-      aisles,
-      totalProducts: productsAtShop.length,
-    });
+    res.json(responseData);
   } catch (error) {
     console.error('Error getting shop filters:', error);
     res.status(500).json({ error: 'Failed to get shop filters' });

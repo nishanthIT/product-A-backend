@@ -7,9 +7,11 @@ import {
 	deleteCustomerWithRelatedData,
 	processExpiredTrials,
 	getListItemsSummary,
-	updateGlobalCaseBarcode
+	updateGlobalCaseBarcode,
+	updateListItemDetails,
+	getEmployeeListItemUpdates
 } from '../controller/dashbord/admin.js';
-import { isAuthenticated, isAdmin } from '../middleware/authware.js';
+import { isAuthenticated, isAdmin, isEmployee } from '../middleware/authware.js';
 
 const router = express.Router();
 
@@ -28,7 +30,9 @@ router.put('/customers/:customerId/subscription', updateCustomerSubscription);
 router.post('/process-expired-trials', processExpiredTrials);
 
 // Items in User List (deduplicated)
-router.get('/list-items', isAuthenticated, isAdmin, getListItemsSummary);
-router.patch('/list-items/case-barcode', isAuthenticated, isAdmin, updateGlobalCaseBarcode);
+router.get('/list-items', isAuthenticated, isEmployee, getListItemsSummary);
+router.patch('/list-items/case-barcode', isAuthenticated, isEmployee, updateGlobalCaseBarcode);
+router.patch('/list-items', isAuthenticated, isEmployee, updateListItemDetails);
+router.get('/employees/:employeeId/list-item-updates', isAuthenticated, isAdmin, getEmployeeListItemUpdates);
 
 export default router;

@@ -495,6 +495,7 @@ const getProductById = async (req, res) => {
 
 const getProductByBarcode = async (req, res) => {
   const { barcode } = req.params;
+  const field = String(req.query.field || '').trim().toLowerCase();
 
   try {
     // Validate barcode parameter
@@ -506,51 +507,64 @@ const getProductByBarcode = async (req, res) => {
     const cleanBarcode = barcode.trim();
     console.log("Searching for barcode:", cleanBarcode);
 
-    // First try exact match on barcode field
-    let product = await prisma.product.findUnique({
-      where: { barcode: cleanBarcode },
-      include: {
-        shops: {
-          include: {
-            shop: true, // Include shop details
-          },
+    let product = null;
+    const includeShops = {
+      shops: {
+        include: {
+          shop: true,
         },
       },
-    });
+    };
 
-    // If not found, try searching in caseBarcode field
-    if (!product) {
-      console.log("Not found in barcode field, trying caseBarcode...");
-      product = await prisma.product.findFirst({
-        where: { caseBarcode: cleanBarcode },
-        include: {
-          shops: {
-            include: {
-              shop: true,
-            },
-          },
-        },
-      });
-    }
-
-    // If still not found, try case-insensitive search on both fields
-    if (!product) {
-      console.log("Trying case-insensitive search...");
+    if (field === 'barcode') {
       product = await prisma.product.findFirst({
         where: {
           OR: [
-            { barcode: { equals: cleanBarcode, mode: 'insensitive' } },
+            { barcode: cleanBarcode },
+            { barcode: { equals: cleanBarcode, mode: 'insensitive' } }
+          ]
+        },
+        include: includeShops,
+      });
+    } else if (field === 'casebarcode') {
+      product = await prisma.product.findFirst({
+        where: {
+          OR: [
+            { caseBarcode: cleanBarcode },
             { caseBarcode: { equals: cleanBarcode, mode: 'insensitive' } }
           ]
         },
-        include: {
-          shops: {
-            include: {
-              shop: true,
-            },
-          },
-        },
+        include: includeShops,
       });
+    } else {
+      // First try exact match on barcode field
+      product = await prisma.product.findUnique({
+        where: { barcode: cleanBarcode },
+        include: includeShops,
+      });
+
+      // If not found, try searching in caseBarcode field
+      if (!product) {
+        console.log("Not found in barcode field, trying caseBarcode...");
+        product = await prisma.product.findFirst({
+          where: { caseBarcode: cleanBarcode },
+          include: includeShops,
+        });
+      }
+
+      // If still not found, try case-insensitive search on both fields
+      if (!product) {
+        console.log("Trying case-insensitive search...");
+        product = await prisma.product.findFirst({
+          where: {
+            OR: [
+              { barcode: { equals: cleanBarcode, mode: 'insensitive' } },
+              { caseBarcode: { equals: cleanBarcode, mode: 'insensitive' } }
+            ]
+          },
+          include: includeShops,
+        });
+      }
     }
 
     // Handle case where product is not found

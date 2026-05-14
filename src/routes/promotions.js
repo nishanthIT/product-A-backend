@@ -146,7 +146,8 @@ router.get('/', async (req, res) => {
             title: true,
             barcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
         }
       },
@@ -225,7 +226,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
             title: true,
             barcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
         }
       }
@@ -354,7 +356,8 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
             title: true,
             barcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
         }
       }
@@ -396,7 +399,8 @@ router.put('/:id/toggle', authenticateToken, requireAdmin, async (req, res) => {
             title: true,
             barcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
         }
       }
@@ -459,7 +463,8 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
             title: true,
             barcode: true,
             img: true,
-            rrp: true
+            rrp: true,
+            category: true
           }
         }
       }

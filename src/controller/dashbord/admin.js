@@ -7,11 +7,28 @@ const prisma = new PrismaClient();
  */
 const getDashboardOverview = async (req, res) => {
   try {
+    const adminId = parseInt(req.user?.id, 10);
+    let scopedShopId = null;
+
+    if (!Number.isNaN(adminId)) {
+      const admin = await prisma.admin.findUnique({
+        where: { id: adminId },
+        select: { shopId: true }
+      });
+      scopedShopId = admin?.shopId || null;
+    }
+
+    const listUpdateWhere = {
+      actionType: 'LIST_ITEM_UPDATE',
+      ...(scopedShopId ? { shopId: scopedShopId } : {})
+    };
+
     // Get counts for dashboard stats cards
-    const [customerCount, productCount, shopCount] = await Promise.all([
+    const [customerCount, productCount, shopCount, listItemUpdateCount] = await Promise.all([
       prisma.customer.count(),
       prisma.product.count(),
-      prisma.shop.count()
+      prisma.shop.count(),
+      prisma.actionLog.count({ where: listUpdateWhere })
     ]);
 
     // Calculate monthly earnings data based on ProductAtShop entries
@@ -58,7 +75,8 @@ const getDashboardOverview = async (req, res) => {
         stats: [
           { label: 'Total Customers', value: customerCount.toString() },
           { label: 'Total Products', value: productCount.toString() },
-          { label: 'Total Shops', value: shopCount.toString() }
+          { label: 'Total Shops', value: shopCount.toString() },
+          { label: 'List Item Updates', value: listItemUpdateCount.toString() }
         ],
         earningsData: monthlyEarnings
       }
@@ -424,6 +442,43 @@ const normalizeSearchValue = (value) => String(value || '')
   .toLowerCase()
   .replace(/[^a-z0-9]/g, '');
 
+const toJsonSafe = (value) => {
+  if (!value) return null;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+};
+
+const buildUpdateSummary = (logs) => {
+  const summaryMap = new Map();
+  const totalUnique = new Set();
+
+  logs.forEach((log) => {
+    const dateKey = new Date(log.timestamp).toISOString().split('T')[0];
+    if (!summaryMap.has(dateKey)) {
+      summaryMap.set(dateKey, { productIds: new Set(), totalEdits: 0 });
+    }
+
+    const entry = summaryMap.get(dateKey);
+    entry.totalEdits += 1;
+    entry.productIds.add(log.productId);
+    totalUnique.add(log.productId);
+  });
+
+  const byDate = Array.from(summaryMap.entries()).map(([date, data]) => ({
+    date,
+    uniqueProducts: data.productIds.size,
+    totalEdits: data.totalEdits
+  })).sort((a, b) => b.date.localeCompare(a.date));
+
+  return {
+    totalUnique: totalUnique.size,
+    byDate
+  };
+};
+
 const UNKNOWN_SHOP_VALUE = '__UNKNOWN_SHOP__';
 const UNKNOWN_SHOP_LABEL = 'Unknown Shop';
 const NO_AISLE_VALUE = '__NO_AISLE__';
@@ -431,11 +486,28 @@ const NO_AISLE_LABEL = 'No Aisle';
 
 const getListItemsSummary = async (req, res) => {
   try {
-    const adminId = parseInt(req.user.id);
-    const admin = await prisma.admin.findUnique({
-      where: { id: adminId },
-      select: { shopId: true }
-    });
+    const userType = req.user?.userType;
+    let scopedShopId = null;
+
+    if (userType === 'ADMIN') {
+      const adminId = parseInt(req.user.id, 10);
+      if (!Number.isNaN(adminId)) {
+        const admin = await prisma.admin.findUnique({
+          where: { id: adminId },
+          select: { shopId: true }
+        });
+        scopedShopId = admin?.shopId || null;
+      }
+    } else if (userType === 'EMPLOYEE') {
+      const employeeId = parseInt(req.user.id, 10);
+      if (!Number.isNaN(employeeId)) {
+        const employee = await prisma.empolyee.findUnique({
+          where: { id: employeeId },
+          select: { shopId: true }
+        });
+        scopedShopId = employee?.shopId || null;
+      }
+    }
 
     const search = String(req.query.search || '').trim().toLowerCase();
     const missingCaseBarcodeOnly = parseBoolean(String(req.query.missingCaseBarcode || 'false'));
@@ -446,10 +518,10 @@ const getListItemsSummary = async (req, res) => {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '25', 10), 1), 100);
 
-    const whereClause = admin?.shopId
+    const whereClause = scopedShopId
       ? {
           list: {
-            shopId: admin.shopId
+            shopId: scopedShopId
           }
         }
       : {};
@@ -469,6 +541,7 @@ const getListItemsSummary = async (req, res) => {
           select: {
             shopId: true,
             card_aiel_number: true,
+            price: true,
             updatedAt: true,
             createdAt: true,
             shop: {
@@ -486,7 +559,9 @@ const getListItemsSummary = async (req, res) => {
                 img: true,
                 caseSize: true,
                 packetSize: true,
-                retailSize: true
+                retailSize: true,
+                rrp: true,
+                category: true
               }
             }
           }
@@ -539,6 +614,12 @@ const getListItemsSummary = async (req, res) => {
           barcode: product.barcode || null,
           caseBarcode: product.caseBarcode || null,
           img: product.img || null,
+          price: productAtShop?.price ?? null,
+          caseSize: product.caseSize || null,
+          packetSize: product.packetSize || null,
+          retailSize: product.retailSize || null,
+          rrp: product.rrp || null,
+          category: product.category || null,
           shopId: shopBucketValue,
           shopName: shopBucketLabel,
           aisle: aisleBucketLabel,
@@ -558,6 +639,12 @@ const getListItemsSummary = async (req, res) => {
       if (!entry.caseBarcode && product.caseBarcode) entry.caseBarcode = product.caseBarcode;
       if (!entry.barcode && product.barcode) entry.barcode = product.barcode;
       if (!entry.img && product.img) entry.img = product.img;
+      if (entry.price === null && productAtShop?.price != null) entry.price = productAtShop.price;
+      if (!entry.caseSize && product.caseSize) entry.caseSize = product.caseSize;
+      if (!entry.packetSize && product.packetSize) entry.packetSize = product.packetSize;
+      if (!entry.retailSize && product.retailSize) entry.retailSize = product.retailSize;
+      if (!entry.rrp && product.rrp) entry.rrp = product.rrp;
+      if (!entry.category && product.category) entry.category = product.category;
       if (!entry.shopName && shopBucketLabel) entry.shopName = shopBucketLabel;
       if (!entry.aisle && aisleBucketLabel) entry.aisle = aisleBucketLabel;
       if (!entry.aisleValue && aisleBucketValue) entry.aisleValue = aisleBucketValue;
@@ -570,6 +657,12 @@ const getListItemsSummary = async (req, res) => {
       barcode: entry.barcode,
       caseBarcode: entry.caseBarcode,
       img: entry.img,
+      price: entry.price,
+      caseSize: entry.caseSize,
+      packetSize: entry.packetSize,
+      retailSize: entry.retailSize,
+      rrp: entry.rrp,
+      category: entry.category,
       shopId: entry.shopId,
       shopName: entry.shopName,
       aisle: entry.aisle,
@@ -720,6 +813,19 @@ const updateGlobalCaseBarcode = async (req, res) => {
 
     const normalizedCaseBarcode = String(caseBarcode || '').trim();
 
+    const existingProduct = await prisma.product.findUnique({
+      where: { id: itemId },
+      select: {
+        id: true,
+        title: true,
+        caseBarcode: true
+      }
+    });
+
+    if (!existingProduct) {
+      return res.status(404).json({ success: false, error: 'Item not found' });
+    }
+
     const updatedProduct = await prisma.product.update({
       where: { id: itemId },
       data: {
@@ -731,6 +837,38 @@ const updateGlobalCaseBarcode = async (req, res) => {
         caseBarcode: true
       }
     });
+
+    const updateUserType = String(req.user?.userType || '').toUpperCase();
+    if (updateUserType === 'EMPLOYEE') {
+      try {
+        const employeeId = parseInt(req.user.id, 10);
+        if (!Number.isNaN(employeeId)) {
+          const employee = await prisma.empolyee.findUnique({
+            where: { id: employeeId },
+            select: { shopId: true }
+          });
+
+          if (employee?.shopId) {
+            await prisma.actionLog.create({
+              data: {
+                employeeId,
+                shopId: employee.shopId,
+                productId: itemId,
+                actionType: 'LIST_ITEM_UPDATE',
+                beforeData: {
+                  caseBarcode: existingProduct.caseBarcode || null
+                },
+                afterData: {
+                  caseBarcode: updatedProduct.caseBarcode || null
+                }
+              }
+            });
+          }
+        }
+      } catch (logError) {
+        console.error('Failed to log list item update:', logError);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -746,6 +884,305 @@ const updateGlobalCaseBarcode = async (req, res) => {
   }
 };
 
+const updateListItemDetails = async (req, res) => {
+  try {
+    const {
+      itemId,
+      shopId,
+      title,
+      barcode,
+      caseBarcode,
+      caseSize,
+      packetSize,
+      retailSize,
+      rrp,
+      category,
+      price
+    } = req.body;
+
+    if (!itemId || typeof itemId !== 'string') {
+      return res.status(400).json({ success: false, error: 'Valid itemId is required' });
+    }
+
+    const normalizedTitle = typeof title === 'string' ? title.trim() : undefined;
+    const normalizedBarcode = typeof barcode === 'string' ? barcode.trim() : undefined;
+    const normalizedCaseBarcode = typeof caseBarcode === 'string' ? caseBarcode.trim() : undefined;
+    const normalizedCaseSize = typeof caseSize === 'string' ? caseSize.trim() : undefined;
+    const normalizedPacketSize = typeof packetSize === 'string' ? packetSize.trim() : undefined;
+    const normalizedRetailSize = typeof retailSize === 'string' ? retailSize.trim() : undefined;
+    const normalizedCategory = typeof category === 'string' ? category.trim() : undefined;
+    const normalizedShopId = typeof shopId === 'string' ? shopId.trim() : undefined;
+
+    const hasRrp = Object.prototype.hasOwnProperty.call(req.body, 'rrp');
+    const hasPrice = Object.prototype.hasOwnProperty.call(req.body, 'price');
+    const parsedRrp = hasRrp ? (rrp === '' || rrp === null ? null : Number(rrp)) : undefined;
+    const parsedPrice = hasPrice ? (price === '' || price === null ? null : Number(price)) : undefined;
+
+    if (parsedRrp !== undefined && Number.isNaN(parsedRrp)) {
+      return res.status(400).json({ success: false, error: 'RRP must be a valid number' });
+    }
+
+    if (parsedPrice !== undefined && Number.isNaN(parsedPrice)) {
+      return res.status(400).json({ success: false, error: 'Price must be a valid number' });
+    }
+
+    const existingProduct = await prisma.product.findUnique({
+      where: { id: itemId },
+      select: {
+        id: true,
+        title: true,
+        barcode: true,
+        caseBarcode: true,
+        caseSize: true,
+        packetSize: true,
+        retailSize: true,
+        rrp: true,
+        category: true
+      }
+    });
+
+    if (!existingProduct) {
+      return res.status(404).json({ success: false, error: 'Item not found' });
+    }
+
+    let existingProductAtShop = null;
+    if (normalizedShopId) {
+      existingProductAtShop = await prisma.productAtShop.findUnique({
+        where: {
+          shopId_productId: {
+            shopId: normalizedShopId,
+            productId: itemId
+          }
+        },
+        select: {
+          id: true,
+          price: true,
+          shopId: true
+        }
+      });
+    }
+
+    const productUpdateData = {};
+    if (normalizedTitle !== undefined) productUpdateData.title = normalizedTitle || 'Unnamed Item';
+    if (normalizedBarcode !== undefined) productUpdateData.barcode = normalizedBarcode || null;
+    if (normalizedCaseBarcode !== undefined) productUpdateData.caseBarcode = normalizedCaseBarcode || null;
+    if (normalizedCaseSize !== undefined) productUpdateData.caseSize = normalizedCaseSize || null;
+    if (normalizedPacketSize !== undefined) productUpdateData.packetSize = normalizedPacketSize || null;
+    if (normalizedRetailSize !== undefined) productUpdateData.retailSize = normalizedRetailSize || null;
+    if (parsedRrp !== undefined) productUpdateData.rrp = parsedRrp;
+    if (normalizedCategory !== undefined) productUpdateData.category = normalizedCategory || null;
+
+    let updatedProduct = existingProduct;
+    let updatedProductAtShop = existingProductAtShop;
+
+    await prisma.$transaction(async (tx) => {
+      if (Object.keys(productUpdateData).length > 0) {
+        updatedProduct = await tx.product.update({
+          where: { id: itemId },
+          data: productUpdateData,
+          select: {
+            id: true,
+            title: true,
+            barcode: true,
+            caseBarcode: true,
+            caseSize: true,
+            packetSize: true,
+            retailSize: true,
+            rrp: true,
+            category: true
+          }
+        });
+      }
+
+      if (normalizedShopId && parsedPrice !== undefined) {
+        if (!existingProductAtShop) {
+          throw new Error('Product is not assigned to this shop');
+        }
+
+        updatedProductAtShop = await tx.productAtShop.update({
+          where: {
+            shopId_productId: {
+              shopId: normalizedShopId,
+              productId: itemId
+            }
+          },
+          data: {
+            price: parsedPrice,
+            updatedAt: new Date()
+          },
+          select: {
+            id: true,
+            price: true,
+            shopId: true
+          }
+        });
+      }
+    });
+
+    const detailUserType = String(req.user?.userType || '').toUpperCase();
+    if (detailUserType === 'EMPLOYEE') {
+      try {
+        const employeeId = parseInt(req.user.id, 10);
+        if (!Number.isNaN(employeeId)) {
+          const employee = await prisma.empolyee.findUnique({
+            where: { id: employeeId },
+            select: { shopId: true }
+          });
+          let logShopId = employee?.shopId || null;
+          if (!logShopId && normalizedShopId && !normalizedShopId.startsWith('__')) {
+            logShopId = normalizedShopId;
+          }
+
+          if (!logShopId && updatedProductAtShop?.shopId) {
+            logShopId = updatedProductAtShop.shopId;
+          }
+
+          if (!logShopId && existingProductAtShop?.shopId) {
+            logShopId = existingProductAtShop.shopId;
+          }
+
+          if (!logShopId) {
+            const fallback = await prisma.productAtShop.findFirst({
+              where: { productId: itemId },
+              select: { shopId: true }
+            });
+            logShopId = fallback?.shopId || null;
+          }
+
+          if (logShopId) {
+            await prisma.actionLog.create({
+              data: {
+                employeeId,
+                shopId: logShopId,
+                productId: itemId,
+                actionType: 'LIST_ITEM_UPDATE',
+                beforeData: toJsonSafe({
+                  product: existingProduct,
+                  productAtShop: existingProductAtShop
+                }),
+                afterData: toJsonSafe({
+                  product: updatedProduct,
+                  productAtShop: updatedProductAtShop
+                })
+              }
+            });
+          } else {
+            console.warn('Skipping list item update log: no shopId found', {
+              employeeId,
+              itemId,
+              normalizedShopId
+            });
+          }
+        }
+      } catch (logError) {
+        console.error('Failed to log list item update:', logError);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'List item updated',
+      data: {
+        product: updatedProduct,
+        productAtShop: updatedProductAtShop
+      }
+    });
+  } catch (error) {
+    if (error.code === 'P2002') {
+      return res.status(409).json({ success: false, error: 'Barcode already exists for another product' });
+    }
+
+    if (error.message === 'Product is not assigned to this shop') {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
+    console.error('Error updating list item:', error);
+    res.status(500).json({ success: false, error: 'Failed to update list item' });
+  }
+};
+
+const getEmployeeListItemUpdates = async (req, res) => {
+  try {
+    const employeeId = parseInt(req.params.employeeId, 10);
+    if (Number.isNaN(employeeId)) {
+      return res.status(400).json({ success: false, error: 'Valid employeeId is required' });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '25', 10), 1), 100);
+
+    const logs = await prisma.actionLog.findMany({
+      where: {
+        employeeId,
+        actionType: 'LIST_ITEM_UPDATE'
+      },
+      orderBy: {
+        timestamp: 'desc'
+      },
+      take: limit,
+      include: {
+        product: {
+          select: {
+            id: true,
+            title: true,
+            barcode: true,
+            caseBarcode: true,
+            caseSize: true,
+            packetSize: true,
+            retailSize: true,
+            rrp: true,
+            category: true
+          }
+        },
+        shop: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    });
+
+    const summaryDays = Math.min(Math.max(parseInt(req.query.summaryDays || '30', 10), 1), 365);
+    const summaryStart = new Date();
+    summaryStart.setDate(summaryStart.getDate() - summaryDays);
+
+    const summaryLogs = await prisma.actionLog.findMany({
+      where: {
+        employeeId,
+        actionType: 'LIST_ITEM_UPDATE',
+        timestamp: {
+          gte: summaryStart
+        }
+      },
+      select: {
+        productId: true,
+        timestamp: true
+      }
+    });
+
+    const summary = buildUpdateSummary(summaryLogs);
+
+    res.status(200).json({
+      success: true,
+      data: logs.map((log) => ({
+        id: log.id,
+        timestamp: log.timestamp,
+        product: log.product,
+        shop: log.shop,
+        beforeData: log.beforeData,
+        afterData: log.afterData
+      })),
+      summary: {
+        rangeDays: summaryDays,
+        ...summary
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching list item updates for employee:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch list item updates' });
+  }
+};
+
 export {
   getDashboardOverview,
   getAllCustomers,
@@ -754,5 +1191,7 @@ export {
   deleteCustomerWithRelatedData,
   processExpiredTrials,
   getListItemsSummary,
-  updateGlobalCaseBarcode
+  updateGlobalCaseBarcode,
+  updateListItemDetails,
+  getEmployeeListItemUpdates
 }
