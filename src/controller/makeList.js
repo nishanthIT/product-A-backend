@@ -732,6 +732,7 @@ const getListById = async (req, res) => {
           productName: lp.productAtShop.product.title,
           barcode: lp.productAtShop.product.barcode,
           aielNumber: lp.productAtShop.card_aiel_number,
+          locationCode: lp.productAtShop.locationCode,
           lowestPrice: effectivePrice.price,
           originalPrice: effectivePrice.originalPrice,
           offerPrice: effectivePrice.offerPrice,

@@ -50,10 +50,10 @@ router.get('/', authenticateToken, async (req, res) => {
 
     const records = await prisma.wasteRecord.findMany({ where, orderBy: { disposedAt: 'desc' }, take: parseInt(limit, 10) });
 
-    // Summary totals
+    // Summary totals for the same date window
     const totals = await prisma.wasteRecord.aggregate({
       _sum: { totalLoss: true },
-      where: { shopId }
+      where,
     });
 
     res.json({ success: true, records, summary: { totalLoss: totals._sum.totalLoss || 0 } });
@@ -90,8 +90,8 @@ router.post('/', authenticateToken, async (req, res) => {
     if (priceReduced && (!reducedPrice || Number(reducedPrice) <= 0)) return res.status(400).json({ error: 'Reduced price is required when priceReduced is true' });
     if (priceReduced && !priceReductionReason) return res.status(400).json({ error: 'Price reduction reason is required' });
 
-    const finalPrice = priceReduced ? Number(reducedPrice) : Number(originalPrice);
-    const totalLoss = Number(quantityWasted) * finalPrice;
+    const finalPrice = Number(originalPrice);
+    const totalLoss = Number(quantityWasted) * Number(originalPrice);
 
     const record = await prisma.wasteRecord.create({
       data: {

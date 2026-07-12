@@ -18,8 +18,10 @@ import { addShop, deleteShop, editShop, getAllShops, getShopById } from "../cont
 import {
   addProductAtShop,
   addProductAtShopifExistAtProduct,
+  getAllProductIdsAtShop,
   getProductsAtShop,
   removeProductFromShop,
+  transferProductsBetweenShops,
   searchProductsNotInShop,
   updateProductPriceAtShop,
   toggleOutOfStock,
@@ -196,8 +198,14 @@ router.post('/addProductAtShopifExistAtProduct', isAuthenticated, isEmployee, (r
 // Get products at a shop with pagination and search
 router.get('/shop/:shopId/products',isAuthenticated,isEmployee, getProductsAtShop);
 
+// Get all product IDs in a shop (for bulk transfer selection)
+router.get('/shop/:shopId/product-ids', isAuthenticated, isEmployee, getAllProductIdsAtShop);
+
 // Get categories and aisles available at a shop for filters
 router.get('/shop/:shopId/filters',isAuthenticated,isEmployee, getShopFilters);
+
+// Transfer products from one shop to another in bulk
+router.post('/shop/transfer-products', isAuthenticated, isEmployee, transferProductsBetweenShops);
 
 // Update product price at a shop
 router.put('/shop/:shopId/updateProductPrice',isAuthenticated,isEmployee, updateProductPriceAtShop);

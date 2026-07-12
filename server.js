@@ -18,6 +18,9 @@ import fridgeRoutes from "./src/routes/fridgeRoutes.js";
 import cleaningRoutes from "./src/routes/cleaningRoutes.js";
 import incidentRoutes from "./src/routes/incidentRoutes.js";
 import certificateRoutes from "./src/routes/certificateRoutes.js";
+import ageRestrictedRecordRoutes from "./src/routes/ageRestrictedRecordRoutes.js";
+import supplierPayoutRoutes from "./src/routes/supplierPayoutRoutes.js";
+import shiftSheetRoutes from "./src/routes/shiftSheetRoutes.js";
 import cors from 'cors';
 import wasteRoutes from './src/routes/wasteRoutes.js';
 import cookieParser from 'cookie-parser';
@@ -127,6 +130,9 @@ app.use("/api/cleaning", cleaningRoutes);
 app.use("/api/incidents", incidentRoutes);
 app.use("/api/certificates", certificateRoutes);
 app.use('/api/waste', wasteRoutes);
+app.use('/api/age-restricted-records', ageRestrictedRecordRoutes);
+app.use('/api/supplier-payouts', supplierPayoutRoutes);
+app.use('/api/shift-sheet', shiftSheetRoutes);
 
 // Global error handler
 app.use((err, req, res, next) => {

@@ -153,6 +153,7 @@ const addProductAtShop = async (req, res) => {
     price,
     employeeId,
     aiel,
+    locationCode,
     rrp,
     category
   } = req.body;
@@ -309,6 +310,10 @@ const addProductAtShop = async (req, res) => {
       },
     });
 
+    if (locationCode !== undefined) {
+      await prisma.$executeRaw`UPDATE "ProductAtShop" SET "locationCode" = ${locationCode || null} WHERE "id" = ${addedProductAtShop.id}`;
+    }
+
     // Log the action
     const actionLog = await prisma.actionLog.create({
       data: {
@@ -344,7 +349,7 @@ const addProductAtShop = async (req, res) => {
 // Update product price at a shop
 const updateProductPriceAtShop = async (req, res) => {
   const { shopId } = req.params;
-  const { productId, price, employeeId, offerPrice, offerExpiryDate, aisle } = req.body;
+  const { productId, price, employeeId, offerPrice, offerExpiryDate, aisle, locationCode } = req.body;
 
   console.log('updateProductPriceAtShop received:', {
     shopId,
@@ -354,8 +359,10 @@ const updateProductPriceAtShop = async (req, res) => {
     offerPrice,
     offerExpiryDate,
     aisle,
+    locationCode,
     offerPriceType: typeof offerPrice,
-    offerExpiryDateType: typeof offerExpiryDate
+    offerExpiryDateType: typeof offerExpiryDate,
+    locationCodeType: typeof locationCode
   });
 
   if (!shopId || !productId || price === undefined || !employeeId) {
@@ -389,7 +396,8 @@ const updateProductPriceAtShop = async (req, res) => {
       parsedOfferPrice,
       originalOfferExpiryDate: offerExpiryDate,
       parsedOfferExpiryDate,
-      aisle
+      aisle,
+      locationCode
     });
 
     // Prepare update data
@@ -416,6 +424,10 @@ const updateProductPriceAtShop = async (req, res) => {
       },
       data: updateData,
     });
+
+    if (locationCode !== undefined) {
+      await prisma.$executeRaw`UPDATE "ProductAtShop" SET "locationCode" = ${locationCode || null} WHERE "shopId" = ${shopId} AND "productId" = ${productId}`;
+    }
 
     console.log('Database update result:', {
       id: updatedProductAtShop.id,
@@ -453,7 +465,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
   console.log("Request body:", req.body);
   console.log("Request file:", req.file);
   
-  const { shopId, id, price, employeeId, casebarcode, aiel, rrp, packetSize, caseSize, offerPrice, offerExpiryDate, category } = req.body;
+  const { shopId, id, price, employeeId, casebarcode, aiel, locationCode, rrp, packetSize, caseSize, offerPrice, offerExpiryDate, category } = req.body;
  
   console.log("Extracted values - shopId:", shopId, "id:", id);
   
@@ -580,6 +592,10 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           ...(parsedEmployeeId ? { employeeId: parsedEmployeeId } : {})
         },
       });
+
+      if (locationCode !== undefined) {
+        await prisma.$executeRaw`UPDATE "ProductAtShop" SET "locationCode" = ${locationCode || null} WHERE "shopId" = ${shopId} AND "productId" = ${id}`;
+      }
       
       // Log the update action if we have an employee
       if (parsedEmployeeId) {
@@ -613,6 +629,10 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
           ...(parsedOfferExpiryDate ? { offerExpiryDate: parsedOfferExpiryDate } : {})
         },
       });
+
+      if (locationCode !== undefined) {
+        await prisma.$executeRaw`UPDATE "ProductAtShop" SET "locationCode" = ${locationCode || null} WHERE "shopId" = ${shopId} AND "productId" = ${id}`;
+      }
       
       // Log the add action if we have an employee
       if (parsedEmployeeId) {
@@ -825,6 +845,7 @@ const getProductsAtShop = async (req, res) => {
           rrp: item.product.rrp,
           category: item.product.category,
           aiel: item.card_aiel_number,
+          locationCode: item.locationCode,
           outOfStock: item.outOfStock || false,
           updatedAt: item.updatedAt
         }));
@@ -1044,6 +1065,247 @@ const getShopFilters = async (req, res) => {
   }
 };
 
+const getAllProductIdsAtShop = async (req, res) => {
+  const { shopId } = req.params;
+
+  if (!shopId) {
+    return res.status(400).json({ error: "Shop ID is required" });
+  }
+
+  try {
+    const shop = await prisma.shop.findUnique({
+      where: { id: shopId },
+      select: { id: true }
+    });
+
+    if (!shop) {
+      return res.status(404).json({ error: "Shop not found" });
+    }
+
+    const records = await prisma.productAtShop.findMany({
+      where: { shopId },
+      select: { productId: true }
+    });
+
+    const productIds = records.map((record) => record.productId);
+
+    res.status(200).json({
+      shopId,
+      total: productIds.length,
+      productIds,
+    });
+  } catch (error) {
+    console.error("Error getting all product IDs at shop:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+const transferProductsBetweenShops = async (req, res) => {
+  const { sourceShopId, destinationShopId, productIds, copyPrice, copyAisleNumber, copyLocationCode, duplicateStrategy } = req.body;
+
+  if (!sourceShopId || !destinationShopId) {
+    return res.status(400).json({ error: "sourceShopId and destinationShopId are required" });
+  }
+
+  if (sourceShopId === destinationShopId) {
+    return res.status(400).json({ error: "Source and destination shops must be different" });
+  }
+
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return res.status(400).json({ error: "productIds must be a non-empty array" });
+  }
+
+  const strategy = duplicateStrategy === "replace" ? "replace" : "skip";
+  const normalizedProductIds = Array.from(new Set(productIds.filter((id) => typeof id === "string" && id.trim())));
+
+  if (normalizedProductIds.length === 0) {
+    return res.status(400).json({ error: "No valid productIds were provided" });
+  }
+
+  const shouldCopyPrice = Boolean(copyPrice);
+  const shouldCopyAisle = Boolean(copyAisleNumber);
+  const shouldCopyLocationCode = Boolean(copyLocationCode);
+  const actorEmployeeId = req.user?.userType === "EMPLOYEE" ? parseInt(req.user.id, 10) : null;
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const [sourceShop, destinationShop] = await Promise.all([
+        tx.shop.findUnique({ where: { id: sourceShopId }, select: { id: true } }),
+        tx.shop.findUnique({ where: { id: destinationShopId }, select: { id: true } }),
+      ]);
+
+      if (!sourceShop) {
+        const sourceError = new Error("Source shop not found");
+        sourceError.statusCode = 404;
+        throw sourceError;
+      }
+
+      if (!destinationShop) {
+        const destinationError = new Error("Destination shop not found");
+        destinationError.statusCode = 404;
+        throw destinationError;
+      }
+
+      const sourceRecords = await tx.productAtShop.findMany({
+        where: {
+          shopId: sourceShopId,
+          productId: {
+            in: normalizedProductIds,
+          },
+        },
+        select: {
+          productId: true,
+          price: true,
+          card_aiel_number: true,
+          locationCode: true,
+        },
+      });
+
+      const sourceByProductId = new Map(sourceRecords.map((record) => [record.productId, record]));
+      const existingDestinationRecords = await tx.productAtShop.findMany({
+        where: {
+          shopId: destinationShopId,
+          productId: {
+            in: normalizedProductIds,
+          },
+        },
+        select: {
+          productId: true,
+        },
+      });
+      const existingDestinationSet = new Set(existingDestinationRecords.map((record) => record.productId));
+
+      const toCreate = [];
+      const toReplace = [];
+      let skipped = 0;
+      let failed = 0;
+
+      for (const productId of normalizedProductIds) {
+        const sourceRecord = sourceByProductId.get(productId);
+
+        if (!sourceRecord) {
+          skipped += 1;
+          continue;
+        }
+
+        const existsAtDestination = existingDestinationSet.has(productId);
+
+        if (!existsAtDestination) {
+          toCreate.push({
+            shopId: destinationShopId,
+            productId,
+            employeeId: Number.isNaN(actorEmployeeId) ? undefined : actorEmployeeId,
+            price: shouldCopyPrice ? sourceRecord.price : 0,
+            card_aiel_number: shouldCopyAisle ? sourceRecord.card_aiel_number : null,
+            locationCode: shouldCopyLocationCode ? sourceRecord.locationCode : null,
+            outOfStock: false,
+          });
+          continue;
+        }
+
+        if (strategy === "skip") {
+          skipped += 1;
+          continue;
+        }
+
+        if (!shouldCopyPrice && !shouldCopyAisle && !shouldCopyLocationCode) {
+          skipped += 1;
+          continue;
+        }
+
+        const updateData = {};
+
+        if (shouldCopyPrice) {
+          updateData.price = sourceRecord.price;
+        }
+
+        if (shouldCopyAisle) {
+          updateData.card_aiel_number = sourceRecord.card_aiel_number;
+        }
+
+        if (shouldCopyLocationCode) {
+          updateData.locationCode = sourceRecord.locationCode;
+        }
+
+        if (!Number.isNaN(actorEmployeeId) && actorEmployeeId !== null) {
+          updateData.employeeId = actorEmployeeId;
+        }
+
+        updateData.updatedAt = new Date();
+
+        toReplace.push({
+          productId,
+          updateData,
+        });
+      }
+
+      let createdCount = 0;
+      if (toCreate.length > 0) {
+        const createResult = await tx.productAtShop.createMany({
+          data: toCreate,
+          skipDuplicates: true,
+        });
+        createdCount = createResult.count;
+      }
+
+      if (toReplace.length > 0) {
+        const replaceChunkSize = 250;
+        for (let i = 0; i < toReplace.length; i += replaceChunkSize) {
+          const chunk = toReplace.slice(i, i + replaceChunkSize);
+          const updateResults = await Promise.allSettled(
+            chunk.map((item) =>
+              tx.productAtShop.update({
+                where: {
+                  shopId_productId: {
+                    shopId: destinationShopId,
+                    productId: item.productId,
+                  },
+                },
+                data: item.updateData,
+              })
+            )
+          );
+
+          updateResults.forEach((updateResult) => {
+            if (updateResult.status === "rejected") {
+              failed += 1;
+            }
+          });
+        }
+      }
+
+      const replacedCount = Math.max(0, toReplace.length - failed);
+      const transferred = createdCount + replacedCount;
+      const failedWithResiduals = Math.max(0, normalizedProductIds.length - transferred - skipped);
+
+      return {
+        transferred,
+        skipped,
+        failed: failedWithResiduals,
+        requested: normalizedProductIds.length,
+      };
+    });
+
+    await Promise.all([
+      invalidateShopInventoryCache(sourceShopId),
+      invalidateShopInventoryCache(destinationShopId),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      message: "Transfer complete",
+      ...result,
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+
+    console.error("Error transferring products between shops:", error);
+    res.status(500).json({ error: "Failed to transfer products" });
+  }
+};
+
 // Export all the handlers
 export {
   addProductAtShop,
@@ -1053,5 +1315,7 @@ export {
   searchProductsNotInShop,
   removeProductFromShop,
   toggleOutOfStock,
-  getShopFilters
+  getShopFilters,
+  getAllProductIdsAtShop,
+  transferProductsBetweenShops
 };

@@ -62,10 +62,22 @@ const toFloatWithDefault = (value, fallback) => {
   return Number.isNaN(parsed) ? fallback : parsed;
 };
 
+const isFreezerOnlyUnit = (fridge) => {
+  const minSafe = toFloatWithDefault(fridge?.minSafeTemp, 0);
+  const maxSafe = toFloatWithDefault(fridge?.maxSafeTemp, 0);
+  return !fridge?.hasFreezer && minSafe <= -11 && maxSafe <= -11;
+};
+
 const getRangeForCompartment = (fridge, compartment) => {
   if (compartment === 'FREEZER') {
-    const minSafe = toFloatWithDefault(fridge.freezerMinSafeTemp, -22);
-    const maxSafe = toFloatWithDefault(fridge.freezerMaxSafeTemp, -15);
+    if (isFreezerOnlyUnit(fridge)) {
+      return {
+        minSafe: toFloatWithDefault(fridge.minSafeTemp, -17),
+        maxSafe: toFloatWithDefault(fridge.maxSafeTemp, -11),
+      };
+    }
+    const minSafe = toFloatWithDefault(fridge.freezerMinSafeTemp, -17);
+    const maxSafe = toFloatWithDefault(fridge.freezerMaxSafeTemp, -11);
     return { minSafe, maxSafe };
   }
 
@@ -160,10 +172,10 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
     }
 
     const parsedFreezerMinSafeTemp = parsedHasFreezer
-      ? toFloatWithDefault(freezerMinSafeTemp, -22)
+      ? toFloatWithDefault(freezerMinSafeTemp, -17)
       : null;
     const parsedFreezerMaxSafeTemp = parsedHasFreezer
-      ? toFloatWithDefault(freezerMaxSafeTemp, -15)
+      ? toFloatWithDefault(freezerMaxSafeTemp, -11)
       : null;
     const parsedFreezerTargetTemp = parsedHasFreezer
       ? toFloatWithDefault(freezerTargetTemp, -18)
@@ -176,6 +188,13 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       parsedFreezerMinSafeTemp >= parsedFreezerMaxSafeTemp
     ) {
       return res.status(400).json({ error: 'Freezer minimum temperature must be less than maximum' });
+    }
+
+    if (
+      parsedHasFreezer &&
+      (parsedFreezerMinSafeTemp < -17 || parsedFreezerMinSafeTemp > -11 || parsedFreezerMaxSafeTemp < -17 || parsedFreezerMaxSafeTemp > -11)
+    ) {
+      return res.status(400).json({ error: 'Freezer safe range must stay between -17°C and -11°C' });
     }
 
     const fridge = await prisma.fridge.create({
@@ -262,14 +281,23 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
 
     if (resolvedHasFreezer) {
       const resolvedFreezerMin = freezerMinSafeTemp !== undefined
-        ? toFloatWithDefault(freezerMinSafeTemp, -22)
-        : toFloatWithDefault(existingFridge.freezerMinSafeTemp, -22);
+        ? toFloatWithDefault(freezerMinSafeTemp, -17)
+        : toFloatWithDefault(existingFridge.freezerMinSafeTemp, -17);
       const resolvedFreezerMax = freezerMaxSafeTemp !== undefined
-        ? toFloatWithDefault(freezerMaxSafeTemp, -15)
-        : toFloatWithDefault(existingFridge.freezerMaxSafeTemp, -15);
+        ? toFloatWithDefault(freezerMaxSafeTemp, -11)
+        : toFloatWithDefault(existingFridge.freezerMaxSafeTemp, -11);
 
       if (resolvedFreezerMin >= resolvedFreezerMax) {
         return res.status(400).json({ error: 'Freezer minimum temperature must be less than maximum' });
+      }
+
+      if (
+        resolvedFreezerMin < -17 ||
+        resolvedFreezerMin > -11 ||
+        resolvedFreezerMax < -17 ||
+        resolvedFreezerMax > -11
+      ) {
+        return res.status(400).json({ error: 'Freezer safe range must stay between -17°C and -11°C' });
       }
 
       const resolvedFreezerTarget = freezerTargetTemp !== undefined
@@ -420,8 +448,8 @@ router.get('/:id/logs', authenticateToken, async (req, res) => {
         isAlert,
         alertMessage: isAlert 
           ? temp < minSafe 
-            ? `${compartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too low (below ${minSafe}°C)` 
-            : `${compartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too high (above ${maxSafe}°C)`
+            ? `${compartment === 'FREEZER' ? 'Freezer' : 'Chiller'} temperature too low (below ${minSafe}°C)` 
+            : `${compartment === 'FREEZER' ? 'Freezer' : 'Chiller'} temperature too high (above ${maxSafe}°C)`
           : null
       };
     }));
@@ -480,7 +508,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Fridge not found or inactive' });
     }
 
-    if (parsedCompartment === 'FREEZER' && !fridge.hasFreezer) {
+    if (parsedCompartment === 'FREEZER' && !fridge.hasFreezer && !isFreezerOnlyUnit(fridge)) {
       return res.status(400).json({ error: 'This fridge does not have a freezer configured' });
     }
 
@@ -534,8 +562,8 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
         isAlert,
         alertMessage: isAlert 
           ? temp < minSafe 
-            ? `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too low (below ${minSafe}°C)` 
-            : `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Fridge'} temperature too high (above ${maxSafe}°C)`
+            ? `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Chiller'} temperature too low (below ${minSafe}°C)` 
+            : `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Chiller'} temperature too high (above ${maxSafe}°C)`
           : null
       }
     });
@@ -549,7 +577,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
 router.get('/all-logs', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const { fridgeId, startDate, endDate, limit } = req.query;
+    const { fridgeId, startDate, endDate, limit, compartment, recordedById, recordedByName } = req.query;
 
     const shopId = await getUserShopId(userId, userType);
     if (!shopId) {
@@ -575,17 +603,86 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
     const fridgeMap = new Map(fridges.map(f => [f.id, f]));
 
     const whereClause = { fridgeId: { in: fridgeIds } };
+    const andFilters = [];
+
+    if (compartment && ['FRIDGE', 'FREEZER'].includes(String(compartment).toUpperCase())) {
+      const requestedCompartment = String(compartment).toUpperCase();
+      if (requestedCompartment === 'FRIDGE') {
+        andFilters.push({
+          OR: [{ compartment: 'FRIDGE' }, { compartment: null }]
+        });
+      } else {
+        andFilters.push({ compartment: requestedCompartment });
+      }
+    }
+
+    if (recordedById) {
+      const parsedRecorderId = parseInt(recordedById);
+      if (!Number.isNaN(parsedRecorderId)) {
+        andFilters.push({ recordedById: parsedRecorderId });
+      }
+    }
 
     if (startDate || endDate) {
-      whereClause.recordedAt = {};
+      const recordedAtFilter = {};
       if (startDate) {
-        whereClause.recordedAt.gte = new Date(startDate);
+        recordedAtFilter.gte = new Date(startDate);
       }
       if (endDate) {
         const endDateTime = new Date(endDate);
         endDateTime.setHours(23, 59, 59, 999);
-        whereClause.recordedAt.lte = endDateTime;
+        recordedAtFilter.lte = endDateTime;
       }
+      andFilters.push({ recordedAt: recordedAtFilter });
+    }
+
+    if (recordedByName) {
+      const nameQuery = String(recordedByName).trim();
+      if (nameQuery.length > 0) {
+        const [matchedCustomers, matchedEmployees] = await Promise.all([
+          prisma.customer.findMany({
+            where: {
+              shopId,
+              name: { contains: nameQuery, mode: 'insensitive' }
+            },
+            select: { id: true }
+          }),
+          prisma.empolyee.findMany({
+            where: {
+              shopId,
+              name: { contains: nameQuery, mode: 'insensitive' }
+            },
+            select: { id: true }
+          })
+        ]);
+
+        const customerIds = matchedCustomers.map((item) => item.id);
+        const employeeIds = matchedEmployees.map((item) => item.id);
+
+        if (customerIds.length === 0 && employeeIds.length === 0) {
+          return res.json({ success: true, fridges, logs: [] });
+        }
+
+        const userNameFilters = [];
+        if (customerIds.length > 0) {
+          userNameFilters.push({
+            recordedByType: 'CUSTOMER',
+            recordedById: { in: customerIds }
+          });
+        }
+        if (employeeIds.length > 0) {
+          userNameFilters.push({
+            recordedByType: 'EMPLOYEE',
+            recordedById: { in: employeeIds }
+          });
+        }
+
+        andFilters.push({ OR: userNameFilters });
+      }
+    }
+
+    if (andFilters.length > 0) {
+      whereClause.AND = andFilters;
     }
 
     const logs = await prisma.fridgeTemperatureLog.findMany({

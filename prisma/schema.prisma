@@ -95,9 +95,36 @@ model Shop {
   cleaningAreas    CleaningArea[]    // Cleaning areas in this shop
   incidentLogs     IncidentLog[]     // Incident and accident logs in this shop
   wasteRecords     WasteRecord[]     // Waste/disposal records in this shop
+  ageRestrictedRecords AgeRestrictedRecord[] // Age-restricted product request records
   certificates     ShopCertificate[] // Shop certificates and documents
+  supplierPayoutRecords SupplierPayoutRecord[] // Supplier payout records
+  shiftSheetRecords ShiftSheetRecord[] // Daily shift sheet records
 
   @@index([shopType])
+}
+
+// ===== AGE-RESTRICTED PRODUCT REQUEST RECORDS =====
+model AgeRestrictedRecord {
+  id              String      @id @default(cuid())
+  shopId          String
+  requestedAt     DateTime
+  childGender     ChildGender
+  productCategory String
+  productName     String
+  description     String?
+  recordedBy      String
+  createdById     Int
+  createdByType   UserType
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  shop            Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([requestedAt])
+  @@index([childGender])
+  @@index([productCategory])
+  @@index([recordedBy])
+  @@index([createdById, createdByType])
 }
 
 model ProductAtShop {
@@ -111,6 +138,7 @@ model ProductAtShop {
   createdAt        DateTime?          @default(now())
   listId           String?
   card_aiel_number String?
+  locationCode     String?
   offerExpiryDate  DateTime?
   offerPrice       Decimal?
   outOfStock       Boolean            @default(false)
@@ -692,6 +720,69 @@ enum IncidentSeverity {
   HIGH
 }
 
+enum ChildGender {
+  MALE
+  FEMALE
+}
+
+enum PaymentStatus {
+  TO_PAY
+  PAID
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+}
+
+// ===== SUPPLIER PAYOUT RECORDS =====
+model SupplierPayoutRecord {
+  id              String        @id @default(cuid())
+  shopId          String
+  supplier        String
+  amount          Decimal
+  paymentStatus   PaymentStatus @default(TO_PAY)
+  paymentMethod   PaymentMethod?
+  notes           String?
+  recordedBy      String
+  createdById     Int
+  createdByType   UserType
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  shop            Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([supplier])
+  @@index([paymentStatus])
+  @@index([paymentMethod])
+  @@index([recordedBy])
+  @@index([createdAt])
+  @@index([createdById, createdByType])
+}
+
+// ===== SHIFT SHEET RECORDS =====
+model ShiftSheetRecord {
+  id            String    @id @default(cuid())
+  shopId        String
+  shiftDate     DateTime
+  cashTotal     Decimal
+  cardTotal     Decimal
+  totalSales    Decimal
+  notes         String?
+  recordedBy    String
+  createdById   Int
+  createdByType UserType
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  shop          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([shiftDate])
+  @@index([recordedBy])
+  @@index([createdAt])
+  @@index([createdById, createdByType])
+}
+
 // ===== CERTIFICATE MANAGEMENT =====
 model ShopCertificate {
   id                  String          @id @default(cuid())
@@ -704,6 +795,8 @@ model ShopCertificate {
   premiumAmount       Decimal?
   companyDetails      String?
   unitRate            Decimal?
+  readingValueDay     Decimal?
+  readingValueNight   Decimal?
   readingDateDay      DateTime?
   readingDateNight    DateTime?
   contractRenewalDate DateTime?

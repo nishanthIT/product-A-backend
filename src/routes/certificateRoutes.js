@@ -224,6 +224,8 @@ const validateByType = (type, data, isCreate) => {
 
   if (type === 'ELECTRIC') {
     if (data.unitRate === null) errors.push('Unit rate is required for electric bill');
+    if (data.readingValueDay === null) errors.push('Day reading value is required for electric bill');
+    if (data.readingValueNight === null) errors.push('Night reading value is required for electric bill');
     if (!data.readingDateDay) errors.push('Day reading date is required for electric bill');
     if (!data.readingDateNight) errors.push('Night reading date is required for electric bill');
     if (!data.contractRenewalDate) errors.push('Contract renewal date is required for electric bill');
@@ -366,6 +368,8 @@ router.post('/', authenticateToken, requireCustomer, upload.single('image'), asy
       premiumAmount: parseNumber(req.body.premiumAmount),
       companyDetails: req.body.companyDetails ? String(req.body.companyDetails).trim() : null,
       unitRate: parseNumber(req.body.unitRate),
+      readingValueDay: parseNumber(req.body.readingValueDay),
+      readingValueNight: parseNumber(req.body.readingValueNight),
       readingDateDay: parseDate(req.body.readingDateDay),
       readingDateNight: parseDate(req.body.readingDateNight),
       contractRenewalDate: parseDate(req.body.contractRenewalDate),
@@ -433,6 +437,8 @@ router.put('/:id', authenticateToken, requireCustomer, upload.single('image'), a
       premiumAmount: req.body.premiumAmount !== undefined ? parseNumber(req.body.premiumAmount) : existing.premiumAmount,
       companyDetails: req.body.companyDetails !== undefined ? (req.body.companyDetails ? String(req.body.companyDetails).trim() : null) : existing.companyDetails,
       unitRate: req.body.unitRate !== undefined ? parseNumber(req.body.unitRate) : existing.unitRate,
+      readingValueDay: req.body.readingValueDay !== undefined ? parseNumber(req.body.readingValueDay) : existing.readingValueDay,
+      readingValueNight: req.body.readingValueNight !== undefined ? parseNumber(req.body.readingValueNight) : existing.readingValueNight,
       readingDateDay: req.body.readingDateDay !== undefined ? parseDate(req.body.readingDateDay) : existing.readingDateDay,
       readingDateNight: req.body.readingDateNight !== undefined ? parseDate(req.body.readingDateNight) : existing.readingDateNight,
       contractRenewalDate: req.body.contractRenewalDate !== undefined ? parseDate(req.body.contractRenewalDate) : existing.contractRenewalDate,

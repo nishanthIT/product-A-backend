@@ -215,7 +215,7 @@ const getProductCategories = async (req, res) => {
   try {
     const products = await prisma.product.findMany({
       where: {
-        category: { not: null }
+        category: { not: null, not: 'USER_SUBMITTED_PENDING' }
       },
       select: { category: true },
       distinct: ['category']

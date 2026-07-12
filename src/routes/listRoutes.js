@@ -300,6 +300,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       productName: lp.productAtShop?.product?.title || 'Unknown Product',
       barcode: lp.productAtShop?.product?.barcode || '',
       aielNumber: lp.productAtShop?.card_aiel_number || '',
+      locationCode: lp.productAtShop?.locationCode || '',
       category: lp.productAtShop?.product?.category || 'Uncategorized',
       lowestPrice: Number(lp.productAtShop?.price) || 0,
       originalPrice: Number(lp.productAtShop?.price) || 0,

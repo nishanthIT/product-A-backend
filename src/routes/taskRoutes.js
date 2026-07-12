@@ -136,6 +136,16 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'At least one employee must be assigned' });
     }
 
+    const uniqueEmployeeIds = [...new Set(
+      employeeIds
+        .map((id) => parseInt(id, 10))
+        .filter((id) => Number.isInteger(id))
+    )];
+
+    if (uniqueEmployeeIds.length === 0) {
+      return res.status(400).json({ error: 'At least one valid employee must be assigned' });
+    }
+
     const shopId = await getUserShopId(customerId, req.user.userType);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
@@ -144,12 +154,12 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
     // Verify all employees belong to this shop
     const employees = await prisma.empolyee.findMany({
       where: {
-        id: { in: employeeIds.map(id => parseInt(id)) },
+        id: { in: uniqueEmployeeIds },
         shopId: shopId
       }
     });
 
-    if (employees.length !== employeeIds.length) {
+    if (employees.length !== uniqueEmployeeIds.length) {
       return res.status(400).json({ error: 'Some employees are not in your shop' });
     }
 
@@ -162,12 +172,15 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
         shopId,
         createdById: customerId,
         assignments: {
-          create: employeeIds.map(empId => ({
-            employeeId: parseInt(empId)
+          create: uniqueEmployeeIds.map(empId => ({
+            employeeId: empId
           }))
         }
       },
       include: {
+        shop: {
+          select: { id: true, name: true }
+        },
         createdBy: {
           select: { id: true, name: true }
         },
@@ -180,6 +193,34 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
         }
       }
     });
+
+    // Send task assignment notifications without affecting task creation outcome.
+    try {
+      if (req.io) {
+        const dueDateIso = task.dueDate ? new Date(task.dueDate).toISOString() : null;
+        const assignedBy = task.createdBy?.name || 'Shop Owner';
+        const shopName = task.shop?.name || null;
+
+        for (const assignment of task.assignments) {
+          const employeeId = assignment.employee?.id;
+          if (!employeeId) continue;
+
+          req.io.to(`user_${employeeId}`).emit('task_assigned', {
+            type: 'task_assigned',
+            title: 'New Task Assigned',
+            message: `You have been assigned a new task:\n\"${task.title}\"\nTap to view the task.`,
+            taskId: task.id,
+            taskName: task.title,
+            assignedBy,
+            shopName,
+            dueDate: dueDateIso,
+            createdAt: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (notificationError) {
+      console.error('Task created but notification dispatch failed:', notificationError);
+    }
 
     res.status(201).json({ 
       success: true, 

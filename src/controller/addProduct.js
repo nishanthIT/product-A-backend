@@ -684,26 +684,101 @@ const quickAddProductFromScan = async (req, res) => {
 
 const getPendingSubmittedProducts = async (req, res) => {
   try {
-    const products = await prisma.product.findMany({
-      where: {
-        category: USER_SUBMITTED_PENDING_CATEGORY,
-      },
-      include: {
-        shops: {
-          include: {
-            shop: true,
+    let products;
+
+    try {
+      products = await prisma.product.findMany({
+        where: {
+          category: USER_SUBMITTED_PENDING_CATEGORY,
+        },
+        include: {
+          shops: {
+            include: {
+              shop: true,
+            },
           },
         },
-      },
-      orderBy: {
-        title: 'asc',
-      },
+        orderBy: {
+          title: 'asc',
+        },
+      });
+    } catch (queryError) {
+      const isDelegateError =
+        queryError instanceof TypeError ||
+        (queryError instanceof Error && /findMany/.test(queryError.message));
+
+      if (!isDelegateError) {
+        throw queryError;
+      }
+
+      products = await prisma.$queryRaw`
+        SELECT
+          p."id",
+          p."title",
+          p."productUrl",
+          p."caseSize",
+          p."packetSize",
+          p."barcode",
+          p."img",
+          p."retailSize",
+          p."caseBarcode",
+          p."rrp",
+          p."category"
+        FROM "Product" p
+        WHERE p."category" = ${USER_SUBMITTED_PENDING_CATEGORY}
+        ORDER BY p."title" ASC
+      `;
+
+      products = products.map((product) => ({
+        ...product,
+        shops: [],
+      }));
+    }
+
+    const pendingBarcodes = Array.from(
+      new Set(
+        products
+          .map((product) => product.barcode)
+          .filter((barcode) => barcode !== null && barcode !== undefined)
+          .map((barcode) => String(barcode).trim())
+          .filter((barcode) => barcode.length > 0)
+      )
+    );
+
+    let addedBarcodeSet = new Set();
+    if (pendingBarcodes.length > 0) {
+      const existingProducts = await prisma.product.findMany({
+        where: {
+          barcode: { in: pendingBarcodes },
+          category: { not: USER_SUBMITTED_PENDING_CATEGORY },
+        },
+        select: {
+          barcode: true,
+        },
+      });
+
+      addedBarcodeSet = new Set(
+        existingProducts
+          .map((product) => product.barcode)
+          .filter((barcode) => barcode !== null && barcode !== undefined)
+          .map((barcode) => String(barcode).trim())
+      );
+    }
+
+    const enrichedProducts = products.map((product) => {
+      const productBarcode = product.barcode !== null && product.barcode !== undefined
+        ? String(product.barcode).trim()
+        : '';
+      return {
+        ...product,
+        alreadyAdded: productBarcode ? addedBarcodeSet.has(productBarcode) : false,
+      };
     });
 
     return res.status(200).json({
       success: true,
-      count: products.length,
-      data: products,
+      count: enrichedProducts.length,
+      data: enrichedProducts,
     });
   } catch (error) {
     console.error("Error fetching pending submitted products:", error);
@@ -714,7 +789,7 @@ const getPendingSubmittedProducts = async (req, res) => {
 const approveSubmittedProduct = async (req, res) => {
   try {
     const { id } = req.params;
-    const { category, rrp, caseSize, packetSize, retailSize } = req.body;
+    const { title, barcode, caseBarcode, category, rrp, caseSize, packetSize, retailSize } = req.body;
 
     if (!id) {
       return res.status(400).json({ error: "Product ID is required." });
@@ -729,10 +804,46 @@ const approveSubmittedProduct = async (req, res) => {
       return res.status(400).json({ error: "Product is not pending approval." });
     }
 
+    const normalizedBarcode = barcode !== undefined && barcode !== null
+      ? String(barcode).trim()
+      : '';
+    const normalizedTitle = title !== undefined && title !== null
+      ? String(title).trim()
+      : '';
+    const hasCaseBarcode = caseBarcode !== undefined;
+    const normalizedCaseBarcode = hasCaseBarcode && caseBarcode !== null
+      ? String(caseBarcode).trim()
+      : '';
+
+    if (normalizedBarcode && normalizedBarcode !== product.barcode) {
+      const existingProduct = await prisma.product.findFirst({
+        where: {
+          barcode: normalizedBarcode,
+          NOT: { id },
+        },
+      });
+
+      if (existingProduct) {
+        return res.status(409).json({ error: "Barcode already exists." });
+      }
+    }
+
+    const normalizedCategory = category && String(category).trim()
+      ? String(category).trim()
+      : '';
+    const approvedCategory = normalizedCategory && normalizedCategory !== USER_SUBMITTED_PENDING_CATEGORY
+      ? normalizedCategory
+      : 'Uncategorized';
+
     const approvedProduct = await prisma.product.update({
       where: { id },
       data: {
-        category: category && String(category).trim() ? String(category).trim() : 'Uncategorized',
+        title: normalizedTitle ? normalizedTitle : product.title,
+        barcode: normalizedBarcode ? normalizedBarcode : product.barcode,
+        caseBarcode: hasCaseBarcode
+          ? (normalizedCaseBarcode ? normalizedCaseBarcode : null)
+          : product.caseBarcode,
+        category: approvedCategory,
         rrp: rrp !== undefined && rrp !== null && rrp !== '' ? parseFloat(rrp) : product.rrp,
         caseSize: caseSize !== undefined ? String(caseSize) : product.caseSize,
         packetSize: packetSize !== undefined ? String(packetSize) : product.packetSize,
