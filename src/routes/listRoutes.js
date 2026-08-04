@@ -299,6 +299,10 @@ router.get('/:id', authenticateToken, async (req, res) => {
       productAtShopId: lp.productAtShopId,
       productName: lp.productAtShop?.product?.title || 'Unknown Product',
       barcode: lp.productAtShop?.product?.barcode || '',
+      caseBarcode: lp.productAtShop?.product?.caseBarcode || '',
+      retailSize: lp.productAtShop?.product?.retailSize || '',
+      caseSize: lp.productAtShop?.product?.caseSize || '',
+      packetSize: lp.productAtShop?.product?.packetSize || '',
       aielNumber: lp.productAtShop?.card_aiel_number || '',
       locationCode: lp.productAtShop?.locationCode || '',
       category: lp.productAtShop?.product?.category || 'Uncategorized',
@@ -974,34 +978,122 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'productId is required', hasOffers: false });
     }
 
-    // Find the product in all shops (excluding out of stock)
-    const productAtShops = await prisma.productAtShop.findMany({
-      where: {
-        productId,
-        outOfStock: false,
-      },
-      include: {
-        shop: true,
-        product: true,
-      },
-    });
+    // Bundles are often configured on a sibling variant row (same title with a
+    // different pack size, or the case barcode instead of the unit barcode), so
+    // match against the scanned product AND all of its variants. Done as a
+    // single self-join query — the DB is remote, so round trips dominate latency.
+    const candidateRows = await prisma.$queryRaw`
+      SELECT p2.id
+      FROM "Product" p1
+      JOIN "Product" p2 ON (
+        p2.id = p1.id OR
+        (p1.title IS NOT NULL AND LOWER(p2.title) = LOWER(p1.title)) OR
+        (p1.barcode IS NOT NULL AND (p2.barcode = p1.barcode OR p2."caseBarcode" = p1.barcode)) OR
+        (p1."caseBarcode" IS NOT NULL AND (p2.barcode = p1."caseBarcode" OR p2."caseBarcode" = p1."caseBarcode"))
+      )
+      WHERE p1.id = ${productId}
+      LIMIT 50
+    `;
+    if (candidateRows.length === 0) {
+      // The self-join always matches the product itself, so no rows = not found.
+      return res.status(404).json({ error: 'Product not found', hasOffers: false });
+    }
+    const candidateIds = [...new Set(candidateRows.map(r => r.id))];
+    const candidateIdSet = new Set(candidateIds);
+
+    const now = new Date();
+
+    // Fetch stock, promotions, and existing list rows in parallel — they only
+    // depend on the candidate IDs, not on each other.
+    const [allCandidateAtShops, bundlePromotions, existingListProducts] = await Promise.all([
+      prisma.productAtShop.findMany({
+        where: {
+          productId: { in: candidateIds },
+          outOfStock: false,
+        },
+        include: {
+          shop: true,
+          product: true,
+        },
+      }),
+      // Active bundle promotions at ANY shop stocking this product or a variant —
+      // the offer often lives at a different shop (or on a different variant row)
+      // than the scanned/cheapest one.
+      prisma.bundlePromotion.findMany({
+        where: {
+          shop: {
+            products: {
+              some: { productId: { in: candidateIds }, outOfStock: false },
+            },
+          },
+          isActive: true,
+          OR: [
+            { startDate: null },
+            { startDate: { lte: now } }
+          ],
+          AND: [
+            {
+              OR: [
+                { endDate: null },
+                { endDate: { gte: now } }
+              ]
+            }
+          ],
+          buyItems: {
+            some: {
+              productId: { in: candidateIds }
+            }
+          }
+        },
+        include: {
+          buyItems: {
+            include: {
+              product: {
+                select: { id: true, title: true, img: true, barcode: true }
+              }
+            }
+          },
+          getItems: {
+            include: {
+              product: {
+                select: { id: true, title: true, img: true, barcode: true }
+              }
+            }
+          }
+        }
+      }),
+      listId
+        ? prisma.listProduct.findMany({
+            where: {
+              listId,
+              productAtShop: { productId: { in: candidateIds } },
+            },
+            select: {
+              quantity: true,
+              productAtShop: { select: { productId: true } },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const productAtShops = allCandidateAtShops.filter(p => p.productId === productId);
 
     if (productAtShops.length === 0) {
-      return res.status(404).json({ 
+      return res.json({
+        productId,
+        offers: [],
+        hasOffers: false,
         error: 'Product not available in any shop',
-        hasOffers: false
       });
     }
 
-    // Helper function to get effective price
+    // Helper function to get effective price (uses the real schema field)
     const getEffectivePrice = (productAtShop) => {
       const now = new Date();
-      const hasActiveOffer = productAtShop.offerPrice !== null && 
-        productAtShop.offerStartDate !== null &&
-        productAtShop.offerEndDate !== null &&
-        new Date(productAtShop.offerStartDate) <= now && 
-        new Date(productAtShop.offerEndDate) >= now;
-      
+      const hasActiveOffer = productAtShop.offerPrice != null &&
+        productAtShop.offerExpiryDate != null &&
+        new Date(productAtShop.offerExpiryDate) >= now;
+
       return {
         price: parseFloat(hasActiveOffer ? productAtShop.offerPrice : productAtShop.price),
         originalPrice: parseFloat(productAtShop.price),
@@ -1010,79 +1102,51 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       };
     };
 
-    // Find the shop with the lowest effective price
+    // Cheapest shop overall — used for pricing and as a fallback target.
     const lowestPriceEntry = productAtShops.reduce((lowest, current) => {
       const currentEffective = getEffectivePrice(current);
       const lowestEffective = getEffectivePrice(lowest);
       return currentEffective.price < lowestEffective.price ? current : lowest;
     });
 
-    const productAtShopId = lowestPriceEntry.id;
-    const shopId = lowestPriceEntry.shopId;
-    const now = new Date();
-
-    // Find active bundle promotions for this product at this shop
-    const bundlePromotions = await prisma.bundlePromotion.findMany({
-      where: {
-        shopId,
-        isActive: true,
-        OR: [
-          { startDate: null },
-          { startDate: { lte: now } }
-        ],
-        AND: [
-          {
-            OR: [
-              { endDate: null },
-              { endDate: { gte: now } }
-            ]
-          }
-        ],
-        buyItems: {
-          some: {
-            productId
-          }
-        }
-      },
-      include: {
-        buyItems: {
-          include: {
-            product: {
-              select: { id: true, title: true, img: true, barcode: true }
-            }
-          }
-        },
-        getItems: {
-          include: {
-            product: {
-              select: { id: true, title: true, img: true, barcode: true }
-            }
-          }
-        }
-      }
-    });
-
-    const effectivePrice = getEffectivePrice(lowestPriceEntry);
-
-    // If product already in list, check current quantity
-    let currentQuantityInList = 0;
-    if (listId) {
-      const existingProduct = await prisma.listProduct.findFirst({
-        where: { 
-          listId, 
-          productAtShopId: {
-            in: productAtShops.map(p => p.id)
-          }
-        }
-      });
-      if (existingProduct) {
-        currentQuantityInList = existingProduct.quantity || 1;
+    // Claiming a bundle needs a productAtShop for the BUY item's product at the
+    // SAME shop as the promotion (free items are resolved at that shop). Pick
+    // the first promotion that is actually claimable and surface only offers
+    // for that shop + product so the quantity math stays coherent.
+    let selectedEntry = lowestPriceEntry;
+    const activeBundlePromotions = [];
+    for (const promo of bundlePromotions) {
+      const buyItem = promo.buyItems.find(bi => candidateIdSet.has(bi.productId));
+      const entry = buyItem
+        ? allCandidateAtShops.find(
+            p => p.shopId === promo.shopId && p.productId === buyItem.productId
+          )
+        : null;
+      if (!entry) continue;
+      if (activeBundlePromotions.length === 0) selectedEntry = entry;
+      if (entry.shopId === selectedEntry.shopId && entry.productId === selectedEntry.productId) {
+        activeBundlePromotions.push(promo);
       }
     }
 
+    const productAtShopId = selectedEntry.id;
+    const shopId = selectedEntry.shopId;
+    const effectivePrice = getEffectivePrice(selectedEntry);
+
+    // If product already in list, check current quantity (rows prefetched above).
+    let currentQuantityInList = 0;
+    const existingProduct = existingListProducts.find(
+      lp => lp.productAtShop.productId === selectedEntry.productId
+    );
+    if (existingProduct) {
+      currentQuantityInList = existingProduct.quantity || 1;
+    }
+
     // Format the response with offer details
-    const offers = bundlePromotions.map(promo => {
-      const buyItem = promo.buyItems.find(bi => bi.productId === productId);
+    const offers = activeBundlePromotions.map(promo => {
+      const buyItem =
+        promo.buyItems.find(bi => bi.productId === selectedEntry.productId) ??
+        promo.buyItems.find(bi => candidateIdSet.has(bi.productId));
       const totalBuyQuantity = buyItem?.quantity || 1;
       const additionalNeeded = Math.max(0, totalBuyQuantity - currentQuantityInList);
       
@@ -1109,14 +1173,16 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       };
     });
 
+    console.log(`📦 Bundle check result for ${productId}: ${offers.length} offer(s), candidates=${candidateIds.length}, promos matched=${bundlePromotions.length}`);
+
     res.json({ 
       productId,
       productAtShopId,
-      productName: lowestPriceEntry.product.title,
-      productImage: lowestPriceEntry.product.img,
-      productBarcode: lowestPriceEntry.product.barcode,
+      productName: selectedEntry.product.title,
+      productImage: selectedEntry.product.img,
+      productBarcode: selectedEntry.product.barcode,
       shopId,
-      shopName: lowestPriceEntry.shop.name,
+      shopName: selectedEntry.shop.name,
       price: effectivePrice.price,
       originalPrice: effectivePrice.originalPrice,
       offerPrice: effectivePrice.offerPrice,
@@ -1249,19 +1315,23 @@ router.post('/claim-bundle', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Build ownership check
-    let ownershipCheck;
+    // Build ownership check (owner or tracker, so shared lists work too)
+    const trackingSupported = !!prisma.trackedList?.findFirst;
+    let ownershipOr;
     if (userType === 'EMPLOYEE') {
-      ownershipCheck = { id: listId, employeeId: userId };
+      ownershipOr = [{ employeeId: userId }];
     } else if (userType === 'ADMIN') {
-      ownershipCheck = { id: listId, adminId: userId };
+      ownershipOr = [{ adminId: userId }];
     } else {
-      ownershipCheck = { id: listId, customerId: userId };
+      ownershipOr = [{ customerId: userId }];
+    }
+    if (trackingSupported) {
+      ownershipOr.push({ trackedBy: { some: { userId, userType } } });
     }
 
     // Verify list ownership
     const list = await prisma.list.findFirst({
-      where: ownershipCheck
+      where: { id: listId, OR: ownershipOr }
     });
 
     if (!list) {
@@ -1427,6 +1497,15 @@ router.post('/claim-bundle', authenticateToken, async (req, res) => {
     if (userType === 'CUSTOMER') {
       await cacheService.invalidateUserLists(userId);
       await cacheService.invalidateListDetail(listId);
+    }
+
+    // Keep the shared list in sync for everyone watching this shop
+    if (list.shopId && req.io) {
+      req.io.to(`shop_${list.shopId}_lists`).emit('list_product_added', {
+        listId,
+        action: 'bundle_claimed'
+      });
+      console.log(`📡 Emitted list_product_added (bundle) to shop_${list.shopId}_lists`);
     }
 
     res.json({

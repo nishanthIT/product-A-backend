@@ -7,6 +7,18 @@ const prisma = new PrismaClient();
 const LIST_CACHE_TTL = 300; // 5 minutes
 const LIST_DETAIL_CACHE_TTL = 180; // 3 minutes
 
+// Broadcast a shop-scoped list change so every tracker/owner stays in sync.
+// No-op when the list is not bound to a shop or Socket.IO is unavailable.
+const emitListSync = (req, shopId, event, payload) => {
+  if (!shopId || !req?.io) return;
+  try {
+    req.io.to(`shop_${shopId}_lists`).emit(event, payload);
+    console.log(`📡 Emitted ${event} to shop_${shopId}_lists`);
+  } catch (err) {
+    console.error(`Socket emit failed (${event}):`, err?.message);
+  }
+};
+
 // Helper function to get effective price (considering active offers)
 const getEffectivePrice = (productAtShop) => {
   const currentDate = new Date();
@@ -139,7 +151,10 @@ const makeList = async (req, res) => {
     if (userType === 'CUSTOMER') {
       await cacheService.invalidateUserLists(userId);
     }
-    
+
+    // Sync new list to everyone watching this shop (employees + owner)
+    emitListSync(req, list.shopId, 'list_created', { listId: list.id });
+
     res.status(201).json(formattedList);
   } catch (error) {
     console.error("Error creating list:", error);
@@ -264,6 +279,11 @@ const addProductToList = async (req, res) => {
         console.error("Cache invalidation error (non-fatal):", cacheError);
       }
 
+      emitListSync(req, list.shopId, 'list_product_updated', {
+        listId,
+        action: 'quantity_increased',
+      });
+
       return res.status(200).json({
         success: true,
         message: "Product quantity increased",
@@ -304,6 +324,8 @@ const addProductToList = async (req, res) => {
     } catch (cacheError) {
       console.error("Cache invalidation error (non-fatal):", cacheError);
     }
+
+    emitListSync(req, list.shopId, 'list_product_added', { listId });
 
     res.status(200).json({
       success: true,
@@ -485,6 +507,8 @@ const removeProductFromList = async (req, res) => {
     if (userType === 'CUSTOMER') {
       await cacheService.invalidateAllUserListCache(userId, listId);
     }
+
+    emitListSync(req, list.shopId, 'list_product_removed', { listId, productId });
 
     return res.status(200).json({
       success: true,
@@ -815,12 +839,96 @@ const deleteList = async (req, res) => {
       await cacheService.invalidateAllUserListCache(userId, listId);
     }
 
+    emitListSync(req, list.shopId, 'list_deleted', { listId });
+
     res.status(200).json({ 
       success: true,
       message: "List deleted successfully" 
     });
   } catch (error) {
     console.error("Error deleting list:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Rename a list (owner or tracker) and broadcast to the shop so the
+// shared list behaves like a collaborative document.
+const renameList = async (req, res) => {
+  const userId = req.user?.id;
+  const userType = req.user?.userType;
+  const { listId } = req.params;
+  const { name } = req.body;
+
+  if (!name || !name.trim()) {
+    return res.status(400).json({ error: "List name is required" });
+  }
+
+  try {
+    const list = await prisma.list.findUnique({ where: { id: listId } });
+    if (!list) {
+      return res.status(404).json({ error: "List not found" });
+    }
+
+    const isOwner = userType === 'EMPLOYEE'
+      ? list.employeeId === userId
+      : userType === 'ADMIN'
+      ? list.adminId === userId
+      : list.customerId === userId;
+
+    let isTracking = false;
+    if (!isOwner && prisma.trackedList?.findFirst) {
+      const tracked = await prisma.trackedList.findFirst({
+        where: { listId, userId, userType },
+      });
+      isTracking = !!tracked;
+    }
+
+    if (!isOwner && !isTracking) {
+      return res.status(403).json({ error: "You don't have permission to modify this list" });
+    }
+
+    const updated = await prisma.list.update({
+      where: { id: listId },
+      data: { name: name.trim() },
+    });
+
+    await cacheService.invalidateListDetail(listId);
+    if (list.customerId) {
+      await cacheService.invalidateUserLists(list.customerId).catch(() => {});
+    }
+
+    emitListSync(req, updated.shopId, 'list_updated', { listId, name: updated.name });
+
+    res.status(200).json({ success: true, id: updated.id, name: updated.name });
+  } catch (error) {
+    console.error("Error renaming list:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Stop tracking (remove from "my lists") a shared list without deleting it
+// for its owner or other trackers.
+const untrackList = async (req, res) => {
+  const userId = req.user?.id;
+  const userType = req.user?.userType;
+  const { listId } = req.params;
+
+  try {
+    if (!prisma.trackedList?.deleteMany) {
+      return res.status(500).json({ error: "Tracking model is not available" });
+    }
+
+    const result = await prisma.trackedList.deleteMany({
+      where: { listId, userId, userType },
+    });
+
+    if (userType === 'CUSTOMER') {
+      await cacheService.invalidateUserLists(userId).catch(() => {});
+    }
+
+    res.status(200).json({ success: true, removed: result.count });
+  } catch (error) {
+    console.error("Error untracking list:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -833,4 +941,6 @@ export {
   getUserLists,
   getListById,
   deleteList,
+  renameList,
+  untrackList,
 };

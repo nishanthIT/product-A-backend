@@ -49,6 +49,8 @@ import {
   getUserLists,
   getListById,
   deleteList,
+  renameList,
+  untrackList,
 } from "../controller/makeList.js";
 import { login, register, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword } from "../controller/auth.js";
 import { emp_dash_handler, getEmployeeListItemUpdates } from "../controller/dashbord/employ.js";
@@ -65,6 +67,12 @@ import {
   checkProductBundleOffers,
   checkCartBundleOffers
 } from "../controller/bundlePromotion.js";
+import { getPackOptions } from "../controller/packComparison.js";
+import {
+  getShopProductPriceTiers,
+  setShopProductPriceTiers,
+  getProductPriceTiers,
+} from "../controller/priceTiers.js";
 
 const router = express.Router();
 
@@ -134,6 +142,8 @@ router.get("/products/search",isAuthenticated, searchProducts); // Search produc
 router.post("/products/quick-add", isAuthenticated, quickAddProductFromScan);
 router.get("/products/pending-submissions", isAuthenticated, isEmployee, getPendingSubmittedProducts);
 router.put("/products/pending-submissions/:id/approve", isAuthenticated, isAdmin, approveSubmittedProduct);
+router.get("/products/:id/pack-options", isAuthenticated, getPackOptions); // Pack size comparison (smart purchase recommendation)
+router.get("/products/:id/price-tiers", isAuthenticated, getProductPriceTiers); // Quantity-based price tiers (lowest-priced shop)
 router.get("/products/:id",isAuthenticated, getProductById); // Allow customers to view products
 
 
@@ -209,6 +219,10 @@ router.post('/shop/transfer-products', isAuthenticated, isEmployee, transferProd
 
 // Update product price at a shop
 router.put('/shop/:shopId/updateProductPrice',isAuthenticated,isEmployee, updateProductPriceAtShop);
+
+// Quantity-based price tiers for a product at a shop (admin/employee)
+router.get('/shop/:shopId/product/:productId/price-tiers', isAuthenticated, isEmployee, getShopProductPriceTiers);
+router.put('/shop/:shopId/product/:productId/price-tiers', isAuthenticated, isEmployee, setShopProductPriceTiers);
 
 // Search for products not in a shop (for employees)
 router.get('/shop/:shopId/searchProducts',isAuthenticated,isEmployee, searchProductsNotInShop);
@@ -480,6 +494,8 @@ router.post("/lists/addProduct", isAuthenticated, requireActiveSubscription, add
 router.delete("/lists/removeProduct", isAuthenticated, requireActiveSubscription, removeProductFromList); // Remove product from list (requires active subscription)
 router.get("/lists/:listId/lowest-prices", isAuthenticated, requireActiveSubscription, getLowestPricesInList); // Get lowest prices (premium feature)
 // router.get("/lists/:listId", isAuthenticated, softSubscriptionCheck, getListById); // DISABLED - conflicts with listRoutes.js
+router.put("/lists/:listId/rename", isAuthenticated, renameList); // Rename list (owner or tracker) — syncs to shop
+router.delete("/lists/:listId/untrack", isAuthenticated, untrackList); // Stop tracking a shared list (remove from my lists)
 router.delete("/lists/:listId", isAuthenticated, requireActiveSubscription, deleteList); // Delete list (requires active subscription)
 
 /* <!-- Bundle Promotion Routes --> */

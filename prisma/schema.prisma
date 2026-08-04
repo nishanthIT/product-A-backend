@@ -148,9 +148,22 @@ model ProductAtShop {
   shop             Shop               @relation(fields: [shopId], references: [id], onDelete: Cascade)
   customer         Customer?          @relation(fields: [userId], references: [id])
   ProductPromotion ProductPromotion[]
+  priceTiers       PriceTier[]
 
   @@unique([shopId, productId])
   @@index([employeeId, updatedAt])
+}
+
+model PriceTier {
+  id              String        @id @default(cuid())
+  productAtShopId String
+  quantity        Int
+  price           Decimal
+  createdAt       DateTime      @default(now())
+  productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
+
+  @@unique([productAtShopId, quantity])
+  @@index([productAtShopId])
 }
 
 model Empolyee {
