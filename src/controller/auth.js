@@ -1,13 +1,92 @@
-
+﻿
 
 
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import nodemailer from 'nodemailer';
 import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
+import redisService from '../services/redisService.js';
+import { sendRegistrationOtpEmail, sendPasswordResetOtpEmail } from '../services/mailService.js';
 
 const prisma = new PrismaClient();
+
+// â”€â”€â”€ OTP helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 6-digit codes, stored hashed in Redis (memory fallback) with a 10 min TTL,
+// max 5 verify attempts and a 60s resend cooldown.
+const OTP_TTL_SECONDS = 10 * 60;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_COOLDOWN = 60;
+
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
+const hashOtp = (email, code) =>
+  crypto
+    .createHmac('sha256', process.env.JWT_SECRET || 'your-secret-key')
+    .update(`${email}:${code}`)
+    .digest('hex');
+
+const otpKey = (kind, email) => `otp:${kind}:${email}`;
+const otpCooldownKey = (kind, email) => `otp_cd:${kind}:${email}`;
+
+/** Returns remaining cooldown seconds, or 0 if a new code may be sent. */
+async function getOtpCooldown(kind, email) {
+  const raw = await redisService.get(otpCooldownKey(kind, email));
+  if (!raw) return 0;
+  const remaining = Math.ceil((Number(raw) - Date.now()) / 1000);
+  return remaining > 0 ? remaining : 0;
+}
+
+/** Generates, stores and returns a fresh OTP code for `email`. */
+async function issueOtp(kind, email) {
+  const code = crypto.randomInt(100000, 1000000).toString();
+  await redisService.set(
+    otpKey(kind, email),
+    { hash: hashOtp(email, code), attempts: 0, expiresAt: Date.now() + OTP_TTL_SECONDS * 1000 },
+    OTP_TTL_SECONDS
+  );
+  await redisService.set(
+    otpCooldownKey(kind, email),
+    String(Date.now() + OTP_RESEND_COOLDOWN * 1000),
+    OTP_RESEND_COOLDOWN
+  );
+  return code;
+}
+
+/** Verifies an OTP. On success the code is consumed. Returns { ok, error }. */
+async function verifyOtp(kind, email, code) {
+  const record = await redisService.get(otpKey(kind, email), true);
+  if (!record || !record.hash || Date.now() > Number(record.expiresAt)) {
+    return { ok: false, error: 'This code has expired. Please request a new one.' };
+  }
+  if (record.attempts >= OTP_MAX_ATTEMPTS) {
+    await redisService.del(otpKey(kind, email));
+    return { ok: false, error: 'Too many incorrect attempts. Please request a new code.' };
+  }
+
+  const expected = Buffer.from(record.hash, 'hex');
+  const provided = Buffer.from(hashOtp(email, String(code).trim()), 'hex');
+  const matches = expected.length === provided.length && crypto.timingSafeEqual(expected, provided);
+
+  if (!matches) {
+    const remainingTtl = Math.max(1, Math.ceil((Number(record.expiresAt) - Date.now()) / 1000));
+    await redisService.set(
+      otpKey(kind, email),
+      { ...record, attempts: (record.attempts || 0) + 1 },
+      remainingTtl
+    );
+    const attemptsLeft = OTP_MAX_ATTEMPTS - (record.attempts || 0) - 1;
+    return {
+      ok: false,
+      error:
+        attemptsLeft > 0
+          ? `Incorrect code. ${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining.`
+          : 'Too many incorrect attempts. Please request a new code.',
+    };
+  }
+
+  await redisService.del(otpKey(kind, email));
+  return { ok: true };
+}
 
 const login = async (req, res) => {
   try {
@@ -87,9 +166,62 @@ const login = async (req, res) => {
   }
 };
 
+// Step 1 of registration: validate details and email a verification code.
+// No account is created until the code is verified in /auth/register.
+const sendRegistrationOtp = async (req, res) => {
+  try {
+    const { name, password } = req.body;
+    const email = normalizeEmail(req.body.email);
+    console.log('Registration OTP requested for:', email);
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email and password are required' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    // Check if user already exists in any table
+    const [existingAdmin, existingEmployee, existingCustomer] = await Promise.all([
+      prisma.admin.findFirst({ where: { email } }),
+      prisma.empolyee.findFirst({ where: { email } }),
+      prisma.customer.findFirst({ where: { email } }),
+    ]);
+    if (existingAdmin || existingEmployee || existingCustomer) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+
+    const cooldown = await getOtpCooldown('register', email);
+    if (cooldown > 0) {
+      return res.status(429).json({
+        error: `Please wait ${cooldown}s before requesting another code.`,
+        retryAfter: cooldown,
+      });
+    }
+
+    const code = await issueOtp('register', email);
+    await sendRegistrationOtpEmail(email, code);
+    console.log('Registration OTP sent to:', email);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Verification code sent to your email.',
+      resendIn: OTP_RESEND_COOLDOWN,
+      expiresIn: OTP_TTL_SECONDS,
+    });
+  } catch (error) {
+    console.error('Send registration OTP error:', error);
+    return res.status(500).json({ error: 'Failed to send verification code. Please try again.' });
+  }
+};
+
 const register = async (req, res) => {
   try {
-    const { name, email, password, shopName, shopAddress, shopMobile } = req.body;
+    const { name, password, otp, shopName, shopAddress, shopMobile } = req.body;
+    const email = normalizeEmail(req.body.email);
     console.log("Registration attempt:", email);
     
     if (!name || !email || !password) {
@@ -98,6 +230,16 @@ const register = async (req, res) => {
     
     if (password.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    if (!otp) {
+      return res.status(400).json({ error: 'Verification code is required' });
+    }
+
+    // Verify the emailed code â€” accounts are only created after verification.
+    const verification = await verifyOtp('register', email, otp);
+    if (!verification.ok) {
+      return res.status(400).json({ error: verification.error });
     }
     
     // Check if user already exists in any table
@@ -128,7 +270,7 @@ const register = async (req, res) => {
     const customer = await prisma.customer.create({
       data: {
         name: name.trim(),
-        email: email.trim().toLowerCase(),
+        email,
         password: hashedPassword,
         mobile: `temp_${Date.now()}`, // Temporary unique mobile number
         subscriptionStatus: 'free_trial', // Set as free trial (lowercase to match schema default)
@@ -389,337 +531,101 @@ const extendTrialWithPoints = async (req, res) => {
   }
 };
 
-// Email transporter configuration
-const transporter = nodemailer.createTransport({
-  service: 'gmail', // You can use other services like 'outlook', 'yahoo', etc.
-  auth: {
-    user: process.env.EMAIL_USER || 'your-email@gmail.com', // Add to .env file
-    pass: process.env.EMAIL_PASS || 'your-app-password'     // Add to .env file
-  }
-});
+// â”€â”€â”€ Password reset (OTP) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+/** Finds a user by email across all three tables. Returns { user, userTable } or null. */
+async function findUserByEmail(email) {
+  let user = await prisma.admin.findFirst({ where: { email } });
+  if (user) return { user, userTable: 'admin' };
+  user = await prisma.empolyee.findFirst({ where: { email } });
+  if (user) return { user, userTable: 'empolyee' };
+  user = await prisma.customer.findFirst({ where: { email } });
+  if (user) return { user, userTable: 'customer' };
+  return null;
+}
+
+// Step 1: email a 6-digit reset code. Response is identical whether or not
+// the account exists, to avoid leaking which emails are registered.
 const forgotPassword = async (req, res) => {
   try {
-    const { email } = req.body;
-    
+    const email = normalizeEmail(req.body.email);
+
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
 
-    // Find user in all tables
-    let user = null;
-    let userType = null;
-    let userTable = null;
-    
-    user = await prisma.admin.findFirst({ where: { email } });
-    if (user) {
-      userType = 'ADMIN';
-      userTable = 'admin';
-    }
-    
-    if (!user) {
-      user = await prisma.empolyee.findFirst({ where: { email } });
-      if (user) {
-        userType = 'EMPLOYEE';
-        userTable = 'empolyee';
-      }
-    }
-    
-    if (!user) {
-      user = await prisma.customer.findFirst({ where: { email } });
-      if (user) {
-        userType = 'CUSTOMER';
-        userTable = 'customer';
-      }
-    }
-
-    if (!user) {
-      // Don't reveal that user doesn't exist for security
-      return res.status(200).json({ 
-        success: true, 
-        message: 'If this email exists, a password reset link has been sent.' 
-      });
-    }
-
-    // Generate reset token
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour from now
-
-    // Save reset token to user record
-    const updateData = {
-      resetToken,
-      resetTokenExpiry
-    };
-
-    if (userTable === 'admin') {
-      await prisma.admin.update({
-        where: { id: user.id },
-        data: updateData
-      });
-    } else if (userTable === 'empolyee') {
-      await prisma.empolyee.update({
-        where: { id: user.id },
-        data: updateData
-      });
-    } else if (userTable === 'customer') {
-      await prisma.customer.update({
-        where: { id: user.id },
-        data: updateData
-      });
-    }
-
-    // Create reset URL - you can change this to your frontend URL
-    const resetURL = `http://192.168.1.13:3000/api/auth/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
-    
-    // Email content
-    const mailOptions = {
-      from: process.env.EMAIL_USER || 'noreply@yourapp.com',
-      to: email,
-      subject: 'Password Reset Request',
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; }
-            .content { padding: 20px; background-color: #f9f9f9; }
-            .button { display: inline-block; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 5px; }
-            .footer { margin-top: 20px; font-size: 12px; color: #666; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>Password Reset Request</h1>
-            </div>
-            <div class="content">
-              <p>Hi ${user.name},</p>
-              <p>You requested to reset your password. Click the button below to reset it:</p>
-              <p style="text-align: center;">
-                <a href="${resetURL}" class="button">Reset Password</a>
-              </p>
-              <p>Or copy and paste this link into your browser:</p>
-              <p style="word-break: break-all;">${resetURL}</p>
-              <p><strong>This link will expire in 1 hour.</strong></p>
-              <p>If you didn't request this password reset, please ignore this email.</p>
-            </div>
-            <div class="footer">
-              <p>This is an automated email. Please do not reply.</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
-    };
-
-    // Send email
-    await transporter.sendMail(mailOptions);
-    
-    console.log('Password reset email sent to:', email);
-    
-    res.status(200).json({
+    const genericResponse = {
       success: true,
-      message: 'Password reset link has been sent to your email.'
-    });
-    
+      message: 'If this email is registered, a reset code has been sent.',
+      resendIn: OTP_RESEND_COOLDOWN,
+      expiresIn: OTP_TTL_SECONDS,
+    };
+
+    const cooldown = await getOtpCooldown('reset', email);
+    if (cooldown > 0) {
+      return res.status(429).json({
+        error: `Please wait ${cooldown}s before requesting another code.`,
+        retryAfter: cooldown,
+      });
+    }
+
+    const found = await findUserByEmail(email);
+    if (!found) {
+      // Don't reveal that the user doesn't exist.
+      return res.status(200).json(genericResponse);
+    }
+
+    const code = await issueOtp('reset', email);
+    await sendPasswordResetOtpEmail(email, code);
+    console.log('Password reset code sent to:', email);
+
+    return res.status(200).json(genericResponse);
   } catch (error) {
     console.error('Forgot password error:', error);
-    res.status(500).json({ error: 'Failed to send password reset email' });
+    return res.status(500).json({ error: 'Failed to send reset code. Please try again.' });
   }
 };
 
+// Step 2: verify the code and set the new password.
 const resetPassword = async (req, res) => {
   try {
-    const { token, email, newPassword } = req.query.token ? req.query : req.body;
-    
-    if (!token || !email) {
-      return res.status(400).json({ error: 'Reset token and email are required' });
-    }
+    const { otp, newPassword } = req.body;
+    const email = normalizeEmail(req.body.email);
 
-    // If this is a GET request, show the reset password form
-    if (req.method === 'GET') {
-      const resetForm = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>Reset Password</title>
-          <style>
-            body { font-family: Arial, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; }
-            .form-group { margin-bottom: 15px; }
-            label { display: block; margin-bottom: 5px; font-weight: bold; }
-            input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-            button { background-color: #4CAF50; color: white; padding: 12px 20px; border: none; border-radius: 4px; cursor: pointer; width: 100%; }
-            button:hover { background-color: #45a049; }
-            .container { background-color: #f9f9f9; padding: 30px; border-radius: 8px; }
-            h2 { text-align: center; color: #333; }
-            .error { color: red; margin-top: 10px; }
-            .success { color: green; margin-top: 10px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <h2>Reset Your Password</h2>
-            <form id="resetForm">
-              <input type="hidden" name="token" value="${token}">
-              <input type="hidden" name="email" value="${email}">
-              
-              <div class="form-group">
-                <label for="newPassword">New Password:</label>
-                <input type="password" id="newPassword" name="newPassword" required minlength="6">
-              </div>
-              
-              <div class="form-group">
-                <label for="confirmPassword">Confirm Password:</label>
-                <input type="password" id="confirmPassword" name="confirmPassword" required minlength="6">
-              </div>
-              
-              <button type="submit">Reset Password</button>
-              <div id="message"></div>
-            </form>
-          </div>
-          
-          <script>
-            document.getElementById('resetForm').addEventListener('submit', async (e) => {
-              e.preventDefault();
-              
-              const formData = new FormData(e.target);
-              const newPassword = formData.get('newPassword');
-              const confirmPassword = formData.get('confirmPassword');
-              const messageDiv = document.getElementById('message');
-              
-              if (newPassword !== confirmPassword) {
-                messageDiv.innerHTML = '<p class="error">Passwords do not match!</p>';
-                return;
-              }
-              
-              if (newPassword.length < 6) {
-                messageDiv.innerHTML = '<p class="error">Password must be at least 6 characters long!</p>';
-                return;
-              }
-              
-              try {
-                const response = await fetch('/api/auth/reset-password', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json'
-                  },
-                  body: JSON.stringify({
-                    token: formData.get('token'),
-                    email: formData.get('email'),
-                    newPassword: newPassword
-                  })
-                });
-                
-                const result = await response.json();
-                
-                if (response.ok) {
-                  messageDiv.innerHTML = '<p class="success">' + result.message + '</p>';
-                  setTimeout(() => {
-                    window.close();
-                  }, 3000);
-                } else {
-                  messageDiv.innerHTML = '<p class="error">' + result.error + '</p>';
-                }
-              } catch (error) {
-                messageDiv.innerHTML = '<p class="error">An error occurred. Please try again.</p>';
-              }
-            });
-          </script>
-        </body>
-        </html>
-      `;
-      
-      return res.send(resetForm);
-    }
-
-    // Handle POST request - actually reset the password
-    if (!newPassword) {
-      return res.status(400).json({ error: 'New password is required' });
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ error: 'Email, code and new password are required' });
     }
 
     if (newPassword.length < 6) {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
-    // Find user with valid reset token
-    let user = null;
-    let userTable = null;
-    
-    user = await prisma.admin.findFirst({ 
-      where: { 
-        email,
-        resetToken: token,
-        resetTokenExpiry: { gte: new Date() }
-      } 
-    });
-    if (user) userTable = 'admin';
-    
-    if (!user) {
-      user = await prisma.empolyee.findFirst({ 
-        where: { 
-          email,
-          resetToken: token,
-          resetTokenExpiry: { gte: new Date() }
-        } 
-      });
-      if (user) userTable = 'empolyee';
-    }
-    
-    if (!user) {
-      user = await prisma.customer.findFirst({ 
-        where: { 
-          email,
-          resetToken: token,
-          resetTokenExpiry: { gte: new Date() }
-        } 
-      });
-      if (user) userTable = 'customer';
+    const verification = await verifyOtp('reset', email, otp);
+    if (!verification.ok) {
+      return res.status(400).json({ error: verification.error });
     }
 
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    const found = await findUserByEmail(email);
+    if (!found) {
+      return res.status(400).json({ error: 'Account not found' });
     }
 
-    // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 12);
-    
-    // Update password and clear reset token
-    const updateData = {
-      password: hashedPassword,
-      resetToken: null,
-      resetTokenExpiry: null
-    };
-
-    if (userTable === 'admin') {
-      await prisma.admin.update({
-        where: { id: user.id },
-        data: updateData
-      });
-    } else if (userTable === 'empolyee') {
-      await prisma.empolyee.update({
-        where: { id: user.id },
-        data: updateData
-      });
-    } else if (userTable === 'customer') {
-      await prisma.customer.update({
-        where: { id: user.id },
-        data: updateData
-      });
-    }
+    await prisma[found.userTable].update({
+      where: { id: found.user.id },
+      data: { password: hashedPassword },
+    });
 
     console.log('Password reset successful for:', email);
-    
-    res.status(200).json({
+
+    return res.status(200).json({
       success: true,
-      message: 'Password has been reset successfully. You can now login with your new password.'
+      message: 'Password has been reset successfully. You can now sign in with your new password.',
     });
-    
   } catch (error) {
     console.error('Reset password error:', error);
-    res.status(500).json({ error: 'Failed to reset password' });
+    return res.status(500).json({ error: 'Failed to reset password' });
   }
 };
 
-export { login, register, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword };
+export { login, register, sendRegistrationOtp, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword };

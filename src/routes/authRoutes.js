@@ -52,7 +52,7 @@ import {
   renameList,
   untrackList,
 } from "../controller/makeList.js";
-import { login, register, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword } from "../controller/auth.js";
+import { login, register, sendRegistrationOtp, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword } from "../controller/auth.js";
 import { emp_dash_handler, getEmployeeListItemUpdates } from "../controller/dashbord/employ.js";
 import { getDashboardOverview } from "../controller/dashbord/admin.js";
 import { isAdmin, isAuthenticated, isEmployee } from "../middleware/authware.js";
@@ -116,12 +116,12 @@ const productUpload = multer({
 
 
 router.post("/auth/login", login);
+router.post("/auth/register/send-otp", sendRegistrationOtp);
 router.post("/auth/register", register);
 router.get("/auth/me", verify); // Make sure this route exists and is correctly defined
 router.post("/auth/logout", logout);
 router.post("/auth/extend-trial", isAuthenticated, extendTrialWithPoints);
 router.post("/auth/forgot-password", forgotPassword);
-router.get("/auth/reset-password", resetPassword);
 router.post("/auth/reset-password", resetPassword);
 
 router.get("/image/:barcode",image)

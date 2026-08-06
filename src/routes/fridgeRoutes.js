@@ -552,6 +552,42 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
     const temp = parseFloat(temperature);
     const { minSafe, maxSafe } = getRangeForCompartment(fridge, parsedCompartment);
     const isAlert = temp < minSafe || temp > maxSafe;
+    const alertMessage = isAlert
+      ? temp < minSafe
+        ? `⚠️ ${fridge.name}: temperature too low (below ${minSafe}°C)`
+        : `⚠️ ${fridge.name}: temperature too high (above ${maxSafe}°C)`
+      : null;
+
+    // Out-of-range readings notify everyone at the shop in real time.
+    if (isAlert && req.io) {
+      try {
+        const [owner, employees] = await Promise.all([
+          prisma.customer.findFirst({ where: { shopId }, select: { id: true } }),
+          prisma.empolyee.findMany({ where: { shopId }, select: { id: true } }),
+        ]);
+        const payload = {
+          type: 'temperature_alert',
+          title: 'Temperature Alert',
+          message: `${fridge.name}: ${temp.toFixed(1)}°C is outside the safe range (${minSafe}° to ${maxSafe}°C)`,
+          fridgeId: fridge.id,
+          fridgeName: fridge.name,
+          temperature: temp,
+          minSafe,
+          maxSafe,
+          compartment: parsedCompartment,
+          entryType,
+          createdAt: new Date().toISOString(),
+        };
+        const recipientIds = new Set();
+        if (owner) recipientIds.add(owner.id);
+        for (const employee of employees) recipientIds.add(employee.id);
+        for (const recipientId of recipientIds) {
+          req.io.to(`user_${recipientId}`).emit('temperature_alert', payload);
+        }
+      } catch (notificationError) {
+        console.error('Temperature alert dispatch failed:', notificationError);
+      }
+    }
 
     res.status(201).json({ 
       success: true, 
@@ -560,11 +596,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
         ...log,
         compartment: parsedCompartment,
         isAlert,
-        alertMessage: isAlert 
-          ? temp < minSafe 
-            ? `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Chiller'} temperature too low (below ${minSafe}°C)` 
-            : `⚠️ ${parsedCompartment === 'FREEZER' ? 'Freezer' : 'Chiller'} temperature too high (above ${maxSafe}°C)`
-          : null
+        alertMessage
       }
     });
   } catch (error) {

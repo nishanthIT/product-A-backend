@@ -23,6 +23,7 @@ import supplierPayoutRoutes from "./src/routes/supplierPayoutRoutes.js";
 import shiftSheetRoutes from "./src/routes/shiftSheetRoutes.js";
 import cors from 'cors';
 import wasteRoutes from './src/routes/wasteRoutes.js';
+import compareRoutes from './src/routes/compareRoutes.js';
 import cookieParser from 'cookie-parser';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -133,6 +134,7 @@ app.use('/api/waste', wasteRoutes);
 app.use('/api/age-restricted-records', ageRestrictedRecordRoutes);
 app.use('/api/supplier-payouts', supplierPayoutRoutes);
 app.use('/api/shift-sheet', shiftSheetRoutes);
+app.use('/api/products', compareRoutes);
 
 // Global error handler
 app.use((err, req, res, next) => {
