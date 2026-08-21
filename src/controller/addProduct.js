@@ -602,7 +602,7 @@ const getProductByBarcode = async (req, res) => {
 
 const quickAddProductFromScan = async (req, res) => {
   try {
-    const { barcode, title, retailSize } = req.body;
+    const { barcode, title, retailSize, category, inHandStock } = req.body;
 
     if (!barcode || !title || !retailSize) {
       return res.status(400).json({
@@ -613,6 +613,12 @@ const quickAddProductFromScan = async (req, res) => {
     const cleanBarcode = String(barcode).trim();
     const cleanTitle = String(title).trim();
     const cleanRetailSize = String(retailSize).trim();
+    const cleanCategory = category ? String(category).trim() : '';
+    const parsedStock = Number(inHandStock);
+    const cleanInHandStock =
+      inHandStock !== undefined && inHandStock !== null && Number.isInteger(parsedStock) && parsedStock >= 0
+        ? parsedStock
+        : null;
 
     if (!cleanBarcode || !cleanTitle || !cleanRetailSize) {
       return res.status(400).json({
@@ -645,7 +651,10 @@ const quickAddProductFromScan = async (req, res) => {
         retailSize: cleanRetailSize,
         caseSize: '1',
         packetSize: '1',
-        category: USER_SUBMITTED_PENDING_CATEGORY,
+        // A user-picked category is stored right away; admins can still edit it later.
+        category: cleanCategory && cleanCategory !== USER_SUBMITTED_PENDING_CATEGORY
+          ? cleanCategory
+          : USER_SUBMITTED_PENDING_CATEGORY,
       },
     });
 
@@ -656,12 +665,13 @@ const quickAddProductFromScan = async (req, res) => {
           productId: createdProduct.id,
         },
       },
-      update: {},
+      update: cleanInHandStock != null ? { inHandStock: cleanInHandStock } : {},
       create: {
         shopId: unknownShop.id,
         productId: createdProduct.id,
         price: 0,
         outOfStock: false,
+        inHandStock: cleanInHandStock,
       },
       include: {
         shop: true,
@@ -873,6 +883,8 @@ const searchProducts = async (req, res) => {
 
     const searchTerm = q.trim();
     const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
+    // Space-insensitive variant so "Coca Cola" also matches "CocaCola".
+    const compactTerm = searchTerm.replace(/\s+/g, '');
 
     // Build search conditions for each word
     const searchConditions = searchWords.map(word => {
@@ -892,10 +904,18 @@ const searchProducts = async (req, res) => {
       return { OR: conditions };
     });
 
+    const matchClauses = [{ AND: searchConditions }];
+    if (searchWords.length > 1 && compactTerm.length >= 2) {
+      matchClauses.push(
+        { title: { contains: compactTerm, mode: 'insensitive' } },
+        { barcode: { contains: compactTerm, mode: 'insensitive' } },
+      );
+    }
+
     // Search products by title and barcode (case-insensitive)
     let products = await prisma.product.findMany({
       where: {
-        AND: searchConditions
+        OR: matchClauses
       },
       include: {
         shops: {
@@ -926,9 +946,12 @@ const searchProducts = async (req, res) => {
         },
       });
       
-      // Apply fuzzy matching
+      // Apply fuzzy matching (space-insensitive so "CocaCola" matches "Coca Cola")
+      const compactQuery = compactTerm.toLowerCase();
       const fuzzyMatched = broadProducts.filter(product => {
         const searchableText = `${product.title || ''} ${product.barcode || ''}`;
+        const compactText = searchableText.replace(/\s+/g, '').toLowerCase();
+        if (compactQuery.length >= 2 && compactText.includes(compactQuery)) return true;
         return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
       });
       

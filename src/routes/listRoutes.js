@@ -69,6 +69,8 @@ router.get('/', authenticateToken, async (req, res) => {
         },
         include: {
           products: {
+            // cuid ids are time-ordered, so id desc = newest first
+            orderBy: { id: 'desc' },
             include: {
               productAtShop: {
                 include: {
@@ -90,6 +92,7 @@ router.get('/', authenticateToken, async (req, res) => {
         },
         include: {
           products: {
+            orderBy: { id: 'desc' },
             include: {
               productAtShop: {
                 include: {
@@ -110,6 +113,7 @@ router.get('/', authenticateToken, async (req, res) => {
         },
         include: {
           products: {
+            orderBy: { id: 'desc' },
             include: {
               productAtShop: {
                 include: {
@@ -177,7 +181,7 @@ router.get('/shop/all', authenticateToken, async (req, res) => {
       include: {
         products: {
           orderBy: {
-            id: 'asc',
+            id: 'desc',
           },
           include: {
             productAtShop: {
@@ -270,6 +274,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
       where: whereClause,
       include: {
         products: {
+          // cuid ids are time-ordered, so id desc = newest first
+          orderBy: { id: 'desc' },
           include: {
             productAtShop: {
               include: {
@@ -317,6 +323,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
       img: lp.productAtShop?.product?.img || null,
       quantity: lp.quantity || 1,
       isPurchased: lp.isPurchased || false,
+      isUrgent: lp.isUrgent || false,
+      inHandStock: lp.productAtShop?.inHandStock ?? null,
       // Bundle offer fields
       isFreeItem: lp.isFreeItem || false,
       freeQuantity: lp.freeQuantity || 0,
@@ -793,6 +801,193 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error toggling purchased status:', error);
     res.status(500).json({ error: 'Failed to toggle purchased status' });
+  }
+});
+
+// Toggle the urgent flag on a list item (same ownership policy as togglePurchased)
+router.put('/toggleUrgent', authenticateToken, async (req, res) => {
+  try {
+    const { listId, listProductId } = req.body;
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
+
+    if (!listId || !listProductId) {
+      return res.status(400).json({ error: 'listId and listProductId are required' });
+    }
+
+    const trackingSupported = !!prisma.trackedList?.findFirst;
+    let whereClause = { id: listId };
+
+    if (userType === 'ADMIN') {
+      const admin = await prisma.admin.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      whereClause = {
+        id: listId,
+        OR: [
+          { adminId: userId },
+          { employee: { shopId: admin?.shopId } }
+        ]
+      };
+    } else if (userType === 'EMPLOYEE') {
+      whereClause = trackingSupported
+        ? { id: listId, OR: [{ employeeId: userId }, { trackedBy: { some: { userId, userType } } }] }
+        : { id: listId, employeeId: userId };
+    } else {
+      whereClause = trackingSupported
+        ? { id: listId, OR: [{ customerId: userId }, { trackedBy: { some: { userId, userType } } }] }
+        : { id: listId, customerId: userId };
+    }
+
+    const list = await withRetry(() => prisma.list.findFirst({ where: whereClause }));
+    if (!list) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    const listProduct = await withRetry(() => prisma.listProduct.findFirst({
+      where: { id: listProductId, listId },
+    }));
+    if (!listProduct) {
+      return res.status(404).json({ error: 'Product not found in list' });
+    }
+
+    const updatedProduct = await withRetry(() => prisma.listProduct.update({
+      where: { id: listProduct.id },
+      data: { isUrgent: !listProduct.isUrgent },
+      include: { productAtShop: { include: { product: true, shop: true } } },
+    }));
+
+    await cacheService.invalidateListDetail(listId);
+
+    if (list.shopId && req.io) {
+      req.io.to(`shop_${list.shopId}_lists`).emit('list_product_updated', {
+        listId,
+        product: updatedProduct,
+        action: 'urgent_toggled',
+        isUrgent: updatedProduct.isUrgent
+      });
+    }
+
+    res.json({
+      message: 'Product urgent status updated',
+      product: updatedProduct,
+      isUrgent: updatedProduct.isUrgent
+    });
+  } catch (error) {
+    console.error('Error toggling urgent status:', error);
+    res.status(500).json({ error: 'Failed to toggle urgent status' });
+  }
+});
+
+// Move a list item to the SAME product at a different shop (Collect Mode)
+router.put('/changeShop', authenticateToken, async (req, res) => {
+  try {
+    const { listId, listProductId, productAtShopId } = req.body;
+    const userId = parseInt(req.user.id);
+    const userType = req.user.userType;
+
+    if (!listId || !listProductId || !productAtShopId) {
+      return res.status(400).json({ error: 'listId, listProductId and productAtShopId are required' });
+    }
+
+    const trackingSupported = !!prisma.trackedList?.findFirst;
+    let whereClause = { id: listId };
+
+    if (userType === 'ADMIN') {
+      const admin = await prisma.admin.findUnique({
+        where: { id: userId },
+        select: { shopId: true }
+      });
+      whereClause = {
+        id: listId,
+        OR: [
+          { adminId: userId },
+          { employee: { shopId: admin?.shopId } }
+        ]
+      };
+    } else if (userType === 'EMPLOYEE') {
+      whereClause = trackingSupported
+        ? { id: listId, OR: [{ employeeId: userId }, { trackedBy: { some: { userId, userType } } }] }
+        : { id: listId, employeeId: userId };
+    } else {
+      whereClause = trackingSupported
+        ? { id: listId, OR: [{ customerId: userId }, { trackedBy: { some: { userId, userType } } }] }
+        : { id: listId, customerId: userId };
+    }
+
+    const list = await withRetry(() => prisma.list.findFirst({ where: whereClause }));
+    if (!list) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    const listProduct = await withRetry(() => prisma.listProduct.findFirst({
+      where: { id: listProductId, listId },
+      include: { productAtShop: true },
+    }));
+    if (!listProduct) {
+      return res.status(404).json({ error: 'Product not found in list' });
+    }
+    if (listProduct.bundlePromotionId) {
+      return res.status(400).json({ error: 'Bundle items cannot be moved to another shop' });
+    }
+
+    const target = await withRetry(() => prisma.productAtShop.findUnique({
+      where: { id: productAtShopId },
+      include: { shop: true },
+    }));
+    if (!target) {
+      return res.status(404).json({ error: 'Product not available at that shop' });
+    }
+    if (target.productId !== listProduct.productAtShop.productId) {
+      return res.status(400).json({ error: 'Target shop does not stock this product' });
+    }
+    if (target.id === listProduct.productAtShopId) {
+      return res.status(400).json({ error: 'Item is already assigned to this shop' });
+    }
+
+    // If the list already has this product at the target shop, merge quantities.
+    const existing = await prisma.listProduct.findFirst({
+      where: { listId, productAtShopId: target.id, NOT: { id: listProduct.id } },
+    });
+
+    let updatedProduct;
+    if (existing) {
+      updatedProduct = await prisma.listProduct.update({
+        where: { id: existing.id },
+        data: {
+          quantity: (existing.quantity || 1) + (listProduct.quantity || 1),
+          isUrgent: existing.isUrgent || listProduct.isUrgent,
+        },
+        include: { productAtShop: { include: { product: true, shop: true } } },
+      });
+      await prisma.listProduct.delete({ where: { id: listProduct.id } });
+    } else {
+      updatedProduct = await prisma.listProduct.update({
+        where: { id: listProduct.id },
+        data: { productAtShopId: target.id },
+        include: { productAtShop: { include: { product: true, shop: true } } },
+      });
+    }
+
+    await cacheService.invalidateListDetail(listId);
+
+    if (list.shopId && req.io) {
+      req.io.to(`shop_${list.shopId}_lists`).emit('list_product_updated', {
+        listId,
+        product: updatedProduct,
+        action: 'shop_changed',
+      });
+    }
+
+    res.json({
+      message: `Moved to ${target.shop.name}`,
+      product: updatedProduct,
+      merged: !!existing,
+    });
+  } catch (error) {
+    console.error('Error changing product shop:', error);
+    res.status(500).json({ error: 'Failed to move product to another shop' });
   }
 });
 

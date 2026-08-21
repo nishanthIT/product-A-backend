@@ -165,7 +165,15 @@ const makeList = async (req, res) => {
 const addProductToList = async (req, res) => {
   const userId = req.user?.id;
   const userType = req.user?.userType;
-  const { listId, productId } = req.body;
+  const { listId, productId, isUrgent, inHandStock } = req.body;
+
+  // Optional flags from the scan → add flow
+  const wantUrgent = isUrgent === true;
+  const parsedStock = Number(inHandStock);
+  const cleanInHandStock =
+    inHandStock !== undefined && inHandStock !== null && Number.isInteger(parsedStock) && parsedStock >= 0
+      ? parsedStock
+      : null;
 
   // Customers, Employees and Admins can add products to lists
   if (userType !== 'CUSTOMER' && userType !== 'EMPLOYEE' && userType !== 'ADMIN') {
@@ -261,6 +269,7 @@ const addProductToList = async (req, res) => {
         where: { id: existingEntry.id },
         data: {
           quantity: (existingEntry.quantity || 1) + 1,
+          ...(wantUrgent ? { isUrgent: true } : {}),
         },
         include: {
           productAtShop: {
@@ -271,6 +280,13 @@ const addProductToList = async (req, res) => {
           },
         },
       });
+
+      if (cleanInHandStock != null) {
+        await prisma.productAtShop.update({
+          where: { id: updatedEntry.productAtShopId },
+          data: { inHandStock: cleanInHandStock },
+        });
+      }
 
       // Invalidate cache for this list and user's lists
       try {
@@ -315,8 +331,16 @@ const addProductToList = async (req, res) => {
       data: {
         listId,
         productAtShopId: lowestPriceEntry.id,
+        isUrgent: wantUrgent,
       },
     });
+
+    if (cleanInHandStock != null) {
+      await prisma.productAtShop.update({
+        where: { id: lowestPriceEntry.id },
+        data: { inHandStock: cleanInHandStock },
+      });
+    }
 
     // Invalidate cache for this list and user's lists (before sending response)
     try {

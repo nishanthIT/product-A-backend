@@ -142,6 +142,7 @@ model ProductAtShop {
   offerExpiryDate  DateTime?
   offerPrice       Decimal?
   outOfStock       Boolean            @default(false)
+  inHandStock      Int?
   lists            ListProduct[]
   employee         Empolyee?          @relation(fields: [employeeId], references: [id])
   product          Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -254,6 +255,7 @@ model ListProduct {
   productAtShopId   String
   quantity          Int              @default(1)
   isPurchased       Boolean          @default(false)
+  isUrgent          Boolean          @default(false)   // Flagged as urgent by the user
   isFreeItem        Boolean          @default(false)   // Is this a free item from bundle promotion
   freeQuantity      Int              @default(0)       // How many of this item are free
   bundlePromotionId String?                            // Reference to bundle promotion if free

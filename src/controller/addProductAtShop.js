@@ -729,6 +729,8 @@ const getProductsAtShop = async (req, res) => {
 
         if (search && search.trim()) {
           const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
+          // Space-insensitive variant so "Coca Cola" also matches "CocaCola".
+          const compactSearch = search.trim().replace(/\s+/g, '');
 
           if (searchWords.length > 0) {
             // Build OR conditions for each word to match title OR barcode
@@ -750,7 +752,16 @@ const getProductsAtShop = async (req, res) => {
               return { OR: conditions };
             });
 
-            whereClause.AND = searchConditions;
+            const matchClauses = [{ AND: searchConditions }];
+            if (searchWords.length > 1 && compactSearch.length >= 2) {
+              matchClauses.push(
+                { product: { title: { contains: compactSearch, mode: "insensitive" } } },
+                { product: { barcode: { contains: compactSearch, mode: "insensitive" } } },
+                { product: { caseBarcode: { contains: compactSearch, mode: "insensitive" } } },
+              );
+            }
+
+            whereClause.AND = [{ OR: matchClauses }];
           }
         }
 
@@ -816,9 +827,12 @@ const getProductsAtShop = async (req, res) => {
             take: 500
           });
 
-          // Apply fuzzy matching
+          // Apply fuzzy matching (space-insensitive so "CocaCola" matches "Coca Cola")
+          const compactQuery = search.trim().replace(/\s+/g, '').toLowerCase();
           const fuzzyMatched = allProductsAtShop.filter(item => {
             const searchableText = `${item.product.title || ''} ${item.product.barcode || ''} ${item.product.caseBarcode || ''}`;
+            const compactText = searchableText.replace(/\s+/g, '').toLowerCase();
+            if (compactQuery.length >= 2 && compactText.includes(compactQuery)) return true;
             return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
           });
 
