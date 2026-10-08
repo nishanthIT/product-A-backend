@@ -1,24 +1,13 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const authenticateToken = async (req, res, next) => {
-  try {
-    let token = null;
-    if (req.cookies && req.cookies.auth_token) token = req.cookies.auth_token;
-    else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) token = req.headers.authorization.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Authentication required' });
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    req.user = decoded;
-    next();
-  } catch (error) {
-    console.error('Auth error in waste route:', error);
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.WASTE)];
 
 const getUserShopId = async (userId, userType) => {
   if (userType === 'CUSTOMER') {

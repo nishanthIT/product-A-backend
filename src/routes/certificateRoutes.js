@@ -1,15 +1,17 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated } from '../middleware/authware.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
-const CERTIFICATE_ROOT = path.resolve('certificates');
+// Anchored to the backend folder so file lookups don't depend on the process cwd.
+const CERTIFICATE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../certificates');
 const CERTIFICATE_TYPES = ['INSPECTION', 'INSURANCE', 'ELECTRIC', 'HYGIENE'];
 
 const typeToFolder = {
@@ -94,35 +96,37 @@ const getRequestBaseUrl = (req) => {
   return `${proto}://${host}`.replace(/\/+$/, '');
 };
 
+// Older records may have been stored relative to the process cwd.
+const LEGACY_CERTIFICATE_ROOT = path.resolve('certificates');
+
+const isInsideCertificateRoot = (absolutePath) =>
+  [CERTIFICATE_ROOT, LEGACY_CERTIFICATE_ROOT].some((root) => {
+    const relative = path.relative(root, absolutePath);
+    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+  });
+
+const certificateFileName = (certificate) => {
+  const ext = path.extname(certificate.imagePath || '').toLowerCase() || '.jpg';
+  return `${typeToFolder[certificate.type] || 'certificate'}-certificate-${certificate.id.slice(0, 8)}${ext}`;
+};
+
 const attachComputedFields = (certificate, req) => {
   const computed = computeStatus(certificate);
   const baseUrl = getRequestBaseUrl(req);
+  const { imagePath, ...publicFields } = certificate;
   return {
-    ...certificate,
+    ...publicFields,
     status: computed.status,
     expiringSoon: computed.expiringSoon,
     expired: computed.expired,
     relevantDate: computed.relevantDate,
     imageUrl: `${baseUrl}/api/certificates/${certificate.id}/image`,
+    imageFileName: certificateFileName(certificate),
   };
 };
 
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    req.user = user;
-    next();
-  });
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = isAuthenticated;
 
 const requireCustomer = (req, res, next) => {
   if (req.user.userType !== 'CUSTOMER') {
@@ -307,6 +311,37 @@ router.get('/alerts', authenticateToken, async (req, res) => {
   }
 });
 
+router.get('/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id: userId, userType } = req.user;
+    const shopId = await getUserShopId(userId, userType);
+
+    if (!shopId) {
+      return res.status(400).json({ error: 'User not assigned to a shop' });
+    }
+
+    const certificate = await prisma.shopCertificate.findFirst({
+      where: { id: req.params.id, shopId },
+    });
+
+    if (!certificate) {
+      return res.status(404).json({ error: 'Certificate not found' });
+    }
+
+    const absolutePath = path.resolve(certificate.imagePath || '');
+    res.json({
+      success: true,
+      certificate: {
+        ...attachComputedFields(certificate, req),
+        imageAvailable: isInsideCertificateRoot(absolutePath) && fs.existsSync(absolutePath),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching certificate:', error);
+    res.status(500).json({ error: 'Failed to fetch certificate' });
+  }
+});
+
 router.get('/:id/image', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
@@ -318,15 +353,15 @@ router.get('/:id/image', authenticateToken, async (req, res) => {
 
     const certificate = await prisma.shopCertificate.findFirst({
       where: { id: req.params.id, shopId },
-      select: { imagePath: true },
+      select: { id: true, type: true, imagePath: true },
     });
 
     if (!certificate) {
       return res.status(404).json({ error: 'Certificate not found' });
     }
 
-    const absolutePath = path.resolve(certificate.imagePath);
-    if (!absolutePath.startsWith(CERTIFICATE_ROOT)) {
+    const absolutePath = path.resolve(certificate.imagePath || '');
+    if (!isInsideCertificateRoot(absolutePath)) {
       return res.status(403).json({ error: 'Invalid file path' });
     }
 
@@ -334,6 +369,8 @@ router.get('/:id/image', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Image not found' });
     }
 
+    res.set('Cache-Control', 'private, max-age=0, must-revalidate');
+    res.set('Content-Disposition', `inline; filename="${certificateFileName(certificate)}"`);
     return res.sendFile(absolutePath);
   } catch (error) {
     console.error('Error serving certificate image:', error);

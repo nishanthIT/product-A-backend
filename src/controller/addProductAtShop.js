@@ -4,6 +4,13 @@ import path from 'path';
 import { Jimp } from 'jimp';
 import { removeBackground } from "@imgly/background-removal-node";
 import multiLayerCache from '../services/multiLayerCache.js';
+import {
+  MAX_SEARCH_RESULTS,
+  indexProduct,
+  orderByRank,
+  refreshIndexedProduct,
+  searchProductIds,
+} from '../services/productSearchService.js';
 
 const prisma = new PrismaClient();
 
@@ -54,51 +61,6 @@ const getOrCreateUnknownProductAtShop = async (productId) => {
   }
 
   return unknownProductAtShop;
-};
-
-// Levenshtein distance function for fuzzy matching (typo tolerance)
-const levenshteinDistance = (str1, str2) => {
-  const m = str1.length;
-  const n = str2.length;
-  const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (str1[i - 1] === str2[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1];
-      } else {
-        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-      }
-    }
-  }
-  return dp[m][n];
-};
-
-// Check if a word fuzzy matches any word in text
-const fuzzyMatchWord = (searchWord, text, maxDistance = 2) => {
-  const textLower = text.toLowerCase();
-  const searchLower = searchWord.toLowerCase();
-  
-  if (textLower.includes(searchLower)) return true;
-  
-  const textWords = textLower.split(/\s+/);
-  for (const textWord of textWords) {
-    const allowedDistance = searchLower.length <= 3 ? 1 : maxDistance;
-    
-    if (textWord.startsWith(searchLower.substring(0, Math.min(3, searchLower.length)))) {
-      const distance = levenshteinDistance(searchLower, textWord.substring(0, searchLower.length + 2));
-      if (distance <= allowedDistance) return true;
-    }
-    
-    if (textWord.length >= searchLower.length - 2 && textWord.length <= searchLower.length + 2) {
-      const distance = levenshteinDistance(searchLower, textWord);
-      if (distance <= allowedDistance) return true;
-    }
-  }
-  return false;
 };
 
 const PRODUCT_CACHE_TTL_SECONDS = 180;
@@ -298,6 +260,7 @@ const addProductAtShop = async (req, res) => {
         category: category || null,
       },
     });
+    indexProduct(newProduct);
 
     // Add product to the shop
     const addedProductAtShop = await prisma.productAtShop.create({
@@ -566,6 +529,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         where: { id },
         data: productUpdateData,
       });
+      if (casebarcode) refreshIndexedProduct(id);
     }
     
     // Check if the product already exists in productAtShop
@@ -727,119 +691,58 @@ const getProductsAtShop = async (req, res) => {
           whereClause.card_aiel_number = aisle.trim();
         }
 
+        const productInclude = {
+          product: {
+            select: {
+              title: true,
+              caseSize: true,
+              packetSize: true,
+              retailSize: true,
+              barcode: true,
+              caseBarcode: true,
+              img: true,
+              rrp: true,
+              category: true
+            }
+          }
+        };
+
+        let totalCount;
+        let productsAtShop;
+
         if (search && search.trim()) {
-          const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
-          // Space-insensitive variant so "Coca Cola" also matches "CocaCola".
-          const compactSearch = search.trim().replace(/\s+/g, '');
+          // Rank the whole catalogue, keep this shop's (filtered) rows, then paginate by rank.
+          const rankedIds = (await searchProductIds(search, { limit: MAX_SEARCH_RESULTS })).map((r) => r.id);
+          const matchingRows = rankedIds.length
+            ? await prisma.productAtShop.findMany({
+                where: { ...whereClause, productId: { in: rankedIds } },
+                select: { productId: true },
+              })
+            : [];
+          const orderedIds = orderByRank(matchingRows, rankedIds, (row) => row.productId)
+            .map((row) => row.productId);
+          totalCount = orderedIds.length;
 
-          if (searchWords.length > 0) {
-            // Build OR conditions for each word to match title OR barcode
-            const searchConditions = searchWords.map(word => {
-              const conditions = [
-                { product: { title: { contains: word, mode: "insensitive" } } },
-                { product: { barcode: { contains: word, mode: "insensitive" } } },
-                { product: { caseBarcode: { contains: word, mode: "insensitive" } } }
-              ];
+          const pageIds = orderedIds.slice(offset, offset + limitNumber);
+          const pageRows = pageIds.length
+            ? await prisma.productAtShop.findMany({
+                where: { shopId, productId: { in: pageIds } },
+                include: productInclude,
+              })
+            : [];
+          productsAtShop = orderByRank(pageRows, pageIds, (row) => row.productId);
+        } else {
+          totalCount = await prisma.productAtShop.count({ where: whereClause });
 
-              // For words longer than 3 characters, also try matching with first part
-              if (word.length > 3) {
-                const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
-                if (partialWord.length >= 3) {
-                  conditions.push({ product: { title: { contains: partialWord, mode: "insensitive" } } });
-                }
-              }
-
-              return { OR: conditions };
-            });
-
-            const matchClauses = [{ AND: searchConditions }];
-            if (searchWords.length > 1 && compactSearch.length >= 2) {
-              matchClauses.push(
-                { product: { title: { contains: compactSearch, mode: "insensitive" } } },
-                { product: { barcode: { contains: compactSearch, mode: "insensitive" } } },
-                { product: { caseBarcode: { contains: compactSearch, mode: "insensitive" } } },
-              );
+          productsAtShop = await prisma.productAtShop.findMany({
+            where: whereClause,
+            include: productInclude,
+            skip: offset,
+            take: limitNumber,
+            orderBy: {
+              updatedAt: 'desc'
             }
-
-            whereClause.AND = [{ OR: matchClauses }];
-          }
-        }
-
-        // Get total count
-        const totalCount = await prisma.productAtShop.count({ where: whereClause });
-
-        // Get products with pagination and search
-        let productsAtShop = await prisma.productAtShop.findMany({
-          where: whereClause,
-          include: {
-            product: {
-              select: {
-                title: true,
-                caseSize: true,
-                packetSize: true,
-                retailSize: true,
-                barcode: true,
-                caseBarcode: true,
-                img: true,
-                rrp: true,
-                category: true
-              }
-            }
-          },
-          skip: offset,
-          take: limitNumber,
-          orderBy: {
-            updatedAt: 'desc'
-          }
-        });
-
-        // If search provided and few results, apply fuzzy matching
-        if (search && search.trim() && productsAtShop.length < 10) {
-          const searchWords = search.trim().split(/\s+/).filter(word => word.length > 0);
-
-          // Build where clause for fuzzy search that respects filters
-          let fuzzyWhereClause = { shopId };
-          if (category && category.trim()) {
-            fuzzyWhereClause.product = { category: category.trim() };
-          }
-          if (aisle && aisle.trim()) {
-            fuzzyWhereClause.card_aiel_number = aisle.trim();
-          }
-
-          // Get more products for fuzzy matching
-          const allProductsAtShop = await prisma.productAtShop.findMany({
-            where: fuzzyWhereClause,
-            include: {
-              product: {
-                select: {
-                  title: true,
-                  caseSize: true,
-                  packetSize: true,
-                  retailSize: true,
-                  barcode: true,
-                  caseBarcode: true,
-                  img: true,
-                  rrp: true,
-                  category: true
-                }
-              }
-            },
-            take: 500
           });
-
-          // Apply fuzzy matching (space-insensitive so "CocaCola" matches "Coca Cola")
-          const compactQuery = search.trim().replace(/\s+/g, '').toLowerCase();
-          const fuzzyMatched = allProductsAtShop.filter(item => {
-            const searchableText = `${item.product.title || ''} ${item.product.barcode || ''} ${item.product.caseBarcode || ''}`;
-            const compactText = searchableText.replace(/\s+/g, '').toLowerCase();
-            if (compactQuery.length >= 2 && compactText.includes(compactQuery)) return true;
-            return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
-          });
-
-          // Merge results
-          const existingIds = new Set(productsAtShop.map(p => p.productId));
-          const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.productId));
-          productsAtShop = [...productsAtShop, ...additionalProducts].slice(0, limitNumber);
         }
 
         // Map the data to a more frontend-friendly format
@@ -894,26 +797,23 @@ const searchProductsNotInShop = async (req, res) => {
   }
 
   try {
-    // Get products that match the search but are not in the shop
-    const products = await prisma.product.findMany({
-      where: {
-        title: {
-          contains: query,
-          mode: "insensitive"
-        },
-        NOT: {
-          shops: {  // Changed from productAtShop to shops
-            some: {
-              shopId: shopId
+    // Rank matches, then keep the best 20 that are not in the shop yet
+    const rankedIds = (await searchProductIds(String(query), { limit: 1000 })).map((r) => r.id);
+    const rows = rankedIds.length
+      ? await prisma.product.findMany({
+          where: {
+            id: { in: rankedIds },
+            NOT: {
+              shops: {
+                some: {
+                  shopId: shopId
+                }
+              }
             }
-          }
-        }
-      },
-      take: 20, // Limit results
-      orderBy: {
-        title: 'asc'
-      }
-    });
+          },
+        })
+      : [];
+    const products = orderByRank(rows, rankedIds).slice(0, 20);
 
     res.status(200).json(products);
   } catch (error) {

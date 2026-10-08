@@ -34,6 +34,7 @@ import {
   getEmployee,
   updateEmployee,
 } from "../controller/employee.js";
+import { COMPANY_PERMISSIONS as P, SHOP_FEATURES } from "../services/accessControl.js";
 import {
   addCustomer,
   deleteCustomer,
@@ -55,7 +56,13 @@ import {
 import { login, register, sendRegistrationOtp, logout, verify, extendTrialWithPoints, forgotPassword, resetPassword } from "../controller/auth.js";
 import { emp_dash_handler, getEmployeeListItemUpdates } from "../controller/dashbord/employ.js";
 import { getDashboardOverview } from "../controller/dashbord/admin.js";
-import { isAdmin, isAuthenticated, isEmployee } from "../middleware/authware.js";
+import {
+  isAdmin,
+  isAuthenticated,
+  requireCompanyPermission,
+  requireCompanyStaff,
+  requireShopFeature,
+} from "../middleware/authware.js";
 import { requireActiveSubscription, softSubscriptionCheck } from "../middleware/subscriptionCheck.js";
 import { image } from "../controller/image.js";
 import {
@@ -126,21 +133,27 @@ router.post("/auth/reset-password", resetPassword);
 
 router.get("/image/:barcode",image)
 
-router.get("/filterProducts",isAuthenticated,isEmployee, filterProducts); // given in query
-router.get("/productFilters", isAuthenticated, isEmployee, getProductFilters); // Get available categories and aisles for filter dropdowns
+// Company catalog management: explicit company permissions only (never a shop role).
+const catalogRead = [isAuthenticated, requireCompanyPermission(P.CATALOG_READ)];
+const catalogWrite = [isAuthenticated, requireCompanyPermission(P.CATALOG_WRITE)];
+const shopsManage = [isAuthenticated, requireCompanyPermission(P.SHOPS_MANAGE)];
+const staffManage = [isAuthenticated, requireCompanyPermission(P.STAFF_MANAGE)];
+
+router.get("/filterProducts", catalogRead, filterProducts); // given in query
+router.get("/productFilters", catalogRead, getProductFilters); // Get available categories and aisles for filter dropdowns
 
 /* <!-- Product Routes --> */
-router.post("/addProduct",isAuthenticated,isEmployee, addProduct);
-router.put("/editProduct/:id",isAuthenticated,isEmployee, editProduct);
-router.get("/getProductByBarcode/:barcode",isAuthenticated,isEmployee, getProductByBarcode);
-router.get("/getProductById/:id",isAuthenticated,isEmployee, getProductById);
+router.post("/addProduct", catalogWrite, addProduct);
+router.put("/editProduct/:id", catalogWrite, editProduct);
+router.get("/getProductByBarcode/:barcode", catalogRead, getProductByBarcode);
+router.get("/getProductById/:id", catalogRead, getProductById);
 router.delete("/deleteProduct/:id",isAuthenticated,isAdmin, deleteProduct); // Admin only - delete product
 
 // Customer product search routes (for adding to lists)
 router.get("/products/barcode/:barcode",isAuthenticated, getProductByBarcode); // Allow customers to search
 router.get("/products/search",isAuthenticated, searchProducts); // Search products by name
 router.post("/products/quick-add", isAuthenticated, quickAddProductFromScan);
-router.get("/products/pending-submissions", isAuthenticated, isEmployee, getPendingSubmittedProducts);
+router.get("/products/pending-submissions", catalogWrite, getPendingSubmittedProducts);
 router.put("/products/pending-submissions/:id/approve", isAuthenticated, isAdmin, approveSubmittedProduct);
 router.get("/products/:id/pack-options", isAuthenticated, getPackOptions); // Pack size comparison (smart purchase recommendation)
 router.get("/products/:id/price-tiers", isAuthenticated, getProductPriceTiers); // Quantity-based price tiers (lowest-priced shop)
@@ -148,10 +161,10 @@ router.get("/products/:id",isAuthenticated, getProductById); // Allow customers 
 
 
 /* <!-- Shop Routes --> */
-router.post("/addShop",isAuthenticated,isEmployee, addShop);
-router.put("/editShop/:id",isAuthenticated,isEmployee, editShop);
-router.get("/getAllshop", isAuthenticated,isEmployee,getAllShops);
-router.get("/getshop/:id",isAuthenticated,isEmployee, getShopById);
+router.post("/addShop", shopsManage, addShop);
+router.put("/editShop/:id", shopsManage, editShop);
+router.get("/getAllshop", shopsManage, getAllShops);
+router.get("/getshop/:id", shopsManage, getShopById);
 router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only - delete shop
 
 /* <!-- ProductAtShop Routes --> */
@@ -168,7 +181,7 @@ router.post('/addProductAtShop', (req, res, next) => {
   console.log('=== addProductAtShop route hit ===');
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
   next();
-}, isAuthenticated, isEmployee, (req, res, next) => {
+}, shopsManage, (req, res, next) => {
   console.log('=== Passed auth, starting multer ===');
   productUpload.single('image')(req, res, (err) => {
     if (err) {
@@ -188,7 +201,7 @@ router.post('/addProductAtShop', (req, res, next) => {
 }, addProductAtShop);
 
 // Add an existing product to a shop (with optional image upload)
-router.post('/addProductAtShopifExistAtProduct', isAuthenticated, isEmployee, (req, res, next) => {
+router.post('/addProductAtShopifExistAtProduct', shopsManage, (req, res, next) => {
   productUpload.single('image')(req, res, (err) => {
     if (err instanceof multer.MulterError) {
       // A Multer error occurred when uploading
@@ -206,32 +219,32 @@ router.post('/addProductAtShopifExistAtProduct', isAuthenticated, isEmployee, (r
 }, addProductAtShopifExistAtProduct);
 
 // Get products at a shop with pagination and search
-router.get('/shop/:shopId/products',isAuthenticated,isEmployee, getProductsAtShop);
+router.get('/shop/:shopId/products', shopsManage, getProductsAtShop);
 
 // Get all product IDs in a shop (for bulk transfer selection)
-router.get('/shop/:shopId/product-ids', isAuthenticated, isEmployee, getAllProductIdsAtShop);
+router.get('/shop/:shopId/product-ids', shopsManage, getAllProductIdsAtShop);
 
 // Get categories and aisles available at a shop for filters
-router.get('/shop/:shopId/filters',isAuthenticated,isEmployee, getShopFilters);
+router.get('/shop/:shopId/filters', shopsManage, getShopFilters);
 
 // Transfer products from one shop to another in bulk
-router.post('/shop/transfer-products', isAuthenticated, isEmployee, transferProductsBetweenShops);
+router.post('/shop/transfer-products', shopsManage, transferProductsBetweenShops);
 
 // Update product price at a shop
-router.put('/shop/:shopId/updateProductPrice',isAuthenticated,isEmployee, updateProductPriceAtShop);
+router.put('/shop/:shopId/updateProductPrice', shopsManage, updateProductPriceAtShop);
 
-// Quantity-based price tiers for a product at a shop (admin/employee)
-router.get('/shop/:shopId/product/:productId/price-tiers', isAuthenticated, isEmployee, getShopProductPriceTiers);
-router.put('/shop/:shopId/product/:productId/price-tiers', isAuthenticated, isEmployee, setShopProductPriceTiers);
+// Quantity-based price tiers for a product at a shop (company staff)
+router.get('/shop/:shopId/product/:productId/price-tiers', shopsManage, getShopProductPriceTiers);
+router.put('/shop/:shopId/product/:productId/price-tiers', shopsManage, setShopProductPriceTiers);
 
-// Search for products not in a shop (for employees)
-router.get('/shop/:shopId/searchProducts',isAuthenticated,isEmployee, searchProductsNotInShop);
+// Search for products not in a shop (company staff)
+router.get('/shop/:shopId/searchProducts', shopsManage, searchProductsNotInShop);
 
 // Remove a product from a shop
-router.delete('/shop/:shopId/product',isAuthenticated,isEmployee, removeProductFromShop);
+router.delete('/shop/:shopId/product', shopsManage, removeProductFromShop);
 
 // Toggle out of stock status for a product at shop
-router.put('/shop/:shopId/product/:productId/stock',isAuthenticated,isEmployee, toggleOutOfStock);
+router.put('/shop/:shopId/product/:productId/stock', shopsManage, toggleOutOfStock);
 
 // Product-specific promotions endpoints
 import { PrismaClient } from '@prisma/client';
@@ -301,7 +314,7 @@ const applyBestPromotion = async (productAtShopId) => {
 };
 
 // GET product promotions for a specific product at a shop
-router.get('/product-promotions/:shopId/:productId', isAuthenticated, isEmployee, async (req, res) => {
+router.get('/product-promotions/:shopId/:productId', shopsManage, async (req, res) => {
   try {
     const { shopId, productId } = req.params;
     
@@ -350,7 +363,7 @@ router.get('/product-promotions/:shopId/:productId', isAuthenticated, isEmployee
 });
 
 // POST add promotions for a product at shop
-router.post('/product-promotions/:shopId/:productId', isAuthenticated, isEmployee, async (req, res) => {
+router.post('/product-promotions/:shopId/:productId', shopsManage, async (req, res) => {
   try {
     const { shopId, productId } = req.params;
     const { promotions } = req.body;
@@ -405,7 +418,7 @@ router.post('/product-promotions/:shopId/:productId', isAuthenticated, isEmploye
 });
 
 // DELETE a product promotion
-router.delete('/product-promotions/:promotionId', isAuthenticated, isEmployee, async (req, res) => {
+router.delete('/product-promotions/:promotionId', shopsManage, async (req, res) => {
   try {
     const { promotionId } = req.params;
     
@@ -436,7 +449,7 @@ router.delete('/product-promotions/:promotionId', isAuthenticated, isEmployee, a
 });
 
 // Apply a specific promotion as current offer (force override)
-router.post('/product-promotions/:shopId/:productId/apply', isAuthenticated, isEmployee, async (req, res) => {
+router.post('/product-promotions/:shopId/:productId/apply', shopsManage, async (req, res) => {
   try {
     const { shopId, productId } = req.params;
     const { promotionPrice, endDate } = req.body;
@@ -465,46 +478,48 @@ router.post('/product-promotions/:shopId/:productId/apply', isAuthenticated, isE
 
 
 // dashboard
-router.get("/employee/dashboard-data",isAuthenticated,isEmployee,emp_dash_handler)
-router.get("/employee/list-item-updates",isAuthenticated,isEmployee,getEmployeeListItemUpdates)
+router.get("/employee/dashboard-data", isAuthenticated, requireCompanyStaff, emp_dash_handler)
+router.get("/employee/list-item-updates", isAuthenticated, requireCompanyStaff, getEmployeeListItemUpdates)
 router.get("/admin/dashboard/overview",isAuthenticated,isAdmin,getDashboardOverview)
 
 
 
-/* <!-- Employee Routes --> */
-router.post("/addEmployee",isAuthenticated,isAdmin, addEmployee);
-router.put("/updateEmployee/:id",isAuthenticated,isAdmin, updateEmployee);
-router.delete("/deleteEmployee/:id",isAuthenticated,isAdmin, deleteEmployee);
-router.get("/getEmployee/:id",isAuthenticated,isAdmin, getEmployee);
+/* <!-- Company Staff Routes (never shop employees; see /api/employees for those) --> */
+router.post("/addEmployee", staffManage, addEmployee);
+router.put("/updateEmployee/:id", staffManage, updateEmployee);
+router.delete("/deleteEmployee/:id", staffManage, deleteEmployee);
+router.get("/getEmployee/:id", staffManage, getEmployee);
 
 /* <!-- Customer Routes --> */
 router.post("/addCustomer",isAuthenticated,isAdmin, addCustomer);
 router.put("/updateCustomer",isAuthenticated,isAdmin, updateCustomer);
 router.delete("/deleteCustomer/:id",isAuthenticated,isAdmin, deleteCustomer);
 router.get("/getCustomer/:id",isAuthenticated,isAdmin, getCustomer);
-router.get("/getallemploy",isAuthenticated,isAdmin, getAllEmployees);
+router.get("/getallemploy", staffManage, getAllEmployees);
 
 /* <!-- Action Log Routes --> */
 router.get("/getHourlyProductAdds/:employeeId",isAuthenticated,isAdmin, getHourlyProductAdds);
 
 // <!-- List Routes --> (Customer only) - With subscription checking
-router.get("/lists", isAuthenticated, softSubscriptionCheck, getUserLists); // Get all lists (soft check - allow viewing)
-router.post("/lists", isAuthenticated, requireActiveSubscription, makeList); // Create new list (requires active subscription)
-router.post("/lists/addProduct", isAuthenticated, requireActiveSubscription, addProductToList); // Add product to list (requires active subscription)
-router.delete("/lists/removeProduct", isAuthenticated, requireActiveSubscription, removeProductFromList); // Remove product from list (requires active subscription)
-router.get("/lists/:listId/lowest-prices", isAuthenticated, requireActiveSubscription, getLowestPricesInList); // Get lowest prices (premium feature)
+// Employees reach lists only through an ACTIVE shop membership.
+const listAuth = [isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS)];
+router.get("/lists", listAuth, softSubscriptionCheck, getUserLists); // Get all lists (soft check - allow viewing)
+router.post("/lists", listAuth, requireActiveSubscription, makeList); // Create new list (requires active subscription)
+router.post("/lists/addProduct", listAuth, requireActiveSubscription, addProductToList); // Add product to list (requires active subscription)
+router.delete("/lists/removeProduct", listAuth, requireActiveSubscription, removeProductFromList); // Remove product from list (requires active subscription)
+router.get("/lists/:listId/lowest-prices", listAuth, requireActiveSubscription, getLowestPricesInList); // Get lowest prices (premium feature)
 // router.get("/lists/:listId", isAuthenticated, softSubscriptionCheck, getListById); // DISABLED - conflicts with listRoutes.js
-router.put("/lists/:listId/rename", isAuthenticated, renameList); // Rename list (owner or tracker) — syncs to shop
-router.delete("/lists/:listId/untrack", isAuthenticated, untrackList); // Stop tracking a shared list (remove from my lists)
-router.delete("/lists/:listId", isAuthenticated, requireActiveSubscription, deleteList); // Delete list (requires active subscription)
+router.put("/lists/:listId/rename", listAuth, renameList); // Rename list (owner or tracker) — syncs to shop
+router.delete("/lists/:listId/untrack", listAuth, untrackList); // Stop tracking a shared list (remove from my lists)
+router.delete("/lists/:listId", listAuth, requireActiveSubscription, deleteList); // Delete list (requires active subscription)
 
 /* <!-- Bundle Promotion Routes --> */
-// Admin/Employee routes for managing bundle promotions
-router.post("/shop/:shopId/bundle-promotions", isAuthenticated, isEmployee, createBundlePromotion);
-router.get("/shop/:shopId/bundle-promotions", isAuthenticated, isEmployee, getBundlePromotions);
-router.get("/bundle-promotions/:promotionId", isAuthenticated, isEmployee, getBundlePromotion);
-router.put("/bundle-promotions/:promotionId", isAuthenticated, isEmployee, updateBundlePromotion);
-router.delete("/bundle-promotions/:promotionId", isAuthenticated, isEmployee, deleteBundlePromotion);
+// Company staff routes for managing bundle promotions
+router.post("/shop/:shopId/bundle-promotions", shopsManage, createBundlePromotion);
+router.get("/shop/:shopId/bundle-promotions", shopsManage, getBundlePromotions);
+router.get("/bundle-promotions/:promotionId", shopsManage, getBundlePromotion);
+router.put("/bundle-promotions/:promotionId", shopsManage, updateBundlePromotion);
+router.delete("/bundle-promotions/:promotionId", shopsManage, deleteBundlePromotion);
 
 // Customer routes for checking bundle offers
 router.get("/shop/:shopId/product/:productId/bundle-offers", isAuthenticated, checkProductBundleOffers);

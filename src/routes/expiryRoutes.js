@@ -1,34 +1,15 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
 import expiryNotificationService from '../services/expiryNotificationService.js';
+import { orderByRank, searchProductIds } from '../services/productSearchService.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Middleware to authenticate and get user info
-const authenticateToken = async (req, res, next) => {
-  try {
-    let token = null;
-    
-    if (req.cookies && req.cookies.auth_token) {
-      token = req.cookies.auth_token;
-    } else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-    
-    if (!token) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    req.user = decoded;
-    next();
-  } catch (error) {
-    console.error('Auth error:', error);
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.EXPIRY)];
 
 // Helper to get user's shopId
 const getUserShopId = async (userId, userType) => {
@@ -81,29 +62,41 @@ router.get('/', authenticateToken, async (req, res) => {
       whereClause.isDisposed = false;
     }
 
-    const expiryProducts = await prisma.expiryProduct.findMany({
-      where: whereClause,
-      include: {
-        product: {
-          select: {
-            id: true,
-            title: true,
-            barcode: true,
-            img: true,
-            category: true,
-            rrp: true
+    // Independent queries run in parallel — each is a full DB round trip.
+    const soonEnd = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
+    const [expiryProducts, all, expiringSoon, expired, disposed] = await Promise.all([
+      prisma.expiryProduct.findMany({
+        where: whereClause,
+        include: {
+          product: {
+            select: {
+              id: true,
+              title: true,
+              barcode: true,
+              img: true,
+              category: true,
+              rrp: true
+            }
+          },
+          category: {
+            select: {
+              id: true,
+              name: true,
+              reminderDays: true
+            }
           }
         },
-        category: {
-          select: {
-            id: true,
-            name: true,
-            reminderDays: true
-          }
-        }
-      },
-      orderBy: { expiryDate: 'asc' }
-    });
+        orderBy: { expiryDate: 'asc' }
+      }),
+      prisma.expiryProduct.count({ where: { shopId, isDisposed: false } }),
+      prisma.expiryProduct.count({
+        where: { shopId, isDisposed: false, expiryDate: { gte: now, lte: soonEnd } }
+      }),
+      prisma.expiryProduct.count({
+        where: { shopId, isDisposed: false, expiryDate: { lt: now } }
+      }),
+      prisma.expiryProduct.count({ where: { shopId, isDisposed: true } })
+    ]);
 
     // Calculate days until expiry and status for each product.
     // Status thresholds follow category reminder days when configured.
@@ -155,24 +148,7 @@ router.get('/', authenticateToken, async (req, res) => {
       };
     });
 
-    // Get counts for each filter
-    const counts = {
-      all: await prisma.expiryProduct.count({ where: { shopId, isDisposed: false } }),
-      expiringSoon: await prisma.expiryProduct.count({
-        where: {
-          shopId,
-          isDisposed: false,
-          expiryDate: {
-            gte: now,
-            lte: new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000)
-          }
-        }
-      }),
-      expired: await prisma.expiryProduct.count({
-        where: { shopId, isDisposed: false, expiryDate: { lt: now } }
-      }),
-      disposed: await prisma.expiryProduct.count({ where: { shopId, isDisposed: true } })
-    };
+    const counts = { all, expiringSoon, expired, disposed };
 
     res.json({
       success: true,
@@ -497,14 +473,13 @@ router.get('/search-product', authenticateToken, async (req, res) => {
     const { query, barcode } = req.query;
 
     let whereClause = {};
+    let rankedIds = null;
     
     if (barcode) {
       whereClause.barcode = barcode;
     } else if (query) {
-      whereClause.OR = [
-        { title: { contains: query, mode: 'insensitive' } },
-        { barcode: { contains: query, mode: 'insensitive' } }
-      ];
+      rankedIds = (await searchProductIds(String(query), { limit: 20 })).map((r) => r.id);
+      whereClause.id = { in: rankedIds };
     } else {
       return res.status(400).json({ error: 'Search query or barcode required' });
     }
@@ -526,7 +501,7 @@ router.get('/search-product', authenticateToken, async (req, res) => {
 
     res.json({
       success: true,
-      products
+      products: rankedIds ? orderByRank(products, rankedIds) : products
     });
   } catch (error) {
     console.error('Error searching products:', error);

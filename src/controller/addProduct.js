@@ -1,4 +1,10 @@
 import { PrismaClient } from "@prisma/client";
+import {
+  indexProduct,
+  orderByRank,
+  removeIndexedProduct,
+  searchProductIds,
+} from "../services/productSearchService.js";
 const prisma = new PrismaClient();
 const USER_SUBMITTED_PENDING_CATEGORY = 'USER_SUBMITTED_PENDING';
 
@@ -25,64 +31,6 @@ const getOrCreateUnknownShop = async () => {
 
   return unknownShop;
 };
-
-// Levenshtein distance function for fuzzy matching
-function levenshteinDistance(str1, str2) {
-  const m = str1.length;
-  const n = str2.length;
-  
-  // Create a 2D array to store distances
-  const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-  
-  // Initialize first column and row
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  
-  // Fill the rest of the matrix
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (str1[i - 1].toLowerCase() === str2[j - 1].toLowerCase()) {
-        dp[i][j] = dp[i - 1][j - 1];
-      } else {
-        dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-      }
-    }
-  }
-  
-  return dp[m][n];
-}
-
-// Fuzzy match a word against a text
-function fuzzyMatchWord(searchWord, text, maxDistance = 2) {
-  if (!searchWord || !text) return false;
-  
-  const lowerWord = searchWord.toLowerCase();
-  const lowerText = text.toLowerCase();
-  
-  // Direct contains check
-  if (lowerText.includes(lowerWord)) return true;
-  
-  // Check each word in the text
-  const textWords = lowerText.split(/\s+/);
-  
-  for (const textWord of textWords) {
-    // Exact match
-    if (textWord === lowerWord) return true;
-    
-    // Starts with the search word
-    if (textWord.startsWith(lowerWord) || lowerWord.startsWith(textWord)) return true;
-    
-    // Levenshtein distance check for words of similar length
-    const lengthDiff = Math.abs(textWord.length - lowerWord.length);
-    if (lengthDiff <= maxDistance) {
-      const distance = levenshteinDistance(textWord, lowerWord);
-      const threshold = lowerWord.length <= 4 ? 1 : maxDistance;
-      if (distance <= threshold) return true;
-    }
-  }
-  
-  return false;
-}
 
 // Helper function to get effective price (considering active offers)
 const getEffectivePrice = (productAtShop) => {
@@ -197,6 +145,7 @@ const addProduct = async (req, res) => {
           category: category || null,
         },
       });
+      indexProduct(newProduct);
 
       res.status(201).json({
         success: true,
@@ -420,6 +369,7 @@ const editProduct = async (req, res) => {
         data: dataToUpdate,
         include: { shops: { include: { shop: true } } }
       });
+      indexProduct(updatedProduct);
 
       const formattedShops = updatedProduct.shops?.map((productAtShop) => ({
         name: productAtShop.shop.name,
@@ -657,6 +607,7 @@ const quickAddProductFromScan = async (req, res) => {
           : USER_SUBMITTED_PENDING_CATEGORY,
       },
     });
+    indexProduct(createdProduct);
 
     const productAtShop = await prisma.productAtShop.upsert({
       where: {
@@ -860,6 +811,7 @@ const approveSubmittedProduct = async (req, res) => {
         retailSize: retailSize !== undefined ? String(retailSize) : product.retailSize,
       },
     });
+    indexProduct(approvedProduct);
 
     return res.status(200).json({
       success: true,
@@ -872,7 +824,7 @@ const approveSubmittedProduct = async (req, res) => {
   }
 };
 
-// Search products by title/name with fuzzy matching (for customers adding to lists)
+// Ranked product search by name/barcode (for customers adding to lists)
 const searchProducts = async (req, res) => {
   try {
     const { q, limit = 20 } = req.query;
@@ -881,88 +833,32 @@ const searchProducts = async (req, res) => {
       return res.status(400).json({ error: "Search query must be at least 2 characters" });
     }
 
-    const searchTerm = q.trim();
-    const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
-    // Space-insensitive variant so "Coca Cola" also matches "CocaCola".
-    const compactTerm = searchTerm.replace(/\s+/g, '');
+    const take = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
+    // Over-fetch so equally relevant products sold in a shop can be listed first.
+    const ranked = await searchProductIds(q, { limit: take * 3 });
+    const rankedIds = ranked.map((r) => r.id);
+    const scoreById = new Map(ranked.map((r) => [r.id, r.score]));
 
-    // Build search conditions for each word
-    const searchConditions = searchWords.map(word => {
-      const conditions = [
-        { title: { contains: word, mode: 'insensitive' } },
-        { barcode: { contains: word, mode: 'insensitive' } }
-      ];
-      
-      // For words longer than 3 characters, also try partial matching
-      if (word.length > 3) {
-        const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
-        if (partialWord.length >= 3) {
-          conditions.push({ title: { contains: partialWord, mode: 'insensitive' } });
-        }
-      }
-      
-      return { OR: conditions };
-    });
-
-    const matchClauses = [{ AND: searchConditions }];
-    if (searchWords.length > 1 && compactTerm.length >= 2) {
-      matchClauses.push(
-        { title: { contains: compactTerm, mode: 'insensitive' } },
-        { barcode: { contains: compactTerm, mode: 'insensitive' } },
-      );
-    }
-
-    // Search products by title and barcode (case-insensitive)
-    let products = await prisma.product.findMany({
-      where: {
-        OR: matchClauses
-      },
-      include: {
-        shops: {
+    const rows = rankedIds.length
+      ? await prisma.product.findMany({
+          where: { id: { in: rankedIds } },
           include: {
-            shop: true,
-          },
-        },
-      },
-      take: parseInt(limit) * 2, // Get more for potential fuzzy filtering
-      orderBy: {
-        title: 'asc',
-      },
-    });
-
-    // If few results, apply fuzzy matching to a broader search
-    if (products.length < parseInt(limit) / 2) {
-      const broadProducts = await prisma.product.findMany({
-        include: {
-          shops: {
-            include: {
-              shop: true,
+            shops: {
+              include: {
+                shop: true,
+              },
             },
           },
-        },
-        take: 300,
-        orderBy: {
-          title: 'asc',
-        },
-      });
-      
-      // Apply fuzzy matching (space-insensitive so "CocaCola" matches "Coca Cola")
-      const compactQuery = compactTerm.toLowerCase();
-      const fuzzyMatched = broadProducts.filter(product => {
-        const searchableText = `${product.title || ''} ${product.barcode || ''}`;
-        const compactText = searchableText.replace(/\s+/g, '').toLowerCase();
-        if (compactQuery.length >= 2 && compactText.includes(compactQuery)) return true;
-        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
-      });
-      
-      // Merge with existing results
-      const existingIds = new Set(products.map(p => p.id));
-      const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.id));
-      products = [...products, ...additionalProducts];
-    }
-
-    // Limit results
-    products = products.slice(0, parseInt(limit));
+        })
+      : [];
+    const products = orderByRank(rows, rankedIds)
+      .map((product, rank) => ({ product, rank }))
+      .sort((a, b) =>
+        scoreById.get(b.product.id) - scoreById.get(a.product.id) ||
+        Number(b.product.shops.length > 0) - Number(a.product.shops.length > 0) ||
+        a.rank - b.rank)
+      .slice(0, take)
+      .map(({ product }) => product);
 
     // Format response with offer price logic
     const formattedProducts = products.map(product => {
@@ -1045,6 +941,7 @@ const deleteProduct = async (req, res) => {
     await prisma.product.delete({
       where: { id }
     });
+    removeIndexedProduct(id);
 
     res.status(200).json({
       success: true,

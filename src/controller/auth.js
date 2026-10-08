@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import redisService from '../services/redisService.js';
 import { sendRegistrationOtpEmail, sendPasswordResetOtpEmail } from '../services/mailService.js';
+import { describeAccess, resolvePrincipal } from '../services/accessControl.js';
 
 const prisma = new PrismaClient();
 
@@ -131,15 +132,21 @@ const login = async (req, res) => {
     if (!isPasswordValid) {
       return res.status(401).json({ error: 'Invalid credentials - Password mismatch' });
     }
+
+    // Company and shop access come only from memberships, never from the EMPLOYEE type itself.
+    const tokenPayload = { id: user.id, email: user.email, userType };
+    if (userType === 'EMPLOYEE') tokenPayload.sv = user.sessionVersion ?? 0;
+    const principal = await resolvePrincipal(tokenPayload);
+    if (!principal.user) {
+      return res.status(403).json({
+        error: 'This account has no active access. Please contact your shop owner or administrator.',
+        code: principal.code,
+      });
+    }
     
     // Generate JWT - Extended to 7 days for better mobile UX
     const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-        
-        userType
-      },
+      tokenPayload,
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '7d' }
     );
@@ -154,10 +161,10 @@ const login = async (req, res) => {
     });
     
     console.log(token)
-    const { password: _, ...userWithoutPassword } = user;
+    const { password: _, resetToken: _rt, resetTokenExpiry: _rte, sessionVersion: _sv, ...userWithoutPassword } = user;
     return res.status(200).json({
       message: 'Login successful',
-      user: { ...userWithoutPassword, userType },
+      user: { ...userWithoutPassword, userType, ...describeAccess(principal.user) },
       token: token // Send token in response body as backup
     });
   } catch (error) {
@@ -368,21 +375,21 @@ const verify = async (req, res) => {
     }
     
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    console.log('Token verified, user:', decoded);
 
-    if( decoded.userType == "EMPLOYEE"){
-      const user = await prisma.empolyee.findUnique({
-        where: { id: decoded.id },
-        select: { name: true },
-      });
-
-      console.log("hitted employ",user.name)
+    if (decoded.userType === 'EMPLOYEE' || decoded.userType === 'ADMIN') {
+      const principal = await resolvePrincipal(decoded);
+      if (!principal.user) {
+        return res.status(principal.status).json({ error: principal.error, code: principal.code });
+      }
+      const { user } = principal;
       return res.status(200).json({
         user: {
-          id: decoded.id,
-          email: decoded.email,
-          userType: decoded.userType,
-          name: user.name
+          id: user.id,
+          email: user.email,
+          userType: user.userType,
+          name: user.name,
+          shopId: user.shopId,
+          ...describeAccess(user)
         }
       });
     }
@@ -395,6 +402,7 @@ const verify = async (req, res) => {
           name: true,
           email: true,
           mobile: true,
+          shopId: true,
           earnings: true,
           subscriptionStatus: true,
           trialStartDate: true,
@@ -430,19 +438,14 @@ const verify = async (req, res) => {
         user: {
           ...user,
           userType: decoded.userType,
-          subscriptionInfo
+          subscriptionInfo,
+          companyAccess: null,
+          shopAccess: null
         }
       });
     }
     
-    return res.status(200).json({
-      user: {
-        id: decoded.id,
-        email: decoded.email,
-        userType: decoded.userType,
-        name: decoded.name
-      }
-    });
+    return res.status(401).json({ error: 'Invalid or expired token' });
   } catch (error) {
     console.error('Auth error:', error);
     return res.status(401).json({ error: 'Invalid or expired token' });

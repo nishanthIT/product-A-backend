@@ -49,8 +49,8 @@ const buildUpdateSummary = (logs) => {
 
 const emp_dash_handler = async (req, res)=> {
   try {
-    // Get the employee ID from the query parameter
-    const { employeeId } = req.query;
+    // Staff see their own stats; only company admins may look up another employee.
+    const employeeId = req.user.userType === 'ADMIN' ? req.query.employeeId : req.user.id;
     
     if (!employeeId) {
       return res.status(400).json({ error: 'Employee ID is required' });

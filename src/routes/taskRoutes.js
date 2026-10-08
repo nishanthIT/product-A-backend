@@ -1,27 +1,16 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated, requireShopFeature, requireShopMembershipForEmployees } from '../middleware/authware.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
+import { userRoom } from '../services/realtime.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    req.user = user;
-    next();
-  });
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.TASKS)];
+// Starting/completing your own assignment is recording work, not editing the task.
+const taskProgressAuth = [isAuthenticated, requireShopFeature(SHOP_FEATURES.TASKS, 'write')];
 
 // Customer-only middleware (Customers are shop owners/admins)
 const requireCustomer = (req, res, next) => {
@@ -107,6 +96,8 @@ router.get('/', authenticateToken, async (req, res) => {
       assignments: task.assignments.map(a => ({
         id: a.id,
         employee: a.employee,
+        isStarted: a.isStarted,
+        startedAt: a.startedAt,
         isCompleted: a.isCompleted,
         completedAt: a.completedAt
       })),
@@ -151,16 +142,18 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
 
-    // Verify all employees belong to this shop
-    const employees = await prisma.empolyee.findMany({
+    // Verify all employees are ACTIVE in this shop and allowed to use tasks
+    const assignable = await prisma.shopEmployeeMembership.count({
       where: {
-        id: { in: uniqueEmployeeIds },
-        shopId: shopId
+        employeeId: { in: uniqueEmployeeIds },
+        shopId,
+        status: 'ACTIVE',
+        permissions: { has: SHOP_FEATURES.TASKS }
       }
     });
 
-    if (employees.length !== uniqueEmployeeIds.length) {
-      return res.status(400).json({ error: 'Some employees are not in your shop' });
+    if (assignable !== uniqueEmployeeIds.length) {
+      return res.status(400).json({ error: 'Some employees are not in your shop or do not have task access' });
     }
 
     // Create task with assignments
@@ -205,7 +198,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
           const employeeId = assignment.employee?.id;
           if (!employeeId) continue;
 
-          req.io.to(`user_${employeeId}`).emit('task_assigned', {
+          req.io.to(userRoom('EMPLOYEE', employeeId)).emit('task_assigned', {
             type: 'task_assigned',
             title: 'New Task Assigned',
             message: `You have been assigned a new task:\n\"${task.title}\"\nTap to view the task.`,
@@ -261,50 +254,34 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
     if (dueDate !== undefined) updateData.dueDate = dueDate ? new Date(dueDate) : null;
     if (status !== undefined) updateData.status = status;
 
-    // Update task
-    const task = await prisma.task.update({
-      where: { id: taskId },
-      data: updateData,
-      include: {
-        createdBy: {
-          select: { id: true, name: true }
-        },
-        assignments: {
-          include: {
-            employee: {
-              select: { id: true, name: true, email: true }
-            }
-          }
-        }
-      }
-    });
-
-    // If employeeIds provided, update assignments
+    // Assignment diff: existing rows (and their progress) are kept, even for since-deactivated
+    // employees; only newly added employees must be ACTIVE members of this shop.
+    let assignmentOps = [];
     if (employeeIds !== undefined) {
-      // Verify all employees belong to this shop
-      const employees = await prisma.empolyee.findMany({
-        where: {
-          id: { in: employeeIds.map(id => parseInt(id)) },
-          shopId: shopId
+      const wanted = [...new Set(employeeIds.map((id) => parseInt(id, 10)).filter(Number.isInteger))];
+      const existing = await prisma.taskAssignment.findMany({ where: { taskId }, select: { employeeId: true } });
+      const existingIds = new Set(existing.map((a) => a.employeeId));
+      const added = wanted.filter((id) => !existingIds.has(id));
+      const removed = [...existingIds].filter((id) => !wanted.includes(id));
+
+      if (added.length > 0) {
+        const activeMembers = await prisma.shopEmployeeMembership.count({
+          where: { employeeId: { in: added }, shopId, status: 'ACTIVE', permissions: { has: SHOP_FEATURES.TASKS } }
+        });
+        if (activeMembers !== added.length) {
+          return res.status(400).json({ error: 'Some employees are not in your shop or do not have task access' });
         }
-      });
-
-      if (employees.length !== employeeIds.length) {
-        return res.status(400).json({ error: 'Some employees are not in your shop' });
       }
-
-      // Delete existing assignments and create new ones
-      await prisma.taskAssignment.deleteMany({
-        where: { taskId }
-      });
-
-      await prisma.taskAssignment.createMany({
-        data: employeeIds.map(empId => ({
-          taskId,
-          employeeId: parseInt(empId)
-        }))
-      });
+      assignmentOps = [
+        ...(removed.length ? [prisma.taskAssignment.deleteMany({ where: { taskId, employeeId: { in: removed } } })] : []),
+        ...(added.length ? [prisma.taskAssignment.createMany({ data: added.map((employeeId) => ({ taskId, employeeId })) })] : []),
+      ];
     }
+
+    await prisma.$transaction([
+      prisma.task.update({ where: { id: taskId }, data: updateData }),
+      ...assignmentOps,
+    ]);
 
     // Fetch updated task
     const updatedTask = await prisma.task.findUnique({
@@ -368,7 +345,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
 // ===== EMPLOYEE ENDPOINTS =====
 
 // GET /api/tasks/my-tasks - Get tasks assigned to current employee
-router.get('/my-tasks', authenticateToken, async (req, res) => {
+router.get('/my-tasks', authenticateToken, requireShopMembershipForEmployees, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
 
@@ -377,7 +354,7 @@ router.get('/my-tasks', authenticateToken, async (req, res) => {
     }
 
     const assignments = await prisma.taskAssignment.findMany({
-      where: { employeeId: userId },
+      where: { employeeId: userId, task: { shopId: req.user.shopId } },
       include: {
         task: {
           include: {
@@ -416,7 +393,7 @@ router.get('/my-tasks', authenticateToken, async (req, res) => {
 });
 
 // PUT /api/tasks/start/:assignmentId - Mark task as started/in-progress (Employee)
-router.put('/start/:assignmentId', authenticateToken, async (req, res) => {
+router.put('/start/:assignmentId', taskProgressAuth, requireShopMembershipForEmployees, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
     const assignmentId = req.params.assignmentId;
@@ -426,11 +403,12 @@ router.put('/start/:assignmentId', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Only employees can start tasks' });
     }
 
-    // Verify assignment belongs to this employee
+    // Verify assignment belongs to this employee in their current shop
     const assignment = await prisma.taskAssignment.findFirst({
       where: { 
         id: assignmentId,
-        employeeId: userId
+        employeeId: userId,
+        task: { shopId: req.user.shopId }
       },
       include: {
         task: true
@@ -494,7 +472,7 @@ router.put('/start/:assignmentId', authenticateToken, async (req, res) => {
 });
 
 // PUT /api/tasks/complete/:assignmentId - Mark task as completed (Employee)
-router.put('/complete/:assignmentId', authenticateToken, async (req, res) => {
+router.put('/complete/:assignmentId', taskProgressAuth, requireShopMembershipForEmployees, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
     const assignmentId = req.params.assignmentId;
@@ -504,11 +482,12 @@ router.put('/complete/:assignmentId', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Only employees can complete tasks' });
     }
 
-    // Verify assignment belongs to this employee
+    // Verify assignment belongs to this employee in their current shop
     const assignment = await prisma.taskAssignment.findFirst({
       where: { 
         id: assignmentId,
-        employeeId: userId
+        employeeId: userId,
+        task: { shopId: req.user.shopId }
       },
       include: {
         task: true
@@ -517,6 +496,17 @@ router.put('/complete/:assignmentId', authenticateToken, async (req, res) => {
 
     if (!assignment) {
       return res.status(404).json({ error: 'Task assignment not found' });
+    }
+
+    // Repeat taps / retries must not rewrite the original completion time.
+    if (isCompleted !== false && assignment.isCompleted) {
+      return res.json({
+        success: true,
+        message: 'Task already completed',
+        alreadyCompleted: true,
+        taskStatus: assignment.task.status,
+        assignment,
+      });
     }
 
     // Update assignment - also set isStarted true if completing
@@ -571,6 +561,8 @@ router.put('/complete/:assignmentId', authenticateToken, async (req, res) => {
     res.json({ 
       success: true, 
       message: isCompleted !== false ? 'Task marked as completed' : 'Task marked as incomplete',
+      alreadyCompleted: false,
+      taskStatus: newStatus,
       assignment: updatedAssignment
     });
   } catch (error) {

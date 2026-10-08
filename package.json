@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
+    "test": "node --test --test-concurrency=1 \"tests/*.test.js\"",
+    "migrate:employee-memberships": "node scripts/migrateEmployeeMemberships.js",
     "import-products": "node scripts/importProductData.js",
     "import-deebee": "node scripts/importDeebeeData.js",
     "fast-import": "node scripts/fastImport.js",

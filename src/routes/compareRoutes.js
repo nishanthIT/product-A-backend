@@ -1,24 +1,12 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated } from '../middleware/authware.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const authenticateToken = (req, res, next) => {
-  try {
-    let token = null;
-    if (req.cookies?.auth_token) token = req.cookies.auth_token;
-    else if (req.headers.authorization?.startsWith('Bearer ')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-    if (!token) return res.status(401).json({ error: 'Authentication required' });
-    req.user = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = isAuthenticated;
 
 const num = (v) => (v == null ? null : Number.parseFloat(v));
 

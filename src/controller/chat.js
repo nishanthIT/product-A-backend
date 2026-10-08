@@ -2,6 +2,8 @@ import { PrismaClient } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
 import cacheService from '../services/cacheService.js';
+import { getChatAccess } from '../services/chatAccess.js';
+import { userKey, userRoom } from '../services/realtime.js';
 
 const prisma = new PrismaClient();
 
@@ -12,7 +14,7 @@ export const getUserChats = async (req, res) => {
     const userType = req.user.userType;
 
     // Try to get cached chats first
-    const cachedChats = await cacheService.getCachedUserChats(userId);
+    const cachedChats = await cacheService.getCachedUserChats(userKey(userType, userId));
     if (cachedChats) {
       return res.status(200).json({ success: true, chats: cachedChats });
     }
@@ -80,12 +82,12 @@ export const getUserChats = async (req, res) => {
           console.log('✅ Created shop group chat:', groupChat.id);
         }
       }
-    } else if (userType === 'EMPLOYEE') {
-      const employee = await prisma.empolyee.findUnique({
-        where: { id: userId },
-        select: { shop: { select: { groupChatId: true } } }
+    } else if (userType === 'EMPLOYEE' && req.user.shopId) {
+      const shop = await prisma.shop.findUnique({
+        where: { id: req.user.shopId },
+        select: { groupChatId: true }
       });
-      shopGroupChatId = employee?.shop?.groupChatId;
+      shopGroupChatId = shop?.groupChatId;
     }
 
     // Build OR conditions for chat query
@@ -208,7 +210,7 @@ export const getUserChats = async (req, res) => {
     }));
 
     // Cache the chats for this user
-    await cacheService.cacheUserChats(userId, formattedChats);
+    await cacheService.cacheUserChats(userKey(userType, userId), formattedChats);
 
     res.status(200).json({ success: true, chats: formattedChats });
   } catch (error) {
@@ -346,12 +348,12 @@ export const createChat = async (req, res) => {
 
     // Invalidate chat list cache for ALL participants so they get fresh data
     for (const participant of chat.participants) {
-      await cacheService.invalidateUserChats(participant.userId);
+      await cacheService.invalidateUserChats(userKey(participant.userType, participant.userId));
     }
 
     // Notify all participants via Socket.IO
     chat.participants.forEach(participant => {
-      req.io.to(`user_${participant.userId}`).emit('new_chat_created', {
+      req.io.to(userRoom(participant.userType, participant.userId)).emit('new_chat_created', {
         chatId: chat.id,
         chatType: chat.type,
         chatName: chat.name,
@@ -381,6 +383,15 @@ export const getChatById = async (req, res) => {
     const userType = req.user.userType;
     const { chatId } = req.params;
     const { page = 1, limit = 50 } = req.query;
+
+    // Shop group chats are visible only through the caller's current shop.
+    const access = await getChatAccess(req.user, chatId);
+    if (!access) {
+      return res.status(404).json({ success: false, message: 'Chat not found' });
+    }
+    if (!access.canRead) {
+      return res.status(403).json({ success: false, message: 'You do not have access to this chat' });
+    }
 
     // Try to get cached messages for page 1
     if (parseInt(page) === 1) {
@@ -623,15 +634,10 @@ export const sendMessage = async (req, res) => {
       }
     });
 
-    // If not a participant, check if this is a shop group chat or ALL Chat
+    // If not a participant, only the global chat or the caller's own shop group chat may be joined
     if (!participant) {
-      const chat = await prisma.chat.findUnique({
-        where: { id: chatId },
-        select: { type: true, name: true }
-      });
-
-      // If it's a GROUP chat, automatically add user as participant
-      if (chat && chat.type === 'GROUP') {
+      const access = await getChatAccess(req.user, chatId);
+      if (access?.canJoin) {
         participant = await prisma.chatParticipant.create({
           data: {
             chatId,
@@ -641,6 +647,12 @@ export const sendMessage = async (req, res) => {
         });
       } else {
         return res.status(403).json({ success: false, message: 'You are not a participant of this chat' });
+      }
+    } else {
+      // A leftover participant row (e.g. after deactivation) must not reopen a shop group chat.
+      const access = await getChatAccess(req.user, chatId);
+      if (!access?.canRead) {
+        return res.status(403).json({ success: false, message: 'You do not have access to this chat' });
       }
     }
 
@@ -701,15 +713,15 @@ export const sendMessage = async (req, res) => {
 
     // Broadcast message to all users in the chat room via Socket.IO (except sender)
     if (req.io) {
-      const senderSocketId = req.userSockets?.get(userId);
+      const senderSocketId = req.userSockets?.get(userKey(userType, userId));
       
       // Invalidate user chats cache for all participants
       const chatParticipants = await prisma.chatParticipant.findMany({
         where: { chatId },
-        select: { userId: true }
+        select: { userId: true, userType: true }
       });
       for (const p of chatParticipants) {
-        await cacheService.invalidateUserChats(p.userId);
+        await cacheService.invalidateUserChats(userKey(p.userType, p.userId));
       }
       
       const messagePayload = {
@@ -730,10 +742,9 @@ export const sendMessage = async (req, res) => {
       // This ensures real-time delivery even if user is on a different screen
       for (const participant of chatParticipants) {
         // Skip the sender
-        if (participant.userId === userId) continue;
+        if (participant.userId === userId && participant.userType === userType) continue;
         
-        const participantUserRoom = `user_${participant.userId}`;
-        console.log(`📨 Also emitting to user room: ${participantUserRoom}`);
+        const participantUserRoom = userRoom(participant.userType, participant.userId);
         req.io.to(participantUserRoom).emit('message_received', messagePayload);
       }
     }
@@ -869,30 +880,23 @@ export const getAllUsers = async (req, res) => {
 
     let allUsers = [];
 
-    // EMPLOYEE users can only see their shop owner (CUSTOMER who created them)
+    // EMPLOYEE: shop employees see the owner of the shop they are ACTIVE in;
+    // company staff additionally see customers for support chats.
     if (currentUserType === 'EMPLOYEE') {
-      // Get the employee's shop and createdByCustomerId
-      const employee = await prisma.empolyee.findUnique({
-        where: { id: currentUserId },
-        select: { shopId: true, createdByCustomerId: true }
-      });
+      const shopId = req.user.shopId;
+      const customerFilter = req.user.company
+        ? searchFilter
+        : shopId ? { shopId, ...searchFilter } : null;
 
-      // Get the Customer (shop owner) who owns this shop or created this employee
-      const customers = await prisma.customer.findMany({
-        where: {
-          OR: [
-            { shopId: employee?.shopId },
-            { id: employee?.createdByCustomerId }
-          ],
-          ...searchFilter
-        },
+      const customers = customerFilter ? await prisma.customer.findMany({
+        where: customerFilter,
         select: {
           id: true,
           name: true,
           email: true,
           userType: true
         }
-      });
+      }) : [];
 
       allUsers = customers.map(user => ({
         id: user.id.toString(),

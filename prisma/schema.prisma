@@ -20,6 +20,7 @@ model Admin {
   employees        Empolyee[]    // Employees created by this admin
   shop             Shop?         @relation(fields: [shopId], references: [id], onDelete: SetNull)
   lists            List[]        @relation("AdminLists")
+  staffGrants      CompanyStaffMembership[]
 
   @@index([shopId])
 }
@@ -45,6 +46,7 @@ model Customer {
   shop               Shop?           @relation(fields: [shopId], references: [id], onDelete: SetNull)
   employees          Empolyee[]      @relation("CustomerEmployees") // Employees created by this customer
   tasksCreated       Task[]          @relation("TasksCreated") // Tasks created by this admin
+  shopEmployeeMemberships ShopEmployeeMembership[]
 
   @@index([shopId])
 }
@@ -96,9 +98,11 @@ model Shop {
   incidentLogs     IncidentLog[]     // Incident and accident logs in this shop
   wasteRecords     WasteRecord[]     // Waste/disposal records in this shop
   ageRestrictedRecords AgeRestrictedRecord[] // Age-restricted product request records
+  ageRestrictionRecords AgeRestrictionRecord[] // Age restriction incident records (shop tool)
   certificates     ShopCertificate[] // Shop certificates and documents
   supplierPayoutRecords SupplierPayoutRecord[] // Supplier payout records
   shiftSheetRecords ShiftSheetRecord[] // Daily shift sheet records
+  employeeMemberships ShopEmployeeMembership[]
 
   @@index([shopType])
 }
@@ -124,6 +128,25 @@ model AgeRestrictedRecord {
   @@index([childGender])
   @@index([productCategory])
   @@index([recordedBy])
+  @@index([createdById, createdByType])
+}
+
+// ===== AGE RESTRICTION INCIDENT RECORDS (shop tool) =====
+model AgeRestrictionRecord {
+  id            String    @id @default(cuid())
+  shopId        String
+  occurredAt    DateTime
+  description   String
+  imageUrl      String?
+  createdById   Int
+  createdByType UserType
+  updatedById   Int?
+  updatedByType UserType?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  shop          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId, occurredAt])
   @@index([createdById, createdByType])
 }
 
@@ -174,12 +197,19 @@ model Empolyee {
   email               String           @unique
   password            String
   userType            UserType         @default(EMPLOYEE)
-  shopId              String?          // Shop this employee belongs to
+  // Server-maintained mirror of the ACTIVE ShopEmployeeMembership.shopId (null when none).
+  // Never grants access on its own; written only by services/membershipService.js.
+  shopId              String?
   createdByAdminId    Int?             // Admin who created this employee (legacy)
   createdByCustomerId Int?             // Customer (shop owner) who created this employee
   resetToken          String?
   resetTokenExpiry    DateTime?
   createdAt           DateTime         @default(now())
+  sessionVersion      Int              @default(0) // Bumped to invalidate issued JWTs
+  lastActiveAt        DateTime?
+  companyMembership   CompanyStaffMembership?
+  shopMemberships     ShopEmployeeMembership[]
+  accessReviews       EmployeeAccessReview[]
   actionLog           ActionLog[]
   productAdded        ProductAtShop[]
   shop                Shop?            @relation(fields: [shopId], references: [id], onDelete: SetNull)
@@ -191,6 +221,88 @@ model Empolyee {
   @@index([shopId])
   @@index([createdByAdminId])
   @@index([createdByCustomerId])
+}
+
+// ===== EMPLOYEE MEMBERSHIPS =====
+// Company staff and shop employees share the Empolyee login table, but access is
+// granted only by these independent membership rows.
+model CompanyStaffMembership {
+  id               String           @id @default(cuid())
+  employeeId       Int              @unique
+  role             CompanyStaffRole @default(STAFF)
+  permissions      String[]         @default([])
+  status           MembershipStatus @default(ACTIVE)
+  grantedByAdminId Int?
+  source           String           @default("COMPANY_STAFF_FLOW")
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  deactivatedAt    DateTime?
+  employee         Empolyee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  grantedByAdmin   Admin?           @relation(fields: [grantedByAdminId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+}
+
+model ShopEmployeeMembership {
+  id                  String           @id @default(cuid())
+  employeeId          Int
+  shopId              String
+  role                ShopEmployeeRole @default(EMPLOYEE)
+  permissions         String[]         @default([])
+  status              MembershipStatus @default(ACTIVE)
+  createdByCustomerId Int?
+  source              String           @default("SHOP_OWNER_FLOW")
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+  deactivatedAt       DateTime?
+  lastActiveAt        DateTime?
+  employee            Empolyee         @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  shop                Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  createdByCustomer   Customer?        @relation(fields: [createdByCustomerId], references: [id], onDelete: SetNull)
+
+  // The migration also adds a partial unique index: one ACTIVE shop membership per employee.
+  @@unique([employeeId, shopId])
+  @@index([shopId, status])
+}
+
+// Employee records the access migration could not classify safely.
+model EmployeeAccessReview {
+  id             String                 @id @default(cuid())
+  employeeId     Int
+  reason         String
+  evidence       Json
+  status         AccessReviewStatus     @default(OPEN)
+  resolution     String?
+  resolutionNote String?
+  resolvedById   Int?
+  createdAt      DateTime               @default(now())
+  resolvedAt     DateTime?
+  employee       Empolyee               @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, reason])
+  @@index([status])
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  INACTIVE
+  REMOVED
+}
+
+enum CompanyStaffRole {
+  STAFF
+  MANAGER
+}
+
+enum ShopEmployeeRole {
+  EMPLOYEE
+  MANAGER
+}
+
+enum AccessReviewStatus {
+  OPEN
+  RESOLVED
 }
 
 model ActionLog {

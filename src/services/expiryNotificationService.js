@@ -1,6 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import cron from 'node-cron';
 import nodemailer from 'nodemailer';
+import { userRoom } from './realtime.js';
+import { SHOP_FEATURES } from './accessControl.js';
 
 const prisma = new PrismaClient();
 
@@ -84,7 +86,7 @@ class ExpiryNotificationService {
         select: { id: true, email: true, name: true },
       }),
       prisma.empolyee.findMany({
-        where: { shopId },
+        where: { shopMemberships: { some: { shopId, status: 'ACTIVE', permissions: { has: SHOP_FEATURES.EXPIRY } } } },
         select: { id: true, email: true, name: true },
       }),
     ]);
@@ -117,7 +119,7 @@ class ExpiryNotificationService {
 
     for (const recipient of recipients) {
       if (!recipient.userId) continue;
-      this.io.to(`user_${recipient.userId}`).emit('expiry_notification', {
+      this.io.to(userRoom(recipient.userType, recipient.userId)).emit('expiry_notification', {
         ...notification,
         recipientUserType: recipient.userType,
       });

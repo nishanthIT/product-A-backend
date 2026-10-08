@@ -8,7 +8,7 @@ import {
   seedCategories,
   getProductCategories
 } from "../controller/category.js";
-import { isAuthenticated, isAdmin, isEmployee } from "../middleware/authware.js";
+import { isAuthenticated, isAdmin } from "../middleware/authware.js";
 
 const router = express.Router();
 

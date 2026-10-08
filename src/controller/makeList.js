@@ -559,7 +559,8 @@ const getUserLists = async (req, res) => {
     // Try cache first (only for customers)
     if (userType === 'CUSTOMER') {
       const cachedLists = await cacheService.getCachedUserLists(userId);
-      if (cachedLists) {
+      // Copied lists change whenever their creator edits them, so those are never served from cache.
+      if (cachedLists && !cachedLists.some((l) => l.isShared || l.copiedFromName)) {
         console.log(`⚡ Returning cached lists for user ${userId}`);
         return res.status(200).json({ lists: cachedLists });
       }
@@ -655,6 +656,7 @@ const getUserLists = async (req, res) => {
         itemCount: uniqueProducts.size,
         copiedFromId: list.copiedFromId,
         copiedFromName: copiedFromName,
+        isShared: trackedListIdSet.has(list.id),
         createdAt: list.createdAt,
         updatedAt: list.updatedAt,
       };
@@ -663,7 +665,7 @@ const getUserLists = async (req, res) => {
     formattedLists.sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
 
     // Cache the result (only for customers)
-    if (userType === 'CUSTOMER') {
+    if (userType === 'CUSTOMER' && !formattedLists.some((l) => l.isShared)) {
       await cacheService.cacheUserLists(userId, formattedLists);
     }
 

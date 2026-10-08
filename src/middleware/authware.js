@@ -1,98 +1,91 @@
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
+import { hasCompanyPermission, hasShopFeatureAccess, hasShopPermission, resolvePrincipal } from '../services/accessControl.js';
 
-const prisma = new PrismaClient();
+const readToken = (req) => {
+  if (req.cookies && req.cookies.auth_token) return req.cookies.auth_token;
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+    return req.headers.authorization.split(' ')[1];
+  }
+  return null;
+};
 
-// Middleware to verify if the user is authenticated
+// Verifies the JWT and reloads memberships on every request, so deactivated
+// memberships and bumped session versions take effect for existing tokens.
 const isAuthenticated = async (req, res, next) => {
+  const token = readToken(req);
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required - No token found' });
+  }
+
+  let decoded;
   try {
-    // Try to get token from: 1) cookie, 2) authorization header (for localStorage)
-    let token = null;
-    
-    // First check if token exists in cookies
-    if (req.cookies && req.cookies.auth_token) {
-      token = req.cookies.auth_token;
-    } 
-    // If not in cookies, check authorization header
-    else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-      token = req.headers.authorization.split(' ')[1];
+    decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+
+  try {
+    const result = await resolvePrincipal(decoded);
+    if (!result.user) {
+      return res.status(result.status).json({ error: result.error, code: result.code });
     }
-    
-    if (!token) {
-      return res.status(401).json({ error: 'Authentication required - No token found' });
-    }
-    
-    // Verify the token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    
-    // Attach the user info to the request object
-    req.user = {
-      id: decoded.id,
-      email: decoded.email,
-      userType: decoded.userType
-    };
-    
-    // For EMPLOYEE userType, fetch additional info from database
-    if (decoded.userType === 'EMPLOYEE') {
-      const user = await prisma.empolyee.findUnique({
-        where: { id: decoded.id },
-        select: { name: true }
-      });
-      
-      if (user) {
-        req.user.name = user.name;
-      }
-    }
-    
+    req.user = result.user;
     next();
   } catch (error) {
     console.error('Auth middleware error:', error);
-    return res.status(401).json({ error: 'Invalid or expired token' });
-  }
-};
-
-// Middleware to check if the user is an admin
-const isAdmin = async (req, res, next) => {
-  try {
-    // First make sure the user is authenticated
-    if (!req.user) {
-      // If isAuthenticated middleware wasn't run first
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    
-    // Check if the user is an admin
-    if (req.user.userType === 'ADMIN') {
-      return next(); // Allow access if admin
-    }
-    
-    // If not admin, deny access
-    return res.status(403).json({ error: 'Access denied. Requires admin privileges' });
-  } catch (error) {
-    console.error('Admin check error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// Middleware to check if the user is an employee
-const isEmployee = async (req, res, next) => {
-  try {
-    // First make sure the user is authenticated
-    if (!req.user) {
-      // If isAuthenticated middleware wasn't run first
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-    
-    // Check if the user is an employee or admin (admin has all privileges)
-    if (req.user.userType === 'EMPLOYEE' || req.user.userType === 'ADMIN') {
-      return next(); // Allow access
-    }
-    
-    // If not employee or admin, deny access
-    return res.status(403).json({ error: 'Access denied. Requires employee or admin privileges' });
-  } catch (error) {
-    console.error('Employee check error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+// Company super-admin (Admin table) only.
+const isAdmin = (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (req.user.userType === 'ADMIN') return next();
+  return res.status(403).json({ error: 'Access denied. Requires admin privileges' });
 };
 
-export { isAuthenticated, isAdmin, isEmployee };
+// Requires every listed company permission. Shop owners and shop employees never hold these.
+const requireCompanyPermission = (...permissions) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (permissions.every((p) => hasCompanyPermission(req.user, p))) return next();
+  return res.status(403).json({ error: 'Company staff permission required', code: 'COMPANY_PERMISSION_REQUIRED' });
+};
+
+// Any active company membership (or Admin).
+const requireCompanyStaff = (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (req.user.company) return next();
+  return res.status(403).json({ error: 'Company staff access required', code: 'COMPANY_PERMISSION_REQUIRED' });
+};
+
+// Employees may only use shop resources through an ACTIVE shop membership.
+const requireShopMembershipForEmployees = (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (req.user.userType !== 'EMPLOYEE' || req.user.shopId) return next();
+  return res.status(403).json({ error: 'No active shop membership', code: 'SHOP_MEMBERSHIP_REQUIRED' });
+};
+
+// Shop tools the owner can switch on/off per employee, with read (GET), write (POST) and edit (PUT/PATCH/DELETE) access.
+const ACCESS_LEVEL_BY_METHOD = { GET: 'read', HEAD: 'read', OPTIONS: 'read', POST: 'write' };
+const requireShopFeature = (feature, level) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (req.user.userType !== 'EMPLOYEE') return next();
+  if (!req.user.shopId) {
+    return res.status(403).json({ error: 'No active shop membership', code: 'SHOP_MEMBERSHIP_REQUIRED' });
+  }
+  const required = level || ACCESS_LEVEL_BY_METHOD[req.method] || 'edit';
+  if (hasShopFeatureAccess(req.user, feature, required)) return next();
+  const message = hasShopPermission(req.user, feature)
+    ? `Your shop owner has not given you ${required} access here`
+    : 'Your shop owner has not given you access to this feature';
+  return res.status(403).json({ error: message, code: 'SHOP_FEATURE_DISABLED', feature, level: required });
+};
+
+export {
+  isAuthenticated,
+  isAdmin,
+  requireCompanyPermission,
+  requireCompanyStaff,
+  requireShopMembershipForEmployees,
+  requireShopFeature,
+};

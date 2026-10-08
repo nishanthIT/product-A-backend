@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
 import cacheService from '../services/cacheService.js';
 
 const router = express.Router();
@@ -26,23 +27,8 @@ const withRetry = async (operation, maxRetries = 3, delayMs = 1000) => {
   }
 };
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    req.user = user;
-    next();
-  });
-};
+// Shared auth; employees additionally need an ACTIVE shop membership to touch lists
+const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS)];
 
 // Get all lists for the authenticated user
 router.get('/', authenticateToken, async (req, res) => {
@@ -255,19 +241,12 @@ router.get('/:id', authenticateToken, async (req, res) => {
             employeeId: userId
           };
     } else {
-      // Customer can view own lists + tracked lists
-      whereClause = trackingSupported
-        ? {
-            id: listId,
-            OR: [
-              { customerId: userId },
-              { trackedBy: { some: { userId, userType } } }
-            ]
-          }
-        : {
-            id: listId,
-            customerId: userId
-          };
+      // Customer can view own lists + tracked lists, and read any list created in their own shop (e.g. an employee's).
+      const customer = await prisma.customer.findUnique({ where: { id: userId }, select: { shopId: true } });
+      const OR = [{ customerId: userId }];
+      if (trackingSupported) OR.push({ trackedBy: { some: { userId, userType } } });
+      if (customer?.shopId) OR.push({ shopId: customer.shopId });
+      whereClause = { id: listId, OR };
     }
 
     const list = await withRetry(() => prisma.list.findFirst({
@@ -290,7 +269,10 @@ router.get('/:id', authenticateToken, async (req, res) => {
         },
         admin: {
           select: { id: true, name: true }
-        }
+        },
+        ...(trackingSupported && {
+          trackedBy: { where: { userId, userType }, select: { id: true } },
+        }),
       },
     }));
 
@@ -333,9 +315,19 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
     console.log('📦 Database isPurchased states:', transformedProducts.map(p => ({ id: p.id, name: p.productName, isPurchased: p.isPurchased })));
 
+    const { trackedBy, ...listFields } = list;
+    const isMine = userType === 'EMPLOYEE'
+      ? list.employeeId === userId
+      : userType === 'ADMIN'
+      ? list.adminId === userId
+      : list.customerId === userId;
+    const copiedByMe = (trackedBy?.length ?? 0) > 0;
     const responseData = {
-      ...list,
+      ...listFields,
       products: transformedProducts,
+      createdByName: list.employee?.name || list.admin?.name || null,
+      copiedByMe,
+      canEdit: isMine || copiedByMe,
     };
 
     // Don't cache - to avoid race conditions with togglePurchased operations
@@ -988,6 +980,189 @@ router.put('/changeShop', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Error changing product shop:', error);
     res.status(500).json({ error: 'Failed to move product to another shop' });
+  }
+});
+
+// Lists the user may modify: their own, tracked ones, and (admins) their shop's employee lists.
+const buildListAccessWhere = async (listId, userId, userType) => {
+  const trackingSupported = !!prisma.trackedList?.findFirst;
+  if (userType === 'ADMIN') {
+    const admin = await prisma.admin.findUnique({ where: { id: userId }, select: { shopId: true } });
+    return { id: listId, OR: [{ adminId: userId }, { employee: { shopId: admin?.shopId } }] };
+  }
+  const ownerField = userType === 'EMPLOYEE' ? 'employeeId' : 'customerId';
+  return trackingSupported
+    ? { id: listId, OR: [{ [ownerField]: userId }, { trackedBy: { some: { userId, userType } } }] }
+    : { id: listId, [ownerField]: userId };
+};
+
+const loadMovableListProduct = async (req, res) => {
+  const { listId, listProductId } = req.body;
+  const userId = parseInt(req.user.id);
+  const userType = req.user.userType;
+
+  if (!listId || !listProductId) {
+    res.status(400).json({ error: 'listId and listProductId are required' });
+    return null;
+  }
+
+  const list = await withRetry(async () =>
+    prisma.list.findFirst({ where: await buildListAccessWhere(listId, userId, userType) }));
+  if (!list) {
+    res.status(404).json({ error: 'List not found' });
+    return null;
+  }
+
+  const listProduct = await withRetry(() => prisma.listProduct.findFirst({
+    where: { id: listProductId, listId },
+    include: { productAtShop: { include: { shop: true } } },
+  }));
+  if (!listProduct) {
+    res.status(404).json({ error: 'Product not found in list' });
+    return null;
+  }
+  if (listProduct.bundlePromotionId) {
+    res.status(400).json({ error: 'Bundle items cannot be moved to another list' });
+    return null;
+  }
+
+  return { list, listProduct, userId, userType };
+};
+
+// Moves a list item into targetList, merging with the same shop product if already there.
+const moveListProductToList = async (req, { list, listProduct, targetList, userId }) => {
+  const existing = await prisma.listProduct.findFirst({
+    where: { listId: targetList.id, productAtShopId: listProduct.productAtShopId, bundlePromotionId: null },
+  });
+
+  if (existing) {
+    await prisma.$transaction([
+      prisma.listProduct.update({
+        where: { id: existing.id },
+        data: {
+          quantity: (existing.quantity || 1) + (listProduct.quantity || 1),
+          isUrgent: existing.isUrgent || listProduct.isUrgent,
+          isPurchased: false,
+        },
+      }),
+      prisma.listProduct.delete({ where: { id: listProduct.id } }),
+    ]);
+  } else {
+    await prisma.listProduct.update({
+      where: { id: listProduct.id },
+      data: { listId: targetList.id, isPurchased: false },
+    });
+  }
+
+  await Promise.all([
+    cacheService.invalidateListDetail(list.id),
+    cacheService.invalidateListDetail(targetList.id),
+    cacheService.invalidateUserLists(userId),
+  ]);
+
+  if (req.io) {
+    const productId = listProduct.productAtShop?.productId;
+    if (list.shopId) {
+      req.io.to(`shop_${list.shopId}_lists`).emit('list_product_removed', { listId: list.id, productId });
+    }
+    if (targetList.shopId) {
+      req.io.to(`shop_${targetList.shopId}_lists`).emit('list_product_added', { listId: targetList.id, productId });
+    }
+  }
+
+  return { merged: !!existing };
+};
+
+// Move a list item to another of the user's lists (Collect Mode — product unavailable)
+router.put('/moveToList', authenticateToken, async (req, res) => {
+  try {
+    const { targetListId } = req.body;
+    if (!targetListId) {
+      return res.status(400).json({ error: 'targetListId is required' });
+    }
+
+    const ctx = await loadMovableListProduct(req, res);
+    if (!ctx) return;
+
+    if (targetListId === ctx.list.id) {
+      return res.status(400).json({ error: 'Item is already in this list' });
+    }
+
+    const targetList = await withRetry(async () =>
+      prisma.list.findFirst({ where: await buildListAccessWhere(targetListId, ctx.userId, ctx.userType) }));
+    if (!targetList) {
+      return res.status(404).json({ error: 'Target list not found' });
+    }
+
+    const { merged } = await moveListProductToList(req, { ...ctx, targetList });
+
+    res.json({
+      message: `Moved to ${targetList.name}`,
+      targetListId: targetList.id,
+      targetListName: targetList.name,
+      merged,
+    });
+  } catch (error) {
+    console.error('Error moving product to another list:', error);
+    res.status(500).json({ error: 'Failed to move product to another list' });
+  }
+});
+
+// Mark a list item out of stock: move it into the user's "Out of Stock · <shop>" list (created on demand)
+router.put('/markOutOfStock', authenticateToken, async (req, res) => {
+  try {
+    const ctx = await loadMovableListProduct(req, res);
+    if (!ctx) return;
+    const { userId, userType, listProduct } = ctx;
+
+    const shopName = listProduct.productAtShop?.shop?.name || 'Unknown Shop';
+    const outOfStockName = `Out of Stock · ${shopName}`;
+
+    if (ctx.list.name === outOfStockName) {
+      return res.status(400).json({ error: 'Item is already in the Out of Stock list' });
+    }
+
+    const ownerField = userType === 'EMPLOYEE' ? 'employeeId' : userType === 'ADMIN' ? 'adminId' : 'customerId';
+    let targetList = await withRetry(() => prisma.list.findFirst({
+      where: { [ownerField]: userId, name: outOfStockName },
+      orderBy: { createdAt: 'asc' },
+    }));
+
+    let created = false;
+    if (!targetList) {
+      const listData = {
+        name: outOfStockName,
+        description: `Out of stock at ${shopName} — buy later / restock`,
+        creatorType: userType,
+        [ownerField]: userId,
+      };
+      if (userType === 'EMPLOYEE') {
+        const employee = await prisma.empolyee.findUnique({ where: { id: userId }, select: { shopId: true } });
+        listData.shopId = employee?.shopId;
+      } else if (userType === 'ADMIN') {
+        const admin = await prisma.admin.findUnique({ where: { id: userId }, select: { shopId: true } });
+        listData.shopId = admin?.shopId;
+      }
+      targetList = await prisma.list.create({ data: listData });
+      created = true;
+
+      if (targetList.shopId && req.io) {
+        req.io.to(`shop_${targetList.shopId}_lists`).emit('list_created', { listId: targetList.id });
+      }
+    }
+
+    const { merged } = await moveListProductToList(req, { ...ctx, targetList });
+
+    res.json({
+      message: `Moved to ${targetList.name}`,
+      targetListId: targetList.id,
+      targetListName: targetList.name,
+      created,
+      merged,
+    });
+  } catch (error) {
+    console.error('Error marking product out of stock:', error);
+    res.status(500).json({ error: 'Failed to mark product as out of stock' });
   }
 });
 

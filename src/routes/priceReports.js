@@ -1,9 +1,12 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { orderByRank, searchProductIds } from '../services/productSearchService.js';
+import { isAuthenticated, requireCompanyPermission } from '../middleware/authware.js';
+import { COMPANY_PERMISSIONS } from '../services/accessControl.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
+const requireReviewer = requireCompanyPermission(COMPANY_PERMISSIONS.PRICE_REPORTS_REVIEW);
 
 // Levenshtein distance function for fuzzy matching
 function levenshteinDistance(str1, str2) {
@@ -54,28 +57,7 @@ function fuzzyMatchWord(searchWord, text, maxDistance = 2) {
   return false;
 }
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  console.log('🔐 Auth header:', authHeader ? 'Present' : 'Missing');
-  console.log('🔑 Token extracted:', token ? 'Present' : 'Missing');
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      console.log('❌ Token verification failed:', err.message);
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    console.log('✅ Token verified, user:', user);
-    req.user = user;
-    next();
-  });
-};
+const authenticateToken = isAuthenticated;
 
 // GET /api/price-reports - Get user's price reports
 router.get('/', authenticateToken, async (req, res) => {
@@ -191,7 +173,7 @@ router.post('/', authenticateToken, async (req, res) => {
 // ADMIN ENDPOINTS
 
 // GET /api/price-reports/admin/pending - Get pending reports for admin approval
-router.get('/admin/pending', async (req, res) => {
+router.get('/admin/pending', authenticateToken, requireReviewer, async (req, res) => {
   try {
     const reports = await prisma.priceReport.findMany({
       where: { status: 'PENDING' },
@@ -213,7 +195,7 @@ router.get('/admin/pending', async (req, res) => {
 });
 
 // PUT /api/price-reports/admin/:reportId/approve - Approve a price report
-router.put('/admin/:reportId/approve', async (req, res) => {
+router.put('/admin/:reportId/approve', authenticateToken, requireReviewer, async (req, res) => {
   try {
     const { reportId } = req.params;
     const { adminNotes } = req.body;
@@ -295,7 +277,7 @@ router.put('/admin/:reportId/approve', async (req, res) => {
 });
 
 // PUT /api/price-reports/admin/:reportId/reject - Reject a price report
-router.put('/admin/:reportId/reject', async (req, res) => {
+router.put('/admin/:reportId/reject', authenticateToken, requireReviewer, async (req, res) => {
   try {
     const { reportId } = req.params;
     const { adminNotes } = req.body;
@@ -371,74 +353,30 @@ router.get('/product/:productId/shop/:shopId/price', authenticateToken, async (r
   }
 });
 
-// GET /api/price-reports/products/search - Search products for price reporting with fuzzy matching
+// GET /api/price-reports/products/search - Ranked product search for price reporting
 router.get('/products/search', authenticateToken, async (req, res) => {
   try {
     const { q, limit = 10 } = req.query;
 
-    if (!q || q.trim().length < 2) {
+    if (!q || typeof q !== 'string' || q.trim().length < 2) {
       return res.json({ products: [] });
     }
 
-    const searchTerm = q.trim();
-    const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
-    
-    // Build search conditions for each word
-    const searchConditions = searchWords.map(word => {
-      const conditions = [
-        { title: { contains: word, mode: 'insensitive' } },
-        { barcode: { contains: word, mode: 'insensitive' } }
-      ];
-      
-      // For words longer than 3 characters, also try partial matching
-      if (word.length > 3) {
-        const partialWord = word.substring(0, Math.ceil(word.length * 0.7));
-        if (partialWord.length >= 3) {
-          conditions.push({ title: { contains: partialWord, mode: 'insensitive' } });
-        }
-      }
-      
-      return { OR: conditions };
-    });
+    const take = Math.min(Math.max(parseInt(limit) || 10, 1), 100);
+    const rankedIds = (await searchProductIds(q, { limit: take })).map((r) => r.id);
+    const rows = rankedIds.length
+      ? await prisma.product.findMany({
+          where: { id: { in: rankedIds } },
+          select: {
+            id: true,
+            title: true,
+            barcode: true,
+            img: true
+          },
+        })
+      : [];
 
-    let products = await prisma.product.findMany({
-      where: {
-        AND: searchConditions
-      },
-      select: {
-        id: true,
-        title: true,
-        barcode: true,
-        img: true
-      },
-      take: parseInt(limit) * 2,
-      orderBy: { title: 'asc' }
-    });
-
-    // If few results, apply fuzzy matching
-    if (products.length < parseInt(limit) / 2) {
-      const broadProducts = await prisma.product.findMany({
-        select: {
-          id: true,
-          title: true,
-          barcode: true,
-          img: true
-        },
-        take: 200,
-        orderBy: { title: 'asc' }
-      });
-      
-      const fuzzyMatched = broadProducts.filter(product => {
-        const searchableText = `${product.title || ''} ${product.barcode || ''}`;
-        return searchWords.every(word => fuzzyMatchWord(word, searchableText, 2));
-      });
-      
-      const existingIds = new Set(products.map(p => p.id));
-      const additionalProducts = fuzzyMatched.filter(p => !existingIds.has(p.id));
-      products = [...products, ...additionalProducts];
-    }
-
-    res.json({ products: products.slice(0, parseInt(limit)) });
+    res.json({ products: orderByRank(rows, rankedIds) });
   } catch (error) {
     console.error('Error searching products:', error);
     res.status(500).json({ error: 'Failed to search products' });
@@ -560,13 +498,8 @@ router.get('/products/:productId/shops', authenticateToken, async (req, res) => 
 // ============ ADMIN ENDPOINTS ============
 
 // GET /api/price-reports/admin/pending - Get all pending price reports for admin review
-router.get('/admin/pending', authenticateToken, async (req, res) => {
+router.get('/admin/pending', authenticateToken, requireReviewer, async (req, res) => {
   try {
-    // Check if user is admin (you can modify this logic based on your user roles)
-    if (req.user.userType !== 'EMPLOYEE' && req.user.userType !== 'ADMIN') {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
     const pendingReports = await prisma.priceReport.findMany({
       where: { status: 'PENDING' },
       include: {
@@ -591,17 +524,9 @@ router.get('/admin/pending', authenticateToken, async (req, res) => {
 });
 
 // POST /api/price-reports/admin/approve/:reportId - Approve a price report
-router.post('/admin/approve/:reportId', authenticateToken, async (req, res) => {
+router.post('/admin/approve/:reportId', authenticateToken, requireReviewer, async (req, res) => {
   try {
     console.log('📝 Approve request received');
-    console.log('👤 User from token:', req.user);
-    console.log('🔑 User type:', req.user?.userType);
-    
-    // Check if user is admin
-    if (req.user.userType !== 'EMPLOYEE' && req.user.userType !== 'ADMIN') {
-      console.log('❌ Access denied. User type:', req.user.userType);
-      return res.status(403).json({ error: 'Admin access required' });
-    }
 
     const { reportId } = req.params;
     const { adminNotes } = req.body;
@@ -673,17 +598,9 @@ router.post('/admin/approve/:reportId', authenticateToken, async (req, res) => {
 });
 
 // POST /api/price-reports/admin/reject/:reportId - Reject a price report
-router.post('/admin/reject/:reportId', authenticateToken, async (req, res) => {
+router.post('/admin/reject/:reportId', authenticateToken, requireReviewer, async (req, res) => {
   try {
     console.log('📝 Reject request received');
-    console.log('👤 User from token:', req.user);
-    console.log('🔑 User type:', req.user?.userType);
-    
-    // Check if user is admin
-    if (req.user.userType !== 'EMPLOYEE' && req.user.userType !== 'ADMIN') {
-      console.log('❌ Access denied. User type:', req.user.userType);
-      return res.status(403).json({ error: 'Admin access required' });
-    }
 
     const { reportId } = req.params;
     const { adminNotes } = req.body;
@@ -727,13 +644,8 @@ router.post('/admin/reject/:reportId', authenticateToken, async (req, res) => {
 });
 
 // GET /api/price-reports/admin/all - Get all price reports with filters
-router.get('/admin/all', authenticateToken, async (req, res) => {
+router.get('/admin/all', authenticateToken, requireReviewer, async (req, res) => {
   try {
-    // Check if user is admin
-    if (req.user.userType !== 'EMPLOYEE' && req.user.userType !== 'ADMIN') {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-
     const { status, limit = 50 } = req.query;
 
     const whereCondition = status ? { status } : {};

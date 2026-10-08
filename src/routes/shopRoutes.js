@@ -1,28 +1,14 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
 import cacheService from '../services/cacheService.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    req.user = user;
-    next();
-  });
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = isAuthenticated;
 
 // Customer-only middleware (Customers are shop owners/admins)
 const requireCustomer = (req, res, next) => {
@@ -94,7 +80,11 @@ router.post('/assign', authenticateToken, requireCustomer, async (req, res) => {
     let shop;
 
     if (shopId) {
-      // Assign to existing shop
+      // Ownership cannot be claimed by submitting another shop's id.
+      const customer = await prisma.customer.findUnique({ where: { id: customerId }, select: { shopId: true } });
+      if (customer?.shopId !== shopId) {
+        return res.status(403).json({ error: 'You can only use a shop you already own' });
+      }
       shop = await prisma.shop.findUnique({ where: { id: shopId } });
       if (!shop) {
         return res.status(404).json({ error: 'Shop not found' });
@@ -236,24 +226,32 @@ router.get('/employees', authenticateToken, requireCustomer, async (req, res) =>
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
 
-    const employees = await prisma.empolyee.findMany({
-      where: { shopId: customer.shopId },
+    const memberships = await prisma.shopEmployeeMembership.findMany({
+      where: { shopId: customer.shopId, status: { not: 'REMOVED' } },
       select: {
-        id: true,
-        name: true,
-        email: true,
-        phoneNo: true,
-        createdAt: true,
-        lists: {
+        status: true,
+        role: true,
+        employee: {
           select: {
             id: true,
             name: true,
-            createdAt: true
+            email: true,
+            phoneNo: true,
+            createdAt: true,
+            lists: {
+              where: { shopId: customer.shopId },
+              select: {
+                id: true,
+                name: true,
+                createdAt: true
+              }
+            }
           }
         }
       },
       orderBy: { createdAt: 'desc' }
     });
+    const employees = memberships.map((m) => ({ ...m.employee, status: m.status, role: m.role }));
 
     res.json({ success: true, employees });
   } catch (error) {
@@ -276,11 +274,11 @@ router.get('/all-lists', authenticateToken, requireCustomer, async (req, res) =>
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
 
-    // Get all employee lists in this shop
+    // Employee lists belong to the shop they were created in, even after the employee is deactivated.
     const lists = await prisma.list.findMany({
       where: {
         OR: [
-          { employee: { shopId: customer.shopId } },
+          { shopId: customer.shopId, employeeId: { not: null } },
           { customerId: customerId }
         ]
       },
@@ -362,7 +360,7 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
     });
 
     // Check if source list is from the same shop (either employee or customer owned)
-    const sourceShopId = sourceList.employee?.shopId || sourceList.customer?.shopId || sourceList.shopId;
+    const sourceShopId = sourceList.shopId || sourceList.customer?.shopId;
     if (sourceShopId !== customer?.shopId) {
       return res.status(403).json({ error: 'Access denied - list belongs to a different shop' });
     }
@@ -395,7 +393,9 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
 
     res.json({ 
       success: true, 
-      message: existingTrack ? 'Already tracking this list' : 'Live tracking enabled',
+      message: existingTrack
+        ? 'Already in your lists'
+        : `Copied to your lists. It stays in sync with ${sourceList.employee?.name || sourceList.customer?.name || 'the creator'}.`,
       list: sourceList,
       tracking,
       alreadyTracked: !!existingTrack,
@@ -407,7 +407,7 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
 });
 
 // POST /api/shop/employee-copy-list/:listId - Employee tracks a list (no duplicate copy)
-router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, async (req, res) => {
+router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, requireShopFeature(SHOP_FEATURES.LISTS), async (req, res) => {
   try {
     const employeeId = req.user.id;
     const listId = req.params.listId; // List ID is a cuid string
@@ -449,7 +449,7 @@ router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, a
     }
 
     // Verify the list belongs to the same shop
-    const sourceShopId = sourceList.customer?.shopId || sourceList.employee?.shopId;
+    const sourceShopId = sourceList.shopId || sourceList.customer?.shopId;
     if (sourceShopId !== employee.shopId) {
       return res.status(403).json({ error: 'Access denied - list belongs to a different shop' });
     }
@@ -494,6 +494,7 @@ router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, a
 router.get('/available', authenticateToken, requireCustomer, async (req, res) => {
   try {
     const shops = await prisma.shop.findMany({
+      where: { shopType: 'WHOLESALE' },
       select: {
         id: true,
         name: true,

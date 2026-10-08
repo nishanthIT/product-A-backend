@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { indexProduct, refreshIndexedProduct } from '../../services/productSearchService.js';
 
 const prisma = new PrismaClient();
 /**
@@ -498,16 +499,8 @@ const getListItemsSummary = async (req, res) => {
         });
         scopedShopId = admin?.shopId || null;
       }
-    } else if (userType === 'EMPLOYEE') {
-      const employeeId = parseInt(req.user.id, 10);
-      if (!Number.isNaN(employeeId)) {
-        const employee = await prisma.empolyee.findUnique({
-          where: { id: employeeId },
-          select: { shopId: true }
-        });
-        scopedShopId = employee?.shopId || null;
-      }
     }
+    // Company staff are not scoped by any shop membership they may also hold.
 
     const search = String(req.query.search || '').trim().toLowerCase();
     const missingCaseBarcodeOnly = parseBoolean(String(req.query.missingCaseBarcode || 'false'));
@@ -837,22 +830,23 @@ const updateGlobalCaseBarcode = async (req, res) => {
         caseBarcode: true
       }
     });
+    refreshIndexedProduct(itemId);
 
     const updateUserType = String(req.user?.userType || '').toUpperCase();
     if (updateUserType === 'EMPLOYEE') {
       try {
         const employeeId = parseInt(req.user.id, 10);
         if (!Number.isNaN(employeeId)) {
-          const employee = await prisma.empolyee.findUnique({
-            where: { id: employeeId },
+          const productShop = await prisma.productAtShop.findFirst({
+            where: { productId: itemId },
             select: { shopId: true }
           });
 
-          if (employee?.shopId) {
+          if (productShop?.shopId) {
             await prisma.actionLog.create({
               data: {
                 employeeId,
-                shopId: employee.shopId,
+                shopId: productShop.shopId,
                 productId: itemId,
                 actionType: 'LIST_ITEM_UPDATE',
                 beforeData: {
@@ -1018,18 +1012,15 @@ const updateListItemDetails = async (req, res) => {
         });
       }
     });
+    if (Object.keys(productUpdateData).length > 0) indexProduct(updatedProduct);
 
     const detailUserType = String(req.user?.userType || '').toUpperCase();
     if (detailUserType === 'EMPLOYEE') {
       try {
         const employeeId = parseInt(req.user.id, 10);
         if (!Number.isNaN(employeeId)) {
-          const employee = await prisma.empolyee.findUnique({
-            where: { id: employeeId },
-            select: { shopId: true }
-          });
-          let logShopId = employee?.shopId || null;
-          if (!logShopId && normalizedShopId && !normalizedShopId.startsWith('__')) {
+          let logShopId = null;
+          if (normalizedShopId && !normalizedShopId.startsWith('__')) {
             logShopId = normalizedShopId;
           }
 

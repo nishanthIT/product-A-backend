@@ -1,6 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
-import jwt from 'jsonwebtoken';
+import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -60,23 +61,8 @@ const upload = multer({
   },
 });
 
-// Middleware to verify JWT token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key', (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid token' });
-    }
-    req.user = user;
-    next();
-  });
-};
+// Shared auth: verifies the token and reloads employee memberships each request
+const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.INCIDENTS)];
 
 const getUserShopId = async (userId, userType) => {
   if (userType === 'CUSTOMER') {
