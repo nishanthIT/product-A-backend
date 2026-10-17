@@ -36,6 +36,7 @@ before(async () => {
     assert.equal(res.status, 201, JSON.stringify(res.body));
     E[key] = res.body.employee;
     T[key] = (await app.login(email, 'Secret123')).token;
+    assert.equal((await app.request('POST', '/chat-safety/accept', { token: T[key], body: { version: '2026-10-12' } })).status, 204);
   }
   assert.equal(E.a1.id, seed.a.owner.id, 'test relies on an employee/customer id collision');
 

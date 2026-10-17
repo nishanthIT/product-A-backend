@@ -157,7 +157,7 @@ describe('shop employees and owners cannot reach company administration', () => 
 
   test('a forged EMPLOYEE token for a shop employee still has no company access', async () => {
     const carol = await prisma.empolyee.findUnique({ where: { email: 'carol@shop.test' } });
-    const forged = jwt.sign({ id: carol.id, email: carol.email, userType: 'EMPLOYEE', sv: 0, role: 'ADMIN' }, process.env.JWT_SECRET);
+    const forged = jwt.sign({ id: carol.id, email: carol.email, userType: 'EMPLOYEE', sv: 0, role: 'ADMIN' }, process.env.JWT_SECRET, { expiresIn: '7d' });
     const res = await app.request('GET', '/admin/customers', { token: forged });
     assert.equal(res.status, 403);
     const me = await app.request('GET', '/auth/me', { token: forged });
@@ -288,7 +288,7 @@ describe('deactivation and stale sessions', () => {
     const res = await app.request('GET', '/lists', { token });
     assert.equal(res.status, 401);
     assert.equal(res.body.code, 'SESSION_REVOKED');
-    const legacy = jwt.sign({ id: employee.id, email: 'hank@shop.test', userType: 'EMPLOYEE' }, process.env.JWT_SECRET);
+    const legacy = jwt.sign({ id: employee.id, email: 'hank@shop.test', userType: 'EMPLOYEE' }, process.env.JWT_SECRET, { expiresIn: '7d' });
     assert.equal((await app.request('GET', '/lists', { token: legacy })).status, 401);
   });
 });

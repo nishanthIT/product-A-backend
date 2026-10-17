@@ -1,3 +1,4 @@
+import { getEffectivePrice } from '../services/supplierPricing.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { orderByRank, searchProductIds } from '../services/productSearchService.js';
@@ -58,14 +59,35 @@ function fuzzyMatchWord(searchWord, text, maxDistance = 2) {
 }
 
 const authenticateToken = isAuthenticated;
+const identitySelect = { id: true, name: true, email: true };
+const reportInclude = {
+  reporter: { select: identitySelect },
+  reporterEmployee: { select: identitySelect },
+  reporterAdmin: { select: identitySelect },
+  product: true,
+  shop: true,
+};
+const reporterField = { CUSTOMER: 'reporterId', EMPLOYEE: 'reporterEmployeeId', ADMIN: 'reporterAdminId' };
+const reporterWhere = user => ({ reporterType: user.userType, [reporterField[user.userType]]: user.id });
+function presentReport(row) {
+  const { reporterEmployee, reporterAdmin, ...report } = row;
+  const identity = row.reporterType === 'EMPLOYEE' ? reporterEmployee : row.reporterType === 'ADMIN' ? reporterAdmin : row.reporter;
+  // Keep the admin dashboard's reporter.name/email contract without exposing credentials.
+  return { ...report, reporter: identity ? { ...identity, userType: row.reporterType } : null };
+}
+function validPrice(value) {
+  if (!['string', 'number'].includes(typeof value)) return false;
+  const text = String(value).trim();
+  return /^\d+(?:\.\d{1,2})?$/.test(text) && Number.isFinite(Number(text)) && Number(text) <= 1_000_000_000;
+}
+function validNotes(value) { return value == null || (typeof value === 'string' && value.length <= 2000); }
+
 
 // GET /api/price-reports - Get user's price reports
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const userId = parseInt(req.user.id);
-    
     const reports = await prisma.priceReport.findMany({
-      where: { reporterId: userId },
+      where: reporterWhere(req.user),
       include: {
         product: true,
         shop: true
@@ -74,10 +96,10 @@ router.get('/', authenticateToken, async (req, res) => {
     });
 
     // Get user's earnings/points
-    const user = await prisma.customer.findUnique({
-      where: { id: userId },
+    const user = req.user.userType === 'CUSTOMER' ? await prisma.customer.findUnique({
+      where: { id: req.user.id },
       select: { earnings: true }
-    });
+    }) : null;
 
     res.json({
       reports,
@@ -95,10 +117,10 @@ router.post('/', authenticateToken, async (req, res) => {
     const userId = parseInt(req.user.id);
     const { productId, shopId, reportedPrice, currentPrice, notes, productAtShopId } = req.body;
 
-    // Validate required fields
-    if (!reportedPrice) {
-      return res.status(400).json({ error: 'Reported Price is required' });
+    if (!validPrice(reportedPrice) || (currentPrice != null && !validPrice(currentPrice))) {
+      return res.status(400).json({ error: 'Prices must be non-negative amounts with at most two decimal places' });
     }
+    if (!validNotes(notes)) return res.status(400).json({ error: 'Notes must be text of at most 2000 characters' });
 
     if (!productId && !productAtShopId) {
       return res.status(400).json({ error: 'Either productId with shopId, or productAtShopId is required' });
@@ -144,11 +166,11 @@ router.post('/', authenticateToken, async (req, res) => {
     // Create price report
     const report = await prisma.priceReport.create({
       data: {
-        reporterId: userId,
+        ...reporterWhere(req.user),
         productId: finalProductId,
         shopId: finalShopId,
-        currentPrice: currentPrice || productAtShop.price,
-        reportedPrice: parseFloat(reportedPrice),
+        currentPrice: currentPrice == null ? productAtShop.price : Number(currentPrice),
+        reportedPrice: Number(reportedPrice),
         status: 'PENDING',
         adminNotes: notes || null
       },
@@ -158,7 +180,7 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     });
 
-    console.log(`📋 New price report created by user ${userId} for product ${finalProductId} at shop ${finalShopId}`);
+    console.log(`📋 New price report created by ${req.user.userType} ${userId} for product ${finalProductId} at shop ${finalShopId}`);
 
     res.status(201).json({
       message: 'Price report submitted successfully',
@@ -170,144 +192,64 @@ router.post('/', authenticateToken, async (req, res) => {
   }
 });
 
-// ADMIN ENDPOINTS
-
-// GET /api/price-reports/admin/pending - Get pending reports for admin approval
+// Company reviewers retain the existing review permission; submissions stay authenticated.
 router.get('/admin/pending', authenticateToken, requireReviewer, async (req, res) => {
   try {
-    const reports = await prisma.priceReport.findMany({
-      where: { status: 'PENDING' },
-      include: {
-        reporter: {
-          select: { id: true, name: true, email: true }
-        },
-        product: true,
-        shop: true
-      },
-      orderBy: { createdAt: 'asc' }
-    });
-
-    res.json(reports);
+    const reports = await prisma.priceReport.findMany({ where: { status: 'PENDING' }, include: reportInclude, orderBy: { createdAt: 'asc' } });
+    res.json(reports.map(presentReport));
   } catch (error) {
     console.error('Error fetching pending reports:', error);
     res.status(500).json({ error: 'Failed to fetch pending reports' });
   }
 });
 
-// PUT /api/price-reports/admin/:reportId/approve - Approve a price report
-router.put('/admin/:reportId/approve', authenticateToken, requireReviewer, async (req, res) => {
-  try {
-    const { reportId } = req.params;
-    const { adminNotes } = req.body;
-
-    // Get the report with product and shop info
-    const report = await prisma.priceReport.findUnique({
-      where: { id: reportId },
-      include: {
-        reporter: true,
-        product: true,
-        shop: true
-      }
-    });
-
-    if (!report) {
-      return res.status(404).json({ error: 'Report not found' });
+function reviewReport(status) {
+  return async (req, res) => {
+    try {
+      const { reportId } = req.params;
+      const { adminNotes } = req.body;
+      if (!validNotes(adminNotes)) return res.status(400).json({ error: 'Notes must be text of at most 2000 characters' });
+      const report = await prisma.$transaction(async tx => {
+        // Serialize all review aliases so concurrent approvals cannot award twice.
+        await tx.$queryRaw`SELECT "id" FROM "PriceReport" WHERE "id" = ${reportId} FOR UPDATE`;
+        const current = await tx.priceReport.findUnique({ where: { id: reportId } });
+        if (!current) throw Object.assign(new Error('Report not found'), { status: 404 });
+        if (current.status !== 'PENDING') throw Object.assign(new Error('Report already processed'), { status: 400 });
+        const award = status === 'APPROVED' && current.reporterType === 'CUSTOMER';
+        if (status === 'APPROVED') {
+          await tx.productAtShop.update({
+            where: { shopId_productId: { shopId: current.shopId, productId: current.productId } },
+            data: { price: current.reportedPrice, offerPriceSource: null, priceObservedAt: new Date(), updatedAt: new Date() },
+          });
+          // Customer earnings are an existing customer-only benefit; integer IDs
+          // from the employee/admin tables must never address a Customer row.
+          if (award) await tx.customer.update({ where: { id: current.reporterId }, data: { earnings: { increment: 1 } } });
+        }
+        return tx.priceReport.update({
+          where: { id: reportId },
+          data: {
+            status, adminNotes: adminNotes || null, reviewedAt: new Date(), pointsAwarded: award,
+            reviewedBy: req.user.userType === 'ADMIN' ? req.user.id : null,
+            reviewedByEmployeeId: req.user.userType === 'EMPLOYEE' ? req.user.id : null,
+          },
+          include: reportInclude,
+        });
+      }, { maxWait: 15000, timeout: 60000 });
+      res.json({
+        message: status === 'APPROVED' ? 'Report approved and price updated successfully' : 'Report rejected',
+        report: presentReport(report), pointsAwarded: report.pointsAwarded ? 1 : 0, priceUpdated: status === 'APPROVED',
+      });
+    } catch (error) {
+      if (error.status) return res.status(error.status).json({ error: error.message });
+      console.error('Error reviewing price report:', error);
+      res.status(500).json({ error: 'Failed to review report' });
     }
-
-    if (report.status !== 'PENDING') {
-      return res.status(400).json({ error: 'Report is not pending approval' });
-    }
-
-    // Start transaction to update price and award points
-    const result = await prisma.$transaction(async (tx) => {
-      // 1. Update the price in ProductAtShop
-      await tx.productAtShop.update({
-        where: {
-          shopId_productId: {
-            shopId: report.shopId,
-            productId: report.productId
-          }
-        },
-        data: {
-          price: report.reportedPrice,
-          updatedAt: new Date()
-        }
-      });
-
-      // 2. Award 1 point to the user
-      await tx.customer.update({
-        where: { id: report.reporterId },
-        data: {
-          earnings: {
-            increment: 1
-          }
-        }
-      });
-
-      // 3. Update the report status
-      const updatedReport = await tx.priceReport.update({
-        where: { id: reportId },
-        data: {
-          status: 'APPROVED',
-          adminNotes: adminNotes || null,
-          pointsAwarded: true,
-          reviewedAt: new Date(),
-          reviewedBy: 1 // TODO: Get actual admin ID
-        },
-        include: {
-          reporter: true,
-          product: true,
-          shop: true
-        }
-      });
-
-      return updatedReport;
-    });
-
-    console.log(`✅ Price report ${reportId} approved. User ${report.reporterId} earned 1 point. Price updated from ${report.currentPrice} to ${report.reportedPrice}`);
-
-    res.json({
-      message: 'Report approved and price updated successfully',
-      report: result
-    });
-  } catch (error) {
-    console.error('Error approving price report:', error);
-    res.status(500).json({ error: 'Failed to approve report' });
-  }
-});
-
-// PUT /api/price-reports/admin/:reportId/reject - Reject a price report
-router.put('/admin/:reportId/reject', authenticateToken, requireReviewer, async (req, res) => {
-  try {
-    const { reportId } = req.params;
-    const { adminNotes } = req.body;
-
-    const updatedReport = await prisma.priceReport.update({
-      where: { id: reportId },
-      data: {
-        status: 'REJECTED',
-        adminNotes: adminNotes || null,
-        reviewedAt: new Date(),
-        reviewedBy: 1 // TODO: Get actual admin ID
-      },
-      include: {
-        reporter: true,
-        product: true,
-        shop: true
-      }
-    });
-
-    console.log(`❌ Price report ${reportId} rejected`);
-
-    res.json({
-      message: 'Report rejected',
-      report: updatedReport
-    });
-  } catch (error) {
-    console.error('Error rejecting price report:', error);
-    res.status(500).json({ error: 'Failed to reject report' });
-  }
-});
+  };
+}
+router.put('/admin/:reportId/approve', authenticateToken, requireReviewer, reviewReport('APPROVED'));
+router.post('/admin/approve/:reportId', authenticateToken, requireReviewer, reviewReport('APPROVED'));
+router.put('/admin/:reportId/reject', authenticateToken, requireReviewer, reviewReport('REJECTED'));
+router.post('/admin/reject/:reportId', authenticateToken, requireReviewer, reviewReport('REJECTED'));
 
 // GET /api/price-reports/product/:productId/shop/:shopId/price - Get current price for a product at a shop
 router.get('/product/:productId/shop/:shopId/price', authenticateToken, async (req, res) => {
@@ -325,6 +267,12 @@ router.get('/product/:productId/shop/:shopId/price', authenticateToken, async (r
         price: true,
         offerPrice: true,
         offerExpiryDate: true,
+        offerPriceSource: true,
+        sourcePricing: true,
+        unitsPerPack: true,
+        packagingId: true,
+        pricedUnitSize: true,
+        priceObservedAt: true,
         updatedAt: true
       }
     });
@@ -333,18 +281,9 @@ router.get('/product/:productId/shop/:shopId/price', authenticateToken, async (r
       return res.status(404).json({ error: 'Product not found at this shop' });
     }
 
-    // Check if there's an active offer
-    const currentDate = new Date();
-    const hasActiveOffer = productAtShop.offerPrice && 
-                          productAtShop.offerExpiryDate && 
-                          new Date(productAtShop.offerExpiryDate) > currentDate;
-
     res.json({
-      price: hasActiveOffer ? productAtShop.offerPrice : productAtShop.price,
-      originalPrice: productAtShop.price,
-      offerPrice: productAtShop.offerPrice,
+      ...getEffectivePrice(productAtShop),
       offerExpiryDate: productAtShop.offerExpiryDate,
-      hasActiveOffer,
       lastUpdated: productAtShop.updatedAt
     });
   } catch (error) {
@@ -495,179 +434,22 @@ router.get('/products/:productId/shops', authenticateToken, async (req, res) => 
   }
 });
 
-// ============ ADMIN ENDPOINTS ============
-
-// GET /api/price-reports/admin/pending - Get all pending price reports for admin review
-router.get('/admin/pending', authenticateToken, requireReviewer, async (req, res) => {
-  try {
-    const pendingReports = await prisma.priceReport.findMany({
-      where: { status: 'PENDING' },
-      include: {
-        reporter: {
-          select: { id: true, name: true, email: true }
-        },
-        product: {
-          select: { id: true, title: true, barcode: true, img: true }
-        },
-        shop: {
-          select: { id: true, name: true, address: true, mobile: true }
-        }
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    res.json({ reports: pendingReports });
-  } catch (error) {
-    console.error('Error fetching pending reports:', error);
-    res.status(500).json({ error: 'Failed to fetch pending reports' });
-  }
-});
-
-// POST /api/price-reports/admin/approve/:reportId - Approve a price report
-router.post('/admin/approve/:reportId', authenticateToken, requireReviewer, async (req, res) => {
-  try {
-    console.log('📝 Approve request received');
-
-    const { reportId } = req.params;
-    const { adminNotes } = req.body;
-    
-    console.log('📋 Report ID:', reportId);
-
-    // Get the report details
-    const report = await prisma.priceReport.findUnique({
-      where: { id: reportId },
-      include: { reporter: true }
-    });
-
-    if (!report) {
-      console.log('❌ Report not found:', reportId);
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    if (report.status !== 'PENDING') {
-      console.log('❌ Report already processed:', report.status);
-      return res.status(400).json({ error: 'Report already processed' });
-    }
-
-    // Start transaction to update price and award points
-    await prisma.$transaction(async (tx) => {
-      // 1. Update the price report status
-      await tx.priceReport.update({
-        where: { id: reportId },
-        data: {
-          status: 'APPROVED',
-          adminNotes: adminNotes || 'Price report approved',
-          reviewedAt: new Date(),
-          pointsAwarded: true
-        }
-      });
-
-      // 2. Update the product price at the shop
-      await tx.productAtShop.updateMany({
-        where: {
-          productId: report.productId,
-          shopId: report.shopId
-        },
-        data: {
-          price: report.reportedPrice.toString(),
-          updatedAt: new Date()
-        }
-      });
-
-      // 3. Award 1 point to the reporter
-      await tx.customer.update({
-        where: { id: report.reporterId },
-        data: {
-          earnings: {
-            increment: 1
-          }
-        }
-      });
-    });
-
-    res.json({ 
-      message: 'Report approved successfully', 
-      pointsAwarded: 1,
-      priceUpdated: true 
-    });
-
-  } catch (error) {
-    console.error('Error approving report:', error);
-    res.status(500).json({ error: 'Failed to approve report' });
-  }
-});
-
-// POST /api/price-reports/admin/reject/:reportId - Reject a price report
-router.post('/admin/reject/:reportId', authenticateToken, requireReviewer, async (req, res) => {
-  try {
-    console.log('📝 Reject request received');
-
-    const { reportId } = req.params;
-    const { adminNotes } = req.body;
-    
-    console.log('📋 Report ID:', reportId);
-
-    // Get the report details
-    const report = await prisma.priceReport.findUnique({
-      where: { id: reportId }
-    });
-
-    if (!report) {
-      console.log('❌ Report not found:', reportId);
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    if (report.status !== 'PENDING') {
-      console.log('❌ Report already processed:', report.status);
-      return res.status(400).json({ error: 'Report already processed' });
-    }
-
-    // Update the price report status
-    await prisma.priceReport.update({
-      where: { id: reportId },
-      data: {
-        status: 'REJECTED',
-        adminNotes: adminNotes || 'Price report rejected',
-        reviewedAt: new Date(),
-        pointsAwarded: false
-      }
-    });
-
-    res.json({ 
-      message: 'Report rejected successfully'
-    });
-
-  } catch (error) {
-    console.error('Error rejecting report:', error);
-    res.status(500).json({ error: 'Failed to reject report' });
-  }
-});
-
 // GET /api/price-reports/admin/all - Get all price reports with filters
 router.get('/admin/all', authenticateToken, requireReviewer, async (req, res) => {
   try {
     const { status, limit = 50 } = req.query;
 
+    if (status && !['PENDING', 'APPROVED', 'REJECTED'].includes(status)) return res.status(400).json({ error: 'Invalid report status' });
     const whereCondition = status ? { status } : {};
 
     const reports = await prisma.priceReport.findMany({
       where: whereCondition,
-      include: {
-        reporter: {
-          select: { id: true, name: true, email: true }
-        },
-        product: {
-          select: { id: true, title: true, barcode: true, img: true }
-        },
-        shop: {
-          select: { id: true, name: true, address: true, mobile: true }
-        }
-      },
+      include: reportInclude,
       orderBy: { createdAt: 'desc' },
-      take: parseInt(limit)
+      take: Math.min(Math.max(parseInt(limit) || 50, 1), 500)
     });
 
-    res.json({ reports });
+    res.json({ reports: reports.map(presentReport) });
   } catch (error) {
     console.error('Error fetching all reports:', error);
     res.status(500).json({ error: 'Failed to fetch reports' });

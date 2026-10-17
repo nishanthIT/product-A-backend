@@ -1,3 +1,4 @@
+import { parseProductDetails } from '../services/ageRecordValidation.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -11,33 +12,7 @@ const VALID_GENDERS = ['MALE', 'FEMALE'];
 // Shared auth: verifies the token and reloads employee memberships each request
 const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.AGE_RECORDS)];
 
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'ADMIN') {
-    const admin = await prisma.admin.findUnique({
-      where: { id: userId },
-      select: { shopId: true },
-    });
-    return admin?.shopId;
-  }
-
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: { shopId: true },
-    });
-    return customer?.shopId;
-  }
-
-  if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: userId },
-      select: { shopId: true },
-    });
-    return employee?.shopId;
-  }
-
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 const resolveUserName = async (userId, userType) => {
   if (userType === 'ADMIN') {
@@ -71,7 +46,7 @@ const resolveUserName = async (userId, userType) => {
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -154,7 +129,7 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -168,13 +143,8 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Child gender must be MALE or FEMALE' });
     }
 
-    if (!productCategory || !String(productCategory).trim()) {
-      return res.status(400).json({ error: 'Product category is required' });
-    }
-
-    if (!productName || !String(productName).trim()) {
-      return res.status(400).json({ error: 'Product name is required' });
-    }
+    const details = parseProductDetails(req.body);
+    if (details.error) return res.status(400).json({ error: details.error });
 
     const parsedRequestedAt = requestedAt ? new Date(requestedAt) : new Date();
     if (Number.isNaN(parsedRequestedAt.getTime())) {
@@ -188,8 +158,8 @@ router.post('/', authenticateToken, async (req, res) => {
         shopId,
         requestedAt: parsedRequestedAt,
         childGender: normalizedGender,
-        productCategory: String(productCategory).trim(),
-        productName: String(productName).trim(),
+        productCategory: details.data.productCategory ?? null,
+        productName: details.data.productName ?? null,
         description: description ? String(description).trim() : null,
         recordedBy,
         createdById: userId,

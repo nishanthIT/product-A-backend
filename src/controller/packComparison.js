@@ -1,3 +1,4 @@
+import { getEffectivePrice } from '../services/supplierPricing.js';
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
@@ -12,20 +13,6 @@ const prisma = new PrismaClient();
  */
 
 // Effective price logic mirrors listRoutes.js (offerPrice + offerExpiryDate).
-const getEffectivePrice = (productAtShop) => {
-  const now = new Date();
-  const hasActiveOffer =
-    productAtShop.offerPrice != null &&
-    productAtShop.offerExpiryDate != null &&
-    new Date(productAtShop.offerExpiryDate) > now;
-
-  return {
-    price: parseFloat(hasActiveOffer ? productAtShop.offerPrice : productAtShop.price),
-    originalPrice: parseFloat(productAtShop.price),
-    offerPrice: hasActiveOffer ? parseFloat(productAtShop.offerPrice) : null,
-    hasActiveOffer,
-  };
-};
 
 const MULTI_RE = /(\d{1,4})\s*[x×]\s*(\d+(?:\.\d+)?)\s*(ml|cl|ltr|l|litre|litres|g|gm|kg|oz)?\b/i;
 const SINGLE_RE = /(\d+(?:\.\d+)?)\s*(ml|cl|ltr|l|litre|litres|g|gm|kg|oz)\b/i;
@@ -109,6 +96,7 @@ const getPackOptions = async (req, res) => {
         title: { equals: product.title.trim(), mode: "insensitive" },
       },
       include: {
+        packagingConfigurations: true,
         shops: {
           where: { outOfStock: false },
         },
@@ -120,9 +108,10 @@ const getPackOptions = async (req, res) => {
       .map((variant) => {
         const prices = variant.shops.map((s) => getEffectivePrice(s));
         const best = prices.length
-          ? prices.reduce((min, p) => (p.price < min.price ? p : min))
+          ? prices.reduce((min, p) => (p.unitPrice < min.unitPrice ? p : min))
           : null;
         const pack = parsePackInfo(variant);
+        pack.count *= best?.unitsPerPack ?? 1;
 
         return {
           productId: variant.id,
@@ -132,6 +121,7 @@ const getPackOptions = async (req, res) => {
           packetSize: variant.packetSize,
           retailSize: variant.retailSize,
           caseSize: variant.caseSize,
+          packagingConfigurations: variant.packagingConfigurations,
           category: variant.category,
           availableInShops: variant.shops.length,
           price: best ? best.price : null,

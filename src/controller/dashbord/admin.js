@@ -1,3 +1,4 @@
+import { assertProductMasterWrite } from '../../services/productBarcodes.js';
 import { PrismaClient } from '@prisma/client';
 import { indexProduct, refreshIndexedProduct } from '../../services/productSearchService.js';
 
@@ -819,6 +820,7 @@ const updateGlobalCaseBarcode = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Item not found' });
     }
 
+    await assertProductMasterWrite(prisma, itemId, { caseBarcode: normalizedCaseBarcode || null });
     const updatedProduct = await prisma.product.update({
       where: { id: itemId },
       data: {
@@ -870,6 +872,7 @@ const updateGlobalCaseBarcode = async (req, res) => {
       data: updatedProduct
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     console.error('Error updating global case barcode:', error);
     if (error.code === 'P2025') {
       return res.status(404).json({ success: false, error: 'Item not found' });
@@ -966,6 +969,7 @@ const updateListItemDetails = async (req, res) => {
     if (parsedRrp !== undefined) productUpdateData.rrp = parsedRrp;
     if (normalizedCategory !== undefined) productUpdateData.category = normalizedCategory || null;
 
+    await assertProductMasterWrite(prisma, itemId, productUpdateData);
     let updatedProduct = existingProduct;
     let updatedProductAtShop = existingProductAtShop;
 
@@ -1002,6 +1006,8 @@ const updateListItemDetails = async (req, res) => {
           },
           data: {
             price: parsedPrice,
+            offerPriceSource: null,
+            priceObservedAt: new Date(),
             updatedAt: new Date()
           },
           select: {
@@ -1079,6 +1085,7 @@ const updateListItemDetails = async (req, res) => {
       }
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     if (error.code === 'P2002') {
       return res.status(409).json({ success: false, error: 'Barcode already exists for another product' });
     }

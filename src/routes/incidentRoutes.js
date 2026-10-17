@@ -64,25 +64,7 @@ const upload = multer({
 // Shared auth: verifies the token and reloads employee memberships each request
 const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.INCIDENTS)];
 
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: { shopId: true },
-    });
-    return customer?.shopId;
-  }
-
-  if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: userId },
-      select: { shopId: true },
-    });
-    return employee?.shopId;
-  }
-
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 const resolveUserName = async (userId, userType) => {
   if (userType === 'CUSTOMER') {
@@ -114,7 +96,7 @@ const toDate = (date, time) => {
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -178,7 +160,7 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -238,7 +220,7 @@ router.post('/', authenticateToken, upload.single('image'), async (req, res) => 
 router.put('/:id', authenticateToken, requireCustomer, upload.single('image'), async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -320,7 +302,7 @@ router.put('/:id', authenticateToken, requireCustomer, upload.single('image'), a
 router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });

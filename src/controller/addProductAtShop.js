@@ -1,3 +1,5 @@
+import { getEffectivePrice } from '../services/supplierPricing.js';
+import { assertProductMasterWrite } from '../services/productBarcodes.js';
 import { PrismaClient } from "@prisma/client";
 import fs from 'fs';
 import path from 'path';
@@ -150,6 +152,7 @@ const addProductAtShop = async (req, res) => {
       return res.status(404).json({ error: "Shop not found." });
     }
 
+    await assertProductMasterWrite(prisma, null, { barcode, caseBarcode: casebarcode });
     // Check if product with case barcode already exists
     if (casebarcode) {
       const existingProduct = await prisma.product.findFirst({
@@ -292,6 +295,10 @@ const addProductAtShop = async (req, res) => {
       productId: newProduct.id
     });
   } catch (error) {
+    if (error.statusCode === 409) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(409).json({ error: error.message, code: error.code });
+    }
     console.error("Error adding product at shop:", error);
     // Clean up uploaded file on error
     if (req.file && fs.existsSync(req.file.path)) {
@@ -370,6 +377,8 @@ const updateProductPriceAtShop = async (req, res) => {
     };
 
     // Always update offer fields to handle clearing offers
+    updateData.offerPriceSource = null;
+    updateData.priceObservedAt = new Date();
     updateData.offerPrice = parsedOfferPrice;
     updateData.offerExpiryDate = parsedOfferExpiryDate;
     
@@ -525,6 +534,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
     };
     
     if (Object.keys(productUpdateData).length > 0) {
+      await assertProductMasterWrite(prisma, id, productUpdateData);
       await prisma.product.update({
         where: { id },
         data: productUpdateData,
@@ -549,6 +559,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         },
         data: {
           ...(price ? { price: parsedPrice } : {}),
+          ...((price || parsedOfferPrice !== null || parsedOfferExpiryDate) ? { offerPriceSource: null, priceObservedAt: new Date() } : {}),
           ...(aiel ? { card_aiel_number: aiel } : {}),
           ...(parsedOfferPrice !== null ? { offerPrice: parsedOfferPrice } : {}),
           ...(parsedOfferExpiryDate ? { offerExpiryDate: parsedOfferExpiryDate } : {}),
@@ -619,6 +630,10 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
       });
     }
   } catch (error) {
+    if (error.statusCode === 409) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(409).json({ error: error.message, code: error.code });
+    }
     console.error("Error:", error);
     res.status(500).json({
       error: "An error occurred while processing the product.",
@@ -700,6 +715,7 @@ const getProductsAtShop = async (req, res) => {
               retailSize: true,
               barcode: true,
               caseBarcode: true,
+              packagingConfigurations: true,
               img: true,
               rrp: true,
               category: true
@@ -749,7 +765,9 @@ const getProductsAtShop = async (req, res) => {
         const formattedProducts = productsAtShop.map(item => ({
           productId: item.productId,
           shopId: item.shopId,
+          ...getEffectivePrice(item),
           price: item.price,
+          effectivePrice: getEffectivePrice(item).price,
           offerPrice: item.offerPrice,
           offerExpiryDate: item.offerExpiryDate,
           title: item.product.title,
@@ -758,6 +776,7 @@ const getProductsAtShop = async (req, res) => {
           retailSize: item.product.retailSize,
           barcode: item.product.barcode,
           caseBarcode: item.product.caseBarcode,
+          packagingConfigurations: item.product.packagingConfigurations,
           img: item.product.img,
           rrp: item.product.rrp,
           category: item.product.category,

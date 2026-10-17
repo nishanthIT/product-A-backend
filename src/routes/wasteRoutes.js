@@ -9,23 +9,13 @@ const prisma = new PrismaClient();
 // Shared auth: verifies the token and reloads employee memberships each request
 const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.WASTE)];
 
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return customer?.shopId;
-  }
-  if (userType === 'EMPLOYEE') {
-    const emp = await prisma.empolyee.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return emp?.shopId;
-  }
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 // GET /api/waste - list records and optional summary
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
 
     const { startDate, endDate, limit = 200 } = req.query;
@@ -56,7 +46,7 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
 
     const {

@@ -12,21 +12,24 @@ const VALID_PAYMENT_METHODS = ['CASH', 'CARD'];
 // Shared auth: verifies the token and reloads employee memberships each request
 const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.SUPPLIER_PAYOUTS)];
 
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'ADMIN') {
-    const admin = await prisma.admin.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return admin?.shopId;
+// The creation timestamp is assigned by the database and never accepted from clients.
+const rejectTimestampInput = (req, res, next) => {
+  if (req.body.createdAt !== undefined || req.body.updatedAt !== undefined) {
+    return res.status(400).json({ error: 'Payout timestamps are automatic and cannot be edited' });
   }
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return customer?.shopId;
-  }
-  if (userType === 'EMPLOYEE') {
-    const emp = await prisma.empolyee.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return emp?.shopId;
-  }
-  return null;
+  next();
 };
+
+const parseDateFilter = (value, end = false) => {
+  if (typeof value !== 'string') return null;
+  const text = /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? `${value}T${end ? '23:59:59.999' : '00:00:00.000'}Z`
+    : value;
+  const date = new Date(text);
+  return Number.isFinite(date.getTime()) ? date : null;
+};
+
+const getUserShopId = async (user) => user.shopId ?? null;
 
 const resolveUserName = async (userId, userType) => {
   if (userType === 'ADMIN') {
@@ -63,7 +66,7 @@ const withPermissions = (record, user) => ({
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
 
     const { startDate, endDate, supplier, paymentStatus, paymentMethod, recordedBy, limit = 500 } = req.query;
@@ -72,8 +75,13 @@ router.get('/', authenticateToken, async (req, res) => {
 
     if (startDate || endDate) {
       where.createdAt = {};
-      if (startDate) where.createdAt.gte = new Date(`${startDate}T00:00:00.000Z`);
-      if (endDate) where.createdAt.lte = new Date(`${endDate}T23:59:59.999Z`);
+      const start = startDate ? parseDateFilter(startDate) : null;
+      const end = endDate ? parseDateFilter(endDate, true) : null;
+      if ((startDate && !start) || (endDate && !end) || (start && end && start > end)) {
+        return res.status(400).json({ error: 'Enter a valid date range with the start before the end' });
+      }
+      if (start) where.createdAt.gte = start;
+      if (end) where.createdAt.lte = end;
     }
 
     if (supplier && String(supplier).trim()) {
@@ -108,16 +116,16 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // POST /api/supplier-payouts - create (any authenticated user)
-router.post('/', authenticateToken, async (req, res) => {
+router.post('/', authenticateToken, rejectTimestampInput, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
 
     const { supplier, amount, paymentStatus, paymentMethod, notes } = req.body;
 
     if (!supplier || !String(supplier).trim()) return res.status(400).json({ error: 'Supplier is required' });
-    if (amount === undefined || amount === null || isNaN(Number(amount)) || Number(amount) <= 0) {
+    if (amount === undefined || amount === null || !Number.isFinite(Number(amount)) || Number(amount) <= 0) {
       return res.status(400).json({ error: 'Amount must be a positive number' });
     }
 
@@ -158,11 +166,11 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 // PUT /api/supplier-payouts/:id - update (ADMIN/CUSTOMER any record; EMPLOYEE own records)
-router.put('/:id', authenticateToken, async (req, res) => {
+router.put('/:id', authenticateToken, rejectTimestampInput, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
 
     const existing = await prisma.supplierPayoutRecord.findFirst({
@@ -183,7 +191,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
       updateData.supplier = String(supplier).trim();
     }
     if (amount !== undefined) {
-      if (isNaN(Number(amount)) || Number(amount) <= 0) return res.status(400).json({ error: 'Amount must be a positive number' });
+      if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) return res.status(400).json({ error: 'Amount must be a positive number' });
       updateData.amount = Number(amount);
     }
     if (paymentStatus !== undefined) {
@@ -229,7 +237,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Employees are not allowed to delete supplier payout records' });
     }
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
 
     const existing = await prisma.supplierPayoutRecord.findFirst({

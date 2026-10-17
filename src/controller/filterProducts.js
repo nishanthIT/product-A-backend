@@ -160,9 +160,8 @@ const limit = 100
     
     // Without case barcode filter
     if (withoutCaseBarcode === 'true') {
-      whereClause.caseBarcode = {
-        equals: null,
-      };
+      whereClause.caseBarcode = { equals: null };
+      whereClause.packagingConfigurations = { none: {} };
     }
     
     // Without RRP filter
@@ -223,12 +222,13 @@ const limit = 100
     try {
       if (rankedPageIds) {
         const rows = rankedPageIds.length
-          ? await prisma.product.findMany({ where: { id: { in: rankedPageIds } } })
+          ? await prisma.product.findMany({ where: { id: { in: rankedPageIds } }, include: { packagingConfigurations: true } })
           : [];
         products = orderByRank(rows, rankedPageIds);
       } else {
         products = await prisma.product.findMany({
           where: whereClause,
+          include: { packagingConfigurations: true },
           skip,
           take: limitNum,
           orderBy: {
@@ -244,7 +244,8 @@ const limit = 100
       try {
         console.log("Attempting simpler query...");
         products = await prisma.product.findMany({
-          take: limitNum
+          take: limitNum,
+          include: { packagingConfigurations: true }
         });
       } catch (fallbackError) {
         console.error("Even simple query failed:", fallbackError);

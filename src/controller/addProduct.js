@@ -1,3 +1,5 @@
+import { getEffectivePrice, presentSupplierPrice } from '../services/supplierPricing.js';
+import { assertProductMasterWrite, resolveProductBarcode } from '../services/productBarcodes.js';
 import { PrismaClient } from "@prisma/client";
 import {
   indexProduct,
@@ -33,20 +35,6 @@ const getOrCreateUnknownShop = async () => {
 };
 
 // Helper function to get effective price (considering active offers)
-const getEffectivePrice = (productAtShop) => {
-  const currentDate = new Date();
-  const hasActiveOffer = productAtShop.offerPrice && 
-                        productAtShop.offerExpiryDate && 
-                        new Date(productAtShop.offerExpiryDate) > currentDate;
-  
-  const effectivePrice = hasActiveOffer ? productAtShop.offerPrice : productAtShop.price;
-  return {
-    price: parseFloat(effectivePrice),
-    originalPrice: parseFloat(productAtShop.price),
-    offerPrice: productAtShop.offerPrice ? parseFloat(productAtShop.offerPrice) : null,
-    hasActiveOffer,
-  };
-};
 
 import multer from 'multer';
 import fs from 'fs';
@@ -85,6 +73,7 @@ const addProduct = async (req, res) => {
       }
 
       // Check existing product
+      await assertProductMasterWrite(prisma, null, { barcode: String(barcode), caseBarcode });
       const existingProduct = await prisma.product.findUnique({
         where: { barcode: String(barcode) },
       });
@@ -156,6 +145,10 @@ const addProduct = async (req, res) => {
       });
 
     } catch (error) {
+      if (error.statusCode) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
       console.error("Error:", error);
       if (req.file) fs.unlinkSync(req.file.path);
       res.status(500).json({ error: "Server error" });
@@ -332,6 +325,7 @@ const editProduct = async (req, res) => {
       if (barcode !== undefined) dataToUpdate.barcode = String(barcode);
       if (caseBarcode !== undefined) dataToUpdate.caseBarcode = String(caseBarcode);
       if (category !== undefined) dataToUpdate.category = category || null;
+      await assertProductMasterWrite(prisma, id, dataToUpdate);
       if (req.file) {
         const outputFilename = `${targetBarcode}.png`;
         const outputPath = path.join('./images', outputFilename);
@@ -367,15 +361,12 @@ const editProduct = async (req, res) => {
       const updatedProduct = await prisma.product.update({
         where: { id },
         data: dataToUpdate,
-        include: { shops: { include: { shop: true } } }
+        include: { shops: { where: { shop: { shopType: 'WHOLESALE' } },
+          include: { shop: true } } }
       });
       indexProduct(updatedProduct);
 
-      const formattedShops = updatedProduct.shops?.map((productAtShop) => ({
-        name: productAtShop.shop.name,
-        location: productAtShop.shop.address,
-        price: productAtShop.price,
-      })) || [];
+      const formattedShops = updatedProduct.shops?.map(row => presentSupplierPrice(row)) || [];
 
       res.status(200).json({
         success: true,
@@ -387,6 +378,10 @@ const editProduct = async (req, res) => {
       });
 
     } catch (error) {
+      if (error.statusCode) {
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        return res.status(error.statusCode).json({ error: error.message, code: error.code });
+      }
       if (error.code === "P2025") return res.status(404).json({ error: "Product not found." });
       console.error("Error editing product:", error);
       res.status(500).json({ error: "Internal server error." });
@@ -409,9 +404,11 @@ const getProductById = async (req, res) => {
     const product = await prisma.product.findUnique({
       where: { id },
       include: {
+        packagingConfigurations: { orderBy: { caseGtin: 'asc' } },
         shops: {
+          where: { shop: { shopType: 'WHOLESALE' } },
           include: {
-            shop: true, // Include shop details
+            shop: true, priceTiers: true, // Include shop details
           },
         },
       },
@@ -423,11 +420,7 @@ const getProductById = async (req, res) => {
     }
 
     // Format response with shop details
-    const formattedShops = product.shops.map((productAtShop) => ({
-      name: productAtShop.shop.name,
-      location: productAtShop.shop.address,
-      price: productAtShop.price,
-    }));
+    const formattedShops = product.shops.map(row => presentSupplierPrice(row, product.matchedPackaging));
 
     res.status(200).json({
       success: true,
@@ -453,69 +446,15 @@ const getProductByBarcode = async (req, res) => {
       return res.status(400).json({ error: "Barcode is required." });
     }
 
-    // Trim and clean the barcode
-    const cleanBarcode = barcode.trim();
-    console.log("Searching for barcode:", cleanBarcode);
-
-    let product = null;
-    const includeShops = {
-      shops: {
-        include: {
-          shop: true,
-        },
-      },
-    };
-
-    if (field === 'barcode') {
-      product = await prisma.product.findFirst({
-        where: {
-          OR: [
-            { barcode: cleanBarcode },
-            { barcode: { equals: cleanBarcode, mode: 'insensitive' } }
-          ]
-        },
-        include: includeShops,
-      });
-    } else if (field === 'casebarcode') {
-      product = await prisma.product.findFirst({
-        where: {
-          OR: [
-            { caseBarcode: cleanBarcode },
-            { caseBarcode: { equals: cleanBarcode, mode: 'insensitive' } }
-          ]
-        },
-        include: includeShops,
-      });
-    } else {
-      // First try exact match on barcode field
-      product = await prisma.product.findUnique({
-        where: { barcode: cleanBarcode },
-        include: includeShops,
-      });
-
-      // If not found, try searching in caseBarcode field
-      if (!product) {
-        console.log("Not found in barcode field, trying caseBarcode...");
-        product = await prisma.product.findFirst({
-          where: { caseBarcode: cleanBarcode },
-          include: includeShops,
-        });
-      }
-
-      // If still not found, try case-insensitive search on both fields
-      if (!product) {
-        console.log("Trying case-insensitive search...");
-        product = await prisma.product.findFirst({
-          where: {
-            OR: [
-              { barcode: { equals: cleanBarcode, mode: 'insensitive' } },
-              { caseBarcode: { equals: cleanBarcode, mode: 'insensitive' } }
-            ]
-          },
-          include: includeShops,
-        });
-      }
+    if (field && !['barcode', 'casebarcode'].includes(field)) {
+      return res.status(400).json({ error: 'field must be barcode or casebarcode' });
     }
+    const cleanBarcode = barcode.trim();
+    if (!cleanBarcode) return res.status(400).json({ error: 'Barcode is required.' });
+    const product = await resolveProductBarcode(prisma, cleanBarcode, {
+      field,
+      include: { shops: { where: { shop: { shopType: 'WHOLESALE' } }, include: { shop: true, priceTiers: true } } },
+    });
 
     // Handle case where product is not found
     if (!product) {
@@ -526,21 +465,23 @@ const getProductByBarcode = async (req, res) => {
     console.log("Product found:", product.title);
 
     // Format response with shop details
-    const formattedShops = product.shops.map((productAtShop) => ({
-      name: productAtShop.shop.name,
-      location: productAtShop.shop.address,
-      price: productAtShop.price,
-    }));
+    const formattedShops = product.shops.map(row => presentSupplierPrice(row, product.matchedPackaging));
 
     res.status(200).json({
       success: true,
       data: {
         ...product,
         barcode: product.barcode ? product.barcode.toString() : null,
+        ...(product.matchedPackaging && {
+          caseBarcode: product.matchedPackaging.caseBarcode,
+          caseSize: String(product.matchedPackaging.unitsPerCase),
+          packetSize: product.matchedPackaging.packageSize,
+        }),
         shops: formattedShops, // Include shop details in the response
       },
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     if (error.name === "SyntaxError" || error.message.includes("BigInt")) {
       console.log(error);
       return res.status(400).json({ error: "Invalid barcode format." });
@@ -576,14 +517,7 @@ const quickAddProductFromScan = async (req, res) => {
       });
     }
 
-    const existingProduct = await prisma.product.findFirst({
-      where: {
-        OR: [
-          { barcode: cleanBarcode },
-          { caseBarcode: cleanBarcode },
-        ],
-      },
-    });
+    const existingProduct = await resolveProductBarcode(prisma, cleanBarcode);
 
     if (existingProduct) {
       return res.status(409).json({
@@ -616,18 +550,26 @@ const quickAddProductFromScan = async (req, res) => {
           productId: createdProduct.id,
         },
       },
-      update: cleanInHandStock != null ? { inHandStock: cleanInHandStock } : {},
+      update: {},
       create: {
         shopId: unknownShop.id,
         productId: createdProduct.id,
         price: 0,
         outOfStock: false,
-        inHandStock: cleanInHandStock,
+
       },
       include: {
         shop: true,
       },
     });
+
+    if (cleanInHandStock != null && req.user.shopId) {
+      await prisma.supermarketProductState.upsert({
+        where: { shopId_productId: { shopId: req.user.shopId, productId: createdProduct.id } },
+        create: { shopId: req.user.shopId, productId: createdProduct.id, inHandStock: cleanInHandStock },
+        update: { inHandStock: cleanInHandStock },
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -638,6 +580,7 @@ const quickAddProductFromScan = async (req, res) => {
       },
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     console.error("Error quick adding product from scan:", error);
     return res.status(500).json({ error: "Internal server error." });
   }
@@ -654,7 +597,8 @@ const getPendingSubmittedProducts = async (req, res) => {
         },
         include: {
           shops: {
-            include: {
+            where: { shop: { shopType: 'WHOLESALE' } },
+          include: {
               shop: true,
             },
           },
@@ -796,6 +740,7 @@ const approveSubmittedProduct = async (req, res) => {
       ? normalizedCategory
       : 'Uncategorized';
 
+    await assertProductMasterWrite(prisma, id, { barcode: normalizedBarcode || product.barcode, caseBarcode: hasCaseBarcode ? normalizedCaseBarcode || null : product.caseBarcode, caseSize: caseSize !== undefined ? String(caseSize) : product.caseSize, packetSize: packetSize !== undefined ? String(packetSize) : product.packetSize });
     const approvedProduct = await prisma.product.update({
       where: { id },
       data: {
@@ -819,6 +764,7 @@ const approveSubmittedProduct = async (req, res) => {
       data: approvedProduct,
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     console.error('Error approving submitted product:', error);
     return res.status(500).json({ error: 'Internal server error.' });
   }
@@ -843,8 +789,10 @@ const searchProducts = async (req, res) => {
       ? await prisma.product.findMany({
           where: { id: { in: rankedIds } },
           include: {
+            packagingConfigurations: { orderBy: { caseGtin: 'asc' } },
             shops: {
-              include: {
+              where: { shop: { shopType: 'WHOLESALE' } },
+          include: {
                 shop: true,
               },
             },
@@ -875,6 +823,7 @@ const searchProducts = async (req, res) => {
         caseSize: product.caseSize,
         packetSize: product.packetSize,
         retailSize: product.retailSize,
+        packagingConfigurations: product.packagingConfigurations,
         availableInShops: product.shops.length,
         lowestPrice: lowestEffectivePrice,
       };

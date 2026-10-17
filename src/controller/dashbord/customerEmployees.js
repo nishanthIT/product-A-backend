@@ -19,12 +19,12 @@ const getCustomerEmployees = async (req, res) => {
 
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
-      select: { id: true, name: true, email: true, shop: { select: { id: true, name: true, shopType: true } } },
+      select: { id: true, name: true, email: true, supermarketOwnerships: { select: { shop: { select: { id: true, name: true, shopType: true } } } } },
     });
     if (!customer) return res.status(404).json({ success: false, error: 'Customer not found' });
 
-    // Customer.shopId is the ownership relation; only shops this customer owns are shown.
-    const ownedShops = customer.shop ? [customer.shop] : [];
+    // Use verified ownerships; additional supermarkets never change the legacy shop pointer.
+    const ownedShops = customer.supermarketOwnerships.map((o) => o.shop).filter((s) => s.shopType === 'CUSTOMER');
     const requestedShopId = req.query.shopId ? String(req.query.shopId) : null;
     if (requestedShopId && !ownedShops.some((s) => s.id === requestedShopId)) {
       return res.status(404).json({ success: false, error: 'Shop not found for this customer' });

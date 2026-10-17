@@ -21,6 +21,7 @@ export async function syncEmployeeShopPointer(db, employeeId) {
   const active = await db.shopEmployeeMembership.findFirst({
     where: { employeeId, status: 'ACTIVE' },
     select: { shopId: true },
+    orderBy: { createdAt: 'asc' },
   });
   await db.empolyee.update({ where: { id: employeeId }, data: { shopId: active?.shopId ?? null } });
   return active?.shopId ?? null;
@@ -53,15 +54,11 @@ export async function setShopMembershipStatus(membershipId, status, db = prisma)
   const otherActive = await db.shopEmployeeMembership.findFirst({
     where: { employeeId: membership.employeeId, status: 'ACTIVE', id: { not: membershipId } },
     select: { shopId: true },
+    orderBy: { createdAt: 'asc' },
   });
-  if (status === 'ACTIVE' && otherActive) {
-    const err = new Error('This person is already active in another shop');
-    err.status = 409;
-    throw err;
-  }
-
-  const pointer = status === 'ACTIVE' ? membership.shopId : otherActive?.shopId ?? null;
-  // The partial unique index on ACTIVE memberships guards against a concurrent second activation.
+  const employee = await db.empolyee.findUnique({ where: { id: membership.employeeId }, select: { shopId: true } });
+  const pointer = status === 'ACTIVE' ? (employee.shopId ?? membership.shopId) : (employee.shopId === membership.shopId ? otherActive?.shopId ?? null : employee.shopId);
+  // Each explicitly assigned membership is independent.
   const [updated] = await db.$transaction([
     db.shopEmployeeMembership.update({
       where: { id: membershipId },
@@ -93,7 +90,7 @@ export async function createShopMembership(tx, { employeeId, shopId, role, permi
     },
     include: { shop: { select: { groupChatId: true } } },
   });
-  await tx.empolyee.update({ where: { id: employeeId }, data: { shopId } });
+  await tx.empolyee.updateMany({ where: { id: employeeId, shopId: null }, data: { shopId } });
   for (const op of groupChatOps(tx, membership.shop.groupChatId, employeeId, true)) await op;
   return membership;
 }

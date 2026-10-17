@@ -1,8 +1,11 @@
+import { getEffectivePrice } from '../services/supplierPricing.js';
+import { presentListProduct } from '../services/listPresentation.js';
+import { isOutOfStock, loadOutOfStock, moveToOutOfStock } from '../services/outOfStock.js';
+import { requireListScope } from '../middleware/listScope.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
 import { SHOP_FEATURES } from '../services/accessControl.js';
-import cacheService from '../services/cacheService.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -28,7 +31,7 @@ const withRetry = async (operation, maxRetries = 3, delayMs = 1000) => {
 };
 
 // Shared auth; employees additionally need an ACTIVE shop membership to touch lists
-const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS)];
+const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS), requireListScope];
 
 // Get all lists for the authenticated user
 router.get('/', authenticateToken, async (req, res) => {
@@ -36,14 +39,6 @@ router.get('/', authenticateToken, async (req, res) => {
     const userId = parseInt(req.user.id);
     const userType = req.user.userType;
     
-    // Try cache first (only for CUSTOMER type for backwards compatibility)
-    if (userType === 'CUSTOMER') {
-      const cachedLists = await cacheService.getCachedUserLists(userId);
-      if (cachedLists) {
-        return res.json(cachedLists);
-      }
-    }
-
     let lists;
     
     if (userType === 'EMPLOYEE') {
@@ -51,7 +46,7 @@ router.get('/', authenticateToken, async (req, res) => {
       lists = await prisma.list.findMany({
         where: {
           employeeId: userId,
-          creatorType: 'EMPLOYEE'
+          creatorType: 'EMPLOYEE', shopId: req.user.shopId
         },
         include: {
           products: {
@@ -95,7 +90,7 @@ router.get('/', authenticateToken, async (req, res) => {
       // Customer (default): get customer lists
       lists = await prisma.list.findMany({
         where: {
-          customerId: userId,
+          customerId: userId, shopId: req.user.shopId,
         },
         include: {
           products: {
@@ -114,7 +109,7 @@ router.get('/', authenticateToken, async (req, res) => {
       });
 
       // Cache the result for customers
-      await cacheService.cacheUserLists(userId, lists);
+
     }
 
     res.json(lists);
@@ -130,31 +125,8 @@ router.get('/shop/all', authenticateToken, async (req, res) => {
     const userId = parseInt(req.user.id);
     const userType = req.user.userType;
     
-    let shopId = null;
-    
-    if (userType === 'ADMIN') {
-      // Get admin's shop
-      const admin = await prisma.admin.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = admin?.shopId;
-    } else if (userType === 'CUSTOMER') {
-      // Check if customer owns a shop
-      const customer = await prisma.customer.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = customer?.shopId;
-    } else if (userType === 'EMPLOYEE') {
-      // Get employee's shop
-      const employee = await prisma.empolyee.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = employee?.shopId;
-    }
-    
+    const shopId = req.user.shopId;
+
     if (!shopId) {
       return res.status(403).json({ error: 'You are not associated with any shop' });
     }
@@ -194,6 +166,12 @@ router.get('/shop/all', authenticateToken, async (req, res) => {
     console.error('Error fetching shop lists:', error);
     res.status(500).json({ error: 'Failed to fetch shop lists' });
   }
+});
+
+// A read-only consolidated view; the original list and item IDs remain intact.
+router.get('/out-of-stock', isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS), async (req, res, next) => {
+  try { res.json(await loadOutOfStock(prisma, req.user)); }
+  catch (error) { next(error); }
 });
 
 // Get a specific list by ID
@@ -242,7 +220,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
           };
     } else {
       // Customer can view own lists + tracked lists, and read any list created in their own shop (e.g. an employee's).
-      const customer = await prisma.customer.findUnique({ where: { id: userId }, select: { shopId: true } });
+      const customer = { shopId: req.user.shopId };
       const OR = [{ customerId: userId }];
       if (trackingSupported) OR.push({ trackedBy: { some: { userId, userType } } });
       if (customer?.shopId) OR.push({ shopId: customer.shopId });
@@ -280,38 +258,10 @@ router.get('/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'List not found' });
     }
 
+    const stock = list.shopId ? await prisma.supermarketProductState.findMany({ where: { shopId: list.shopId, productId: { in: list.products.map((p) => p.productAtShop.productId) } } }) : [];
+    const stockByProduct = new Map(stock.map((row) => [row.productId, row.inHandStock]));
     // Transform products to frontend-friendly format
-    const transformedProducts = list.products.map(lp => ({
-      id: lp.id,
-      productId: lp.productAtShop?.product?.id || lp.productAtShopId,
-      productAtShopId: lp.productAtShopId,
-      productName: lp.productAtShop?.product?.title || 'Unknown Product',
-      barcode: lp.productAtShop?.product?.barcode || '',
-      caseBarcode: lp.productAtShop?.product?.caseBarcode || '',
-      retailSize: lp.productAtShop?.product?.retailSize || '',
-      caseSize: lp.productAtShop?.product?.caseSize || '',
-      packetSize: lp.productAtShop?.product?.packetSize || '',
-      aielNumber: lp.productAtShop?.card_aiel_number || '',
-      locationCode: lp.productAtShop?.locationCode || '',
-      category: lp.productAtShop?.product?.category || 'Uncategorized',
-      lowestPrice: Number(lp.productAtShop?.price) || 0,
-      originalPrice: Number(lp.productAtShop?.price) || 0,
-      offerPrice: lp.productAtShop?.offerPrice ? Number(lp.productAtShop.offerPrice) : null,
-      hasActiveOffer: lp.productAtShop?.offerPrice && lp.productAtShop?.offerExpiryDate 
-        ? new Date(lp.productAtShop.offerExpiryDate) > new Date() 
-        : false,
-      shopName: lp.productAtShop?.shop?.name || 'Unknown Shop',
-      shopId: lp.productAtShop?.shop?.id || '',
-      img: lp.productAtShop?.product?.img || null,
-      quantity: lp.quantity || 1,
-      isPurchased: lp.isPurchased || false,
-      isUrgent: lp.isUrgent || false,
-      inHandStock: lp.productAtShop?.inHandStock ?? null,
-      // Bundle offer fields
-      isFreeItem: lp.isFreeItem || false,
-      freeQuantity: lp.freeQuantity || 0,
-      bundlePromotionId: lp.bundlePromotionId || null,
-    }));
+    const transformedProducts = list.products.map(lp => presentListProduct(lp, stockByProduct));
 
     console.log('📦 Database isPurchased states:', transformedProducts.map(p => ({ id: p.id, name: p.productName, isPurchased: p.isPurchased })));
 
@@ -329,9 +279,6 @@ router.get('/:id', authenticateToken, async (req, res) => {
       copiedByMe,
       canEdit: isMine || copiedByMe,
     };
-
-    // Don't cache - to avoid race conditions with togglePurchased operations
-    // await cacheService.cacheListDetail(listId, responseData);
 
     res.json(responseData);
   } catch (error) {
@@ -360,12 +307,8 @@ router.post('/', authenticateToken, async (req, res) => {
 
     if (userType === 'EMPLOYEE') {
       // Get employee's shop
-      const employee = await prisma.empolyee.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
       listData.employeeId = userId;
-      listData.shopId = employee?.shopId;
+      listData.shopId = req.user.shopId;
     } else if (userType === 'ADMIN') {
       // Get admin's shop
       const admin = await prisma.admin.findUnique({
@@ -377,6 +320,7 @@ router.post('/', authenticateToken, async (req, res) => {
     } else {
       // Customer (default)
       listData.customerId = userId;
+      listData.shopId = req.user.shopId;
     }
 
     const newList = await prisma.list.create({
@@ -394,12 +338,6 @@ router.post('/', authenticateToken, async (req, res) => {
         },
       },
     });
-
-    // Invalidate user's list cache (for customers)
-    if (userType === 'CUSTOMER') {
-      await cacheService.invalidateUserLists(userId);
-      console.log(`🗑️ Cache invalidated: user ${userId} lists (new list created)`);
-    }
 
     // Emit socket event for shop list sync (if list has shopId)
     if (newList.shopId && req.io) {
@@ -485,12 +423,6 @@ router.post('/addProduct', authenticateToken, async (req, res) => {
         },
       });
 
-      // Invalidate caches (only for customers)
-      if (userType === 'CUSTOMER') {
-        await cacheService.invalidateUserLists(userId);
-        await cacheService.invalidateListDetail(listId);
-      }
-
       // Emit socket event for shop list sync
       if (list.shopId && req.io) {
         req.io.to(`shop_${list.shopId}_lists`).emit('list_product_updated', {
@@ -519,13 +451,6 @@ router.post('/addProduct', authenticateToken, async (req, res) => {
           },
         },
       });
-
-      // Invalidate caches
-      if (userType === 'CUSTOMER') {
-        await cacheService.invalidateUserLists(userId);
-      }
-      await cacheService.invalidateListDetail(listId);
-      console.log(`🗑️ Cache invalidated: list ${listId} (product added)`);
 
       // Emit socket event for shop list sync
       if (list.shopId && req.io) {
@@ -557,8 +482,8 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'listId, productAtShopId (or listProductId), and quantity are required' });
     }
 
-    if (quantity < 0) {
-      return res.status(400).json({ error: 'Quantity must be a non-negative number.' });
+    if (!Number.isInteger(quantity) || quantity < 0 || quantity > 2147483647) {
+      return res.status(400).json({ error: 'Quantity must be a non-negative whole number.' });
     }
 
     // --- Authorization Check ---
@@ -572,9 +497,9 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
     }
 
     // Check if the user is the owner (customer, admin, or employee)
-    const isOwner = (originalList.creatorType === 'CUSTOMER' && originalList.customerId === userId) ||
-                    (originalList.creatorType === 'ADMIN' && originalList.adminId === userId) ||
-                    (originalList.creatorType === 'EMPLOYEE' && originalList.employeeId === userId);
+    const isOwner = (userType === 'CUSTOMER' && originalList.creatorType === 'CUSTOMER' && originalList.customerId === userId) ||
+                    (userType === 'ADMIN' && originalList.creatorType === 'ADMIN' && originalList.adminId === userId) ||
+                    (userType === 'EMPLOYEE' && originalList.creatorType === 'EMPLOYEE' && originalList.employeeId === userId);
 
     // Check if the user is tracking the list (only if not owner and model exists)
     let isTracking = false;
@@ -598,7 +523,6 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
     }
     // --- End Authorization Check ---
 
-
     // Find the list product to update
     let listProduct;
     if (listProductId) {
@@ -618,8 +542,6 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
         where: { id: listProduct.id },
       });
 
-      // Invalidate cache and emit socket event for removal
-      await cacheService.invalidateListDetail(listId);
       if (originalList.shopId && req.io) {
         req.io.to(`shop_${originalList.shopId}_lists`).emit('list_product_removed', {
           listId,
@@ -640,9 +562,6 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
         },
       },
     });
-
-    // Invalidate cache
-    await cacheService.invalidateListDetail(listId);
 
     // Emit socket event for shop list sync using the original list's shopId
     if (originalList.shopId && req.io) {
@@ -765,10 +684,6 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
 
     console.log('🔄 New isPurchased state:', updatedProduct.isPurchased);
 
-    // Invalidate cache
-    await cacheService.invalidateListDetail(listId);
-    console.log('🗑️ Cache invalidated for list:', listId);
-
     // Emit socket event for shop list sync
     if (list.shopId && req.io) {
       req.io.to(`shop_${list.shopId}_lists`).emit('list_product_updated', {
@@ -850,8 +765,6 @@ router.put('/toggleUrgent', authenticateToken, async (req, res) => {
       include: { productAtShop: { include: { product: true, shop: true } } },
     }));
 
-    await cacheService.invalidateListDetail(listId);
-
     if (list.shopId && req.io) {
       req.io.to(`shop_${list.shopId}_lists`).emit('list_product_updated', {
         listId,
@@ -871,6 +784,23 @@ router.put('/toggleUrgent', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to toggle urgent status' });
   }
 });
+
+// Serialize list moves with ordinary additions, then lock the actual rows so
+// quantity/flag changes cannot be lost between reading and merging/deleting.
+const lockListProductRows = async (tx, listIds, productId) => {
+  const orderedIds = [...new Set(listIds)].sort();
+  for (const listId of orderedIds) {
+    const key = `list-product:${listId}:${productId}`;
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`;
+  }
+  for (const listId of orderedIds) {
+    await tx.$queryRaw`
+      SELECT lp.id FROM "ListProduct" lp
+      JOIN "ProductAtShop" ps ON ps.id = lp."productAtShopId"
+      WHERE lp."listId" = ${listId} AND ps."productId" = ${productId}
+      ORDER BY lp.id FOR UPDATE OF lp`;
+  }
+};
 
 // Move a list item to the SAME product at a different shop (Collect Mode)
 router.put('/changeShop', authenticateToken, async (req, res) => {
@@ -938,31 +868,31 @@ router.put('/changeShop', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Item is already assigned to this shop' });
     }
 
-    // If the list already has this product at the target shop, merge quantities.
-    const existing = await prisma.listProduct.findFirst({
-      where: { listId, productAtShopId: target.id, NOT: { id: listProduct.id } },
-    });
-
-    let updatedProduct;
-    if (existing) {
-      updatedProduct = await prisma.listProduct.update({
-        where: { id: existing.id },
-        data: {
-          quantity: (existing.quantity || 1) + (listProduct.quantity || 1),
-          isUrgent: existing.isUrgent || listProduct.isUrgent,
-        },
-        include: { productAtShop: { include: { product: true, shop: true } } },
+    const { updatedProduct, merged } = await prisma.$transaction(async tx => {
+      await lockListProductRows(tx, [listId], target.productId);
+      const current = await tx.listProduct.findFirst({ where: { id: listProductId, listId } });
+      if (!current || current.bundlePromotionId) throw Object.assign(new Error('This item changed. Refresh the list and try again.'), { status: 409 });
+      if (current.productAtShopId === target.id) throw Object.assign(new Error('Item is already assigned to this shop'), { status: 400 });
+      // Different origins must remain separate so each can return to its list.
+      const existing = await tx.listProduct.findFirst({
+        where: { listId, productAtShopId: target.id, outOfStockSourceListId: current.outOfStockSourceListId, bundlePromotionId: null, NOT: { id: current.id } },
+        orderBy: { id: 'asc' },
       });
-      await prisma.listProduct.delete({ where: { id: listProduct.id } });
-    } else {
-      updatedProduct = await prisma.listProduct.update({
-        where: { id: listProduct.id },
-        data: { productAtShopId: target.id },
-        include: { productAtShop: { include: { product: true, shop: true } } },
-      });
-    }
-
-    await cacheService.invalidateListDetail(listId);
+      if (existing && existing.quantity + current.quantity > 2147483647) {
+        throw Object.assign(new Error('Quantity exceeds the supported whole-number range'), { status: 400 });
+      }
+      const include = { productAtShop: { include: { product: true, shop: true } } };
+      const updatedProduct = existing
+        ? await tx.listProduct.update({
+          where: { id: existing.id },
+          data: { quantity: { increment: current.quantity }, isUrgent: existing.isUrgent || current.isUrgent },
+          include,
+        })
+        : await tx.listProduct.update({ where: { id: current.id }, data: { productAtShopId: target.id }, include });
+      if (existing) await tx.listProduct.delete({ where: { id: current.id } });
+      await tx.list.update({ where: { id: listId }, data: { updatedAt: new Date() } });
+      return { updatedProduct, merged: !!existing };
+    }, { maxWait: 15000, timeout: 60000 });
 
     if (list.shopId && req.io) {
       req.io.to(`shop_${list.shopId}_lists`).emit('list_product_updated', {
@@ -975,9 +905,10 @@ router.put('/changeShop', authenticateToken, async (req, res) => {
     res.json({
       message: `Moved to ${target.shop.name}`,
       product: updatedProduct,
-      merged: !!existing,
+      merged,
     });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('Error changing product shop:', error);
     res.status(500).json({ error: 'Failed to move product to another shop' });
   }
@@ -1029,36 +960,43 @@ const loadMovableListProduct = async (req, res) => {
   return { list, listProduct, userId, userType };
 };
 
-// Moves a list item into targetList, merging with the same shop product if already there.
-const moveListProductToList = async (req, { list, listProduct, targetList, userId }) => {
-  const existing = await prisma.listProduct.findFirst({
-    where: { listId: targetList.id, productAtShopId: listProduct.productAtShopId, bundlePromotionId: null },
-  });
-
-  if (existing) {
-    await prisma.$transaction([
-      prisma.listProduct.update({
+// Ordinary destinations merge matching supplier rows. Out of Stock preserves
+// row IDs and original-list provenance, including alternate real-ID callers.
+const moveListProductToList = async (req, { list, listProduct, targetList }) => {
+  const { merged } = await prisma.$transaction(async tx => {
+    await lockListProductRows(tx, [list.id, targetList.id], listProduct.productAtShop.productId);
+    const current = await tx.listProduct.findFirst({ where: { id: listProduct.id, listId: list.id } });
+    if (!current || current.bundlePromotionId) throw Object.assign(new Error('This item changed. Refresh the list and try again.'), { status: 409 });
+    const targetIsOutOfStock = isOutOfStock(targetList.name);
+    const origin = targetIsOutOfStock
+      ? (isOutOfStock(list.name) ? current.outOfStockSourceListId : list.id)
+      : null;
+    const existing = targetIsOutOfStock ? null : await tx.listProduct.findFirst({
+      where: { listId: targetList.id, productAtShopId: current.productAtShopId, bundlePromotionId: null },
+      orderBy: { id: 'asc' },
+    });
+    if (existing && existing.quantity + current.quantity > 2147483647) {
+      throw Object.assign(new Error('Quantity exceeds the supported whole-number range'), { status: 400 });
+    }
+    if (existing) {
+      await tx.listProduct.update({
         where: { id: existing.id },
         data: {
-          quantity: (existing.quantity || 1) + (listProduct.quantity || 1),
-          isUrgent: existing.isUrgent || listProduct.isUrgent,
-          isPurchased: false,
+          quantity: { increment: current.quantity },
+          isUrgent: existing.isUrgent || current.isUrgent,
+          isPurchased: false, outOfStockSourceListId: null,
         },
-      }),
-      prisma.listProduct.delete({ where: { id: listProduct.id } }),
-    ]);
-  } else {
-    await prisma.listProduct.update({
-      where: { id: listProduct.id },
-      data: { listId: targetList.id, isPurchased: false },
-    });
-  }
-
-  await Promise.all([
-    cacheService.invalidateListDetail(list.id),
-    cacheService.invalidateListDetail(targetList.id),
-    cacheService.invalidateUserLists(userId),
-  ]);
+      });
+      await tx.listProduct.delete({ where: { id: current.id } });
+    } else {
+      await tx.listProduct.update({
+        where: { id: current.id },
+        data: { listId: targetList.id, isPurchased: false, outOfStockSourceListId: origin },
+      });
+    }
+    await tx.list.updateMany({ where: { id: { in: [list.id, targetList.id] } }, data: { updatedAt: new Date() } });
+    return { merged: !!existing };
+  }, { maxWait: 15000, timeout: 60000 });
 
   if (req.io) {
     const productId = listProduct.productAtShop?.productId;
@@ -1070,7 +1008,7 @@ const moveListProductToList = async (req, { list, listProduct, targetList, userI
     }
   }
 
-  return { merged: !!existing };
+  return { merged };
 };
 
 // Move a list item to another of the user's lists (Collect Mode — product unavailable)
@@ -1103,66 +1041,28 @@ router.put('/moveToList', authenticateToken, async (req, res) => {
       merged,
     });
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('Error moving product to another list:', error);
     res.status(500).json({ error: 'Failed to move product to another list' });
   }
 });
 
-// Mark a list item out of stock: move it into the user's "Out of Stock · <shop>" list (created on demand)
-router.put('/markOutOfStock', authenticateToken, async (req, res) => {
+// One destination per account/workspace; supplier grouping comes from the existing item relation.
+router.put('/markOutOfStock', authenticateToken, async (req, res, next) => {
   try {
     const ctx = await loadMovableListProduct(req, res);
     if (!ctx) return;
-    const { userId, userType, listProduct } = ctx;
-
-    const shopName = listProduct.productAtShop?.shop?.name || 'Unknown Shop';
-    const outOfStockName = `Out of Stock · ${shopName}`;
-
-    if (ctx.list.name === outOfStockName) {
-      return res.status(400).json({ error: 'Item is already in the Out of Stock list' });
+    const result = await moveToOutOfStock(prisma, req.user, ctx.list, ctx.listProduct);
+    if (req.io && ctx.list.shopId) {
+      const room = req.io.to(`shop_${ctx.list.shopId}_lists`);
+      room.emit('list_product_removed', { listId: ctx.list.id, productId: ctx.listProduct.productAtShop?.productId });
+      room.emit('list_product_added', { listId: result.targetListId });
+      if (result.created) room.emit('list_created', { listId: result.targetListId });
     }
-
-    const ownerField = userType === 'EMPLOYEE' ? 'employeeId' : userType === 'ADMIN' ? 'adminId' : 'customerId';
-    let targetList = await withRetry(() => prisma.list.findFirst({
-      where: { [ownerField]: userId, name: outOfStockName },
-      orderBy: { createdAt: 'asc' },
-    }));
-
-    let created = false;
-    if (!targetList) {
-      const listData = {
-        name: outOfStockName,
-        description: `Out of stock at ${shopName} — buy later / restock`,
-        creatorType: userType,
-        [ownerField]: userId,
-      };
-      if (userType === 'EMPLOYEE') {
-        const employee = await prisma.empolyee.findUnique({ where: { id: userId }, select: { shopId: true } });
-        listData.shopId = employee?.shopId;
-      } else if (userType === 'ADMIN') {
-        const admin = await prisma.admin.findUnique({ where: { id: userId }, select: { shopId: true } });
-        listData.shopId = admin?.shopId;
-      }
-      targetList = await prisma.list.create({ data: listData });
-      created = true;
-
-      if (targetList.shopId && req.io) {
-        req.io.to(`shop_${targetList.shopId}_lists`).emit('list_created', { listId: targetList.id });
-      }
-    }
-
-    const { merged } = await moveListProductToList(req, { ...ctx, targetList });
-
-    res.json({
-      message: `Moved to ${targetList.name}`,
-      targetListId: targetList.id,
-      targetListName: targetList.name,
-      created,
-      merged,
-    });
+    res.json(result);
   } catch (error) {
-    console.error('Error marking product out of stock:', error);
-    res.status(500).json({ error: 'Failed to mark product as out of stock' });
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    next(error);
   }
 });
 
@@ -1206,11 +1106,6 @@ router.delete('/removeProduct', authenticateToken, async (req, res) => {
       },
     });
 
-    // Invalidate caches
-    await cacheService.invalidateUserLists(customerId);
-    await cacheService.invalidateListDetail(listId);
-    console.log(`🗑️ Cache invalidated: list ${listId} (product removed)`);
-
     // Emit socket event for shop list sync
     if (list.shopId && req.io) {
       req.io.to(`shop_${list.shopId}_lists`).emit('list_product_removed', {
@@ -1252,11 +1147,6 @@ router.delete('/:id', authenticateToken, async (req, res) => {
         id: listId,
       },
     });
-
-    // Invalidate caches
-    await cacheService.invalidateUserLists(customerId);
-    await cacheService.invalidateListDetail(listId);
-    console.log(`🗑️ Cache invalidated: list ${listId} deleted`);
 
     // Emit socket event for shop list sync
     if (list.shopId && req.io) {
@@ -1309,6 +1199,7 @@ router.get('/:id/lowest-prices', authenticateToken, async (req, res) => {
     
     const allPrices = await prisma.productAtShop.findMany({
       where: {
+        shop: { shopType: 'WHOLESALE' },
         productId: {
           in: productIds,
         },
@@ -1325,7 +1216,7 @@ router.get('/:id/lowest-prices', authenticateToken, async (req, res) => {
       const prices = allPrices.filter(price => price.productId === productId);
       if (prices.length > 0) {
         lowestPrices[productId] = prices.reduce((lowest, current) => 
-          current.price < lowest.price ? current : lowest
+          getEffectivePrice(current).price < getEffectivePrice(lowest).price ? current : lowest
         );
       }
     });
@@ -1379,7 +1270,7 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       prisma.productAtShop.findMany({
         where: {
           productId: { in: candidateIds },
-          outOfStock: false,
+          outOfStock: false, shop: { shopType: 'WHOLESALE' },
         },
         include: {
           shop: true,
@@ -1392,6 +1283,7 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       prisma.bundlePromotion.findMany({
         where: {
           shop: {
+            shopType: 'WHOLESALE',
             products: {
               some: { productId: { in: candidateIds }, outOfStock: false },
             },
@@ -1458,19 +1350,6 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
     }
 
     // Helper function to get effective price (uses the real schema field)
-    const getEffectivePrice = (productAtShop) => {
-      const now = new Date();
-      const hasActiveOffer = productAtShop.offerPrice != null &&
-        productAtShop.offerExpiryDate != null &&
-        new Date(productAtShop.offerExpiryDate) >= now;
-
-      return {
-        price: parseFloat(hasActiveOffer ? productAtShop.offerPrice : productAtShop.price),
-        originalPrice: parseFloat(productAtShop.price),
-        offerPrice: hasActiveOffer ? parseFloat(productAtShop.offerPrice) : null,
-        hasActiveOffer
-      };
-    };
 
     // Cheapest shop overall — used for pricing and as a fallback target.
     const lowestPriceEntry = productAtShops.reduce((lowest, current) => {
@@ -1862,12 +1741,6 @@ router.post('/claim-bundle', authenticateToken, async (req, res) => {
 
       return { mainProduct, freeProducts };
     });
-
-    // Invalidate caches
-    if (userType === 'CUSTOMER') {
-      await cacheService.invalidateUserLists(userId);
-      await cacheService.invalidateListDetail(listId);
-    }
 
     // Keep the shared list in sync for everyone watching this shop
     if (list.shopId && req.io) {

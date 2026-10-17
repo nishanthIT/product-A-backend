@@ -1,3 +1,9 @@
+import { listUserChats, chatParticipantView, hydrateChatPeople } from '../services/chatDirectory.js';
+import { serviceError } from '../services/serviceErrors.js';
+import { lockAccountForWrite } from '../services/accountWriteBarrier.js';
+import { activeSuspension } from '../services/chatSafety.js';
+import { blockedPeers, hiddenAuthors } from '../services/chatSafety.js';
+import { hasShopFeatureAccess, SHOP_FEATURES } from '../services/accessControl.js';
 import { PrismaClient } from '@prisma/client';
 import fs from 'fs';
 import path from 'path';
@@ -7,215 +13,12 @@ import { userKey, userRoom } from '../services/realtime.js';
 
 const prisma = new PrismaClient();
 
-// Get all chats for a user (GLOBAL CHAT - all users can see all chats)
+// List existing authorized conversations without changing any chat records.
 export const getUserChats = async (req, res) => {
-  try {
-    const userId = req.user.id; // From JWT middleware
-    const userType = req.user.userType;
-
-    // Try to get cached chats first
-    const cachedChats = await cacheService.getCachedUserChats(userKey(userType, userId));
-    if (cachedChats) {
-      return res.status(200).json({ success: true, chats: cachedChats });
-    }
-
-    // Get user's shop group chat ID if they belong to a shop
-    let shopGroupChatId = null;
-    let shopId = null;
-    
-    if (userType === 'CUSTOMER') {
-      // Customer has shopId directly on their model
-      const customer = await prisma.customer.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = customer?.shopId;
-      
-      if (shopId) {
-        const shop = await prisma.shop.findUnique({
-          where: { id: shopId },
-          select: { groupChatId: true, name: true }
-        });
-        shopGroupChatId = shop?.groupChatId;
-        
-        // Auto-create shop group chat if it doesn't exist
-        if (!shopGroupChatId && shop) {
-          console.log('📢 Creating shop group chat for:', shop.name);
-          const groupChat = await prisma.chat.create({
-            data: {
-              name: `${shop.name} - Team Chat`,
-              type: 'GROUP',
-              participants: {
-                create: {
-                  userId: userId,
-                  userType: 'CUSTOMER',
-                  isAdmin: true
-                }
-              }
-            }
-          });
-          shopGroupChatId = groupChat.id;
-          
-          // Update shop with group chat ID
-          await prisma.shop.update({
-            where: { id: shopId },
-            data: { groupChatId: groupChat.id }
-          });
-          
-          // Add all existing employees to the group chat
-          const employees = await prisma.empolyee.findMany({
-            where: { shopId: shopId },
-            select: { id: true }
-          });
-          
-          for (const emp of employees) {
-            await prisma.chatParticipant.create({
-              data: {
-                chatId: groupChat.id,
-                userId: emp.id,
-                userType: 'EMPLOYEE',
-                isAdmin: false
-              }
-            }).catch(err => console.log('Could not add employee to group:', err.message));
-          }
-          
-          console.log('✅ Created shop group chat:', groupChat.id);
-        }
-      }
-    } else if (userType === 'EMPLOYEE' && req.user.shopId) {
-      const shop = await prisma.shop.findUnique({
-        where: { id: req.user.shopId },
-        select: { groupChatId: true }
-      });
-      shopGroupChatId = shop?.groupChatId;
-    }
-
-    // Build OR conditions for chat query
-    const orConditions = [
-      // Common/Global group chat (accessible to everyone)
-      { 
-        type: 'GROUP',
-        name: 'ALL Chat'
-      },
-      // Personal chats where user is actually a participant
-      {
-        type: 'PERSONAL',
-        participants: {
-          some: {
-            userId: userId,
-            userType: userType
-          }
-        }
-      }
-    ];
-
-    // Add shop group chat if user belongs to a shop
-    if (shopGroupChatId) {
-      orConditions.push({
-        id: shopGroupChatId,
-        type: 'GROUP'
-      });
-    }
-
-    // Get chats where user is actually a participant OR the main group chat OR shop group chat
-    const chats = await prisma.chat.findMany({
-      where: {
-        OR: orConditions
-      },
-      include: {
-        participants: {
-          include: {
-            // We'll need to join with Customer/Employee based on userType
-          }
-        },
-        messages: {
-          orderBy: {
-            createdAt: 'desc'
-          },
-          take: 1, // Get last message
-          include: {
-            readReceipts: true
-          }
-        }
-      },
-      orderBy: {
-        lastMessageAt: 'desc'
-      }
-    });
-
-    // Format the response
-    const formattedChats = await Promise.all(chats.map(async (chat) => {
-      const lastMessage = chat.messages[0];
-      
-      // Get ALL participants info (including current user for group chats)
-      const allParticipantsInfo = await Promise.all(
-        chat.participants.map(async (p) => {
-          if (p.userType === 'CUSTOMER') {
-            const customer = await prisma.customer.findUnique({
-              where: { id: p.userId },
-              select: { id: true, name: true, email: true }
-            });
-            if (customer) {
-              return { ...customer, userType: 'CUSTOMER' };
-            }
-          } else if (p.userType === 'EMPLOYEE') {
-            const employee = await prisma.empolyee.findUnique({
-              where: { id: p.userId },
-              select: { id: true, name: true, email: true }
-            });
-            if (employee) {
-              return { ...employee, userType: 'EMPLOYEE' };
-            }
-          }
-          return null;
-        })
-      );
-      
-      // Filter out null values (deleted users)
-      const validParticipants = allParticipantsInfo.filter(p => p !== null);
-      
-      // Get other participants (excluding current user)
-      const otherParticipants = validParticipants.filter(
-        p => !(Number(p.id) === Number(userId) && p.userType === userType)
-      );
-
-      // Calculate unread count
-      const unreadCount = lastMessage ? await prisma.message.count({
-        where: {
-          chatId: chat.id,
-          NOT: {
-            senderId: userId,
-            senderType: userType
-          },
-          readReceipts: {
-            none: {
-              userId: userId,
-              userType: userType
-            }
-          }
-        }
-      }) : 0;
-
-      return {
-        id: chat.id,
-        name: chat.name || otherParticipants.map(p => p.name).join(', '),
-        type: chat.type,
-        lastMessage: lastMessage?.content,
-        lastMessageTime: lastMessage?.createdAt,
-        unreadCount,
-        participants: validParticipants, // All participants including current user
-        otherParticipants: otherParticipants, // Other participants only
-        participantCount: validParticipants.length
-      };
-    }));
-
-    // Cache the chats for this user
-    await cacheService.cacheUserChats(userKey(userType, userId), formattedChats);
-
-    res.status(200).json({ success: true, chats: formattedChats });
-  } catch (error) {
-    console.error('Error fetching user chats:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch chats', error: error.message });
+  try { res.status(200).json({ success: true, chats: await listUserChats(req.user, prisma) }); }
+  catch (error) {
+    console.error('Chat directory unavailable', serviceError(error));
+    res.status(503).json({ success: false, message: 'Chat conversations are temporarily unavailable.' });
   }
 };
 
@@ -240,19 +43,22 @@ export const createChat = async (req, res) => {
     if (type === 'PERSONAL' && userType === 'EMPLOYEE') {
       const otherParticipant = participantIds[0];
       if (otherParticipant.userType === 'EMPLOYEE') {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'Employees cannot start private chats with other employees. Please use the shop group chat.' 
+        return res.status(403).json({
+          success: false,
+          message: 'Employees cannot start private chats with other employees. Please use the shop group chat.'
         });
       }
     }
 
+    const blocked = await blockedPeers(req.user);
+    if (participantIds.some(p => blocked.some(b => b.id === Number(p.userId) && b.userType === p.userType))) return res.status(403).json({ error: 'This conversation is blocked.' });
+
     // For personal chat, check if chat already exists
     if (type === 'PERSONAL' && participantIds.length === 1) {
-      const otherUserId = typeof participantIds[0].userId === 'number' 
-        ? participantIds[0].userId 
+      const otherUserId = typeof participantIds[0].userId === 'number'
+        ? participantIds[0].userId
         : parseInt(participantIds[0].userId);
-      
+
       const existingChat = await prisma.chat.findFirst({
         where: {
           type: 'PERSONAL',
@@ -318,23 +124,23 @@ export const createChat = async (req, res) => {
         if (p.userType === 'CUSTOMER') {
           userDetails = await prisma.customer.findUnique({
             where: { id: p.userId },
-            select: { id: true, name: true, email: true }
+            select: { id: true, name: true }
           });
         } else if (p.userType === 'EMPLOYEE') {
           userDetails = await prisma.empolyee.findUnique({
             where: { id: p.userId },
-            select: { id: true, name: true, email: true }
+            select: { id: true, name: true }
           });
         } else if (p.userType === 'ADMIN') {
           userDetails = await prisma.admin.findUnique({
             where: { id: p.userId },
-            select: { id: true, name: true, email: true }
+            select: { id: true, name: true }
           });
         }
         return {
           id: p.userId.toString(),
           name: userDetails?.name || 'Unknown',
-          email: userDetails?.email || '',
+
           userType: p.userType,
           isAdmin: p.isAdmin
         };
@@ -362,8 +168,8 @@ export const createChat = async (req, res) => {
     });
 
     // Return chat with full participant details
-    res.status(201).json({ 
-      success: true, 
+    res.status(201).json({
+      success: true,
       chat: {
         ...chat,
         participants: participantsWithDetails,
@@ -384,7 +190,7 @@ export const getChatById = async (req, res) => {
     const { chatId } = req.params;
     const { page = 1, limit = 50 } = req.query;
 
-    // Shop group chats are visible only through the caller's current shop.
+    // Check current ownership or active membership for the requested team.
     const access = await getChatAccess(req.user, chatId);
     if (!access) {
       return res.status(404).json({ success: false, message: 'Chat not found' });
@@ -393,29 +199,6 @@ export const getChatById = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You do not have access to this chat' });
     }
 
-    // Try to get cached messages for page 1
-    if (parseInt(page) === 1) {
-      const cachedMessages = await cacheService.getCachedMessages(chatId);
-      const cachedMeta = await cacheService.getCachedChatMetadata(chatId);
-      
-      if (cachedMessages && cachedMeta) {
-        // Update isOwnMessage for current user
-        const messagesWithOwn = cachedMessages.map(msg => ({
-          ...msg,
-          isOwnMessage: msg.senderId === userId && msg.senderType === userType
-        }));
-        return res.status(200).json({
-          success: true,
-          chat: {
-            ...cachedMeta,
-            messages: messagesWithOwn
-          }
-        });
-      }
-    }
-
-    // GLOBAL CHAT SYSTEM: Allow everyone to view any chat
-    // (Removed participant check for global access)
 
     // Get chat details
     const chat = await prisma.chat.findUnique({
@@ -430,7 +213,8 @@ export const getChatById = async (req, res) => {
     const messages = await prisma.message.findMany({
       where: {
         chatId,
-        deletedAt: null
+        deletedAt: null,
+        NOT: await hiddenAuthors(req.user)
       },
       orderBy: {
         createdAt: 'desc'
@@ -442,27 +226,16 @@ export const getChatById = async (req, res) => {
       }
     });
 
-    // Get sender details for each message
+    const senders = await hydrateChatPeople(messages.map(msg => ({ userId: msg.senderId, userType: msg.senderType })), prisma);
     const messagesWithSender = await Promise.all(
       messages.map(async (msg) => {
-        let sender = null;
-        if (msg.senderType === 'CUSTOMER') {
-          sender = await prisma.customer.findUnique({
-            where: { id: msg.senderId },
-            select: { id: true, name: true }
-          });
-        } else if (msg.senderType === 'EMPLOYEE') {
-          sender = await prisma.empolyee.findUnique({
-            where: { id: msg.senderId },
-            select: { id: true, name: true }
-          });
-        }
+        const sender = senders.get(`${msg.senderType}:${msg.senderId}`);
 
         // Get shared list data if this is a LIST_SHARE message
         let sharedListData = null;
-        if (msg.messageType === 'LIST_SHARE' && msg.sharedListId) {
+        if (msg.messageType === 'LIST_SHARE' && msg.sharedListId && req.user.shopId && (req.user.userType !== 'EMPLOYEE' || hasShopFeatureAccess(req.user, SHOP_FEATURES.LISTS))) {
           const list = await prisma.list.findUnique({
-            where: { id: msg.sharedListId },
+            where: { id: msg.sharedListId, shopId: req.user.shopId },
             include: {
               products: {
                 include: {
@@ -503,40 +276,7 @@ export const getChatById = async (req, res) => {
       })
     );
 
-    // Get full participant details
-    const participantsWithDetails = await Promise.all(
-      chat.participants.map(async (p) => {
-        if (p.userType === 'CUSTOMER') {
-          const customer = await prisma.customer.findUnique({
-            where: { id: p.userId },
-            select: { id: true, name: true, email: true }
-          });
-          if (customer) {
-            return {
-              ...customer,
-              userType: 'CUSTOMER',
-              isAdmin: p.isAdmin
-            };
-          }
-        } else if (p.userType === 'EMPLOYEE') {
-          const employee = await prisma.empolyee.findUnique({
-            where: { id: p.userId },
-            select: { id: true, name: true, email: true }
-          });
-          if (employee) {
-            return {
-              ...employee,
-              userType: 'EMPLOYEE',
-              isAdmin: p.isAdmin
-            };
-          }
-        }
-        return null;
-      })
-    );
-
-    // Filter out null values (deleted users)
-    const validParticipants = participantsWithDetails.filter(p => p !== null);
+    const validParticipants = await chatParticipantView(chat, prisma);
 
     const chatData = {
       id: chat.id,
@@ -547,17 +287,6 @@ export const getChatById = async (req, res) => {
       messages: messagesWithSender.reverse() // Oldest first
     };
 
-    // Cache the first page of messages and metadata
-    if (parseInt(page) === 1) {
-      await cacheService.cacheMessages(chatId, chatData.messages);
-      await cacheService.cacheChatMetadata(chatId, {
-        id: chat.id,
-        name: chat.name,
-        type: chat.type,
-        participants: validParticipants,
-        participantCount: validParticipants.length
-      });
-    }
 
     res.status(200).json({
       success: true,
@@ -577,6 +306,7 @@ export const sendMessage = async (req, res) => {
     const { chatId, content, messageType = 'TEXT', attachmentUrl, attachmentName, attachmentSize, sharedListId } = req.body;
 
     // Validation
+    if (typeof content !== 'string' || content.length > 10000) return res.status(400).json({ error: 'Messages must be 1–10,000 characters.' });
     if (!chatId || !content) {
       return res.status(400).json({ success: false, message: 'Chat ID and content are required' });
     }
@@ -593,6 +323,12 @@ export const sendMessage = async (req, res) => {
         listOwnerCheck = { id: sharedListId, customerId: userId };
       }
 
+      if (userType === 'EMPLOYEE' && !hasShopFeatureAccess(req.user, SHOP_FEATURES.LISTS)) return res.status(403).json({ error: 'List access is required to share lists' });
+      const targetAccess = await getChatAccess(req.user, chatId);
+      if (!targetAccess?.canRead || !targetAccess.shopId || targetAccess.shopId !== req.user.shopId) {
+        return res.status(403).json({ error: 'Share shop lists in their own team chat.' });
+      }
+      listOwnerCheck.shopId = req.user.shopId;
       const list = await prisma.list.findFirst({
         where: listOwnerCheck,
         include: {
@@ -656,8 +392,19 @@ export const sendMessage = async (req, res) => {
       }
     }
 
-    // Create message
-    const message = await prisma.message.create({
+    const message = await prisma.$transaction(async tx => {
+      await lockAccountForWrite(tx, req.user);
+      if (await activeSuspension(req.user, tx)) throw Object.assign(new Error('Chat posting is suspended. See Chat safety for details.'), { status: 403 });
+      if (attachmentUrl) {
+        const match = typeof attachmentUrl === 'string' && /^\/uploads\/chat\/([a-zA-Z0-9._-]+)$/.exec(attachmentUrl);
+        if (match) await tx.$queryRaw`SELECT "filename" FROM "ChatUpload" WHERE "filename" = ${match[1]} FOR UPDATE`;
+        const upload = match && await tx.chatUpload.findUnique({ where: { filename: match[1] } });
+        if (!upload || upload.uploaderId !== userId || upload.uploaderType !== userType) {
+          throw Object.assign(new Error('Upload your own attachment before sharing it.'), { status: 403 });
+        }
+      }
+    // Create message while holding the attachment ownership lock
+    return tx.message.create({
       data: {
         chatId,
         senderId: userId,
@@ -669,6 +416,8 @@ export const sendMessage = async (req, res) => {
         attachmentSize,
         sharedListId: messageType === 'LIST_SHARE' ? sharedListId : null
       }
+    });
+
     });
 
     // Update chat's lastMessageAt
@@ -714,7 +463,7 @@ export const sendMessage = async (req, res) => {
     // Broadcast message to all users in the chat room via Socket.IO (except sender)
     if (req.io) {
       const senderSocketId = req.userSockets?.get(userKey(userType, userId));
-      
+
       // Invalidate user chats cache for all participants
       const chatParticipants = await prisma.chatParticipant.findMany({
         where: { chatId },
@@ -723,35 +472,35 @@ export const sendMessage = async (req, res) => {
       for (const p of chatParticipants) {
         await cacheService.invalidateUserChats(userKey(p.userType, p.userId));
       }
-      
+
+      const excludedPeers = await blockedPeers(req.user);
+      const excludedRooms = excludedPeers.map(p => userRoom(p.userType, p.id));
       const messagePayload = {
         ...formattedMessage,
         isOwnMessage: false
       };
-      
+
       // Broadcast to chat room (for users actively viewing this chat)
       if (senderSocketId) {
         // Broadcast to room but exclude the sender
-        req.io.to(`chat_${chatId}`).except(senderSocketId).emit('message_received', messagePayload);
+        req.io.to(`chat_${chatId}`).except([...excludedRooms, senderSocketId]).emit('message_received', messagePayload);
       } else {
         // Fallback: broadcast to all in room (frontend will filter)
-        req.io.to(`chat_${chatId}`).emit('message_received', messagePayload);
+        req.io.to(`chat_${chatId}`).except(excludedRooms).emit('message_received', messagePayload);
       }
-      
-      // ALSO broadcast to each participant's user room (for users not in chat view)
-      // This ensures real-time delivery even if user is on a different screen
+
+      // Background clients receive only an invalidation hint, never private message bodies.
+      // They fetch through current REST authorization (including shop scope and blocks).
       for (const participant of chatParticipants) {
-        // Skip the sender
-        if (participant.userId === userId && participant.userType === userType) continue;
-        
-        const participantUserRoom = userRoom(participant.userType, participant.userId);
-        req.io.to(participantUserRoom).emit('message_received', messagePayload);
+        if (excludedPeers.some(p => p.id === participant.userId && p.userType === participant.userType)) continue;
+        req.io.to(userRoom(participant.userType, participant.userId)).emit('chats_changed');
       }
     }
 
     res.status(201).json({ success: true, message: formattedMessage });
   } catch (error) {
-    console.error('Error sending message:', error);
+    if ([401, 403].includes(error.status)) return res.status(error.status).json({ error: error.message });
+    console.error('Message send failed');
     res.status(500).json({ success: false, message: 'Failed to send message', error: error.message });
   }
 };
@@ -873,8 +622,7 @@ export const getAllUsers = async (req, res) => {
     // Build search filter for name and email
     const searchFilter = search ? {
       OR: [
-        { name: { contains: search, mode: 'insensitive' } },
-        { email: { contains: search, mode: 'insensitive' } }
+        { name: { contains: search, mode: 'insensitive' } }
       ]
     } : {};
 
@@ -886,14 +634,14 @@ export const getAllUsers = async (req, res) => {
       const shopId = req.user.shopId;
       const customerFilter = req.user.company
         ? searchFilter
-        : shopId ? { shopId, ...searchFilter } : null;
+        : shopId ? { supermarketOwnerships: { some: { shopId } }, ...searchFilter } : null;
 
       const customers = customerFilter ? await prisma.customer.findMany({
         where: customerFilter,
         select: {
           id: true,
           name: true,
-          email: true,
+
           userType: true
         }
       }) : [];
@@ -901,7 +649,7 @@ export const getAllUsers = async (req, res) => {
       allUsers = customers.map(user => ({
         id: user.id.toString(),
         name: user.name || 'Shop Owner',
-        phone: user.email,
+        phone: '',
         userType: 'CUSTOMER',
         isOnline: false
       }));
@@ -922,7 +670,7 @@ export const getAllUsers = async (req, res) => {
         select: {
           id: true,
           name: true,
-          email: true,
+
           userType: true
         }
       });
@@ -937,7 +685,7 @@ export const getAllUsers = async (req, res) => {
         select: {
           id: true,
           name: true,
-          email: true,
+
           userType: true
         }
       });
@@ -946,14 +694,14 @@ export const getAllUsers = async (req, res) => {
         ...employees.map(user => ({
           id: user.id.toString(),
           name: user.name,
-          phone: user.email,
+          phone: '',
           userType: 'EMPLOYEE',
           isOnline: false
         })),
         ...admins.map(user => ({
           id: user.id.toString(),
           name: user.name || 'Admin',
-          phone: user.email,
+          phone: '',
           userType: 'ADMIN',
           isOnline: false
         }))
@@ -961,15 +709,12 @@ export const getAllUsers = async (req, res) => {
 
     } else {
       // CUSTOMER - only see employees from their own shop + other customers
-      
+
       // First get the customer's shop
-      const customer = await prisma.customer.findUnique({
-        where: { id: currentUserId },
-        select: { shopId: true }
-      });
-      
+      const customer = { shopId: req.user.shopId };
+
       const customerShopId = customer?.shopId;
-      
+
       // Other customers (for common chat)
       const customers = await prisma.customer.findMany({
         where: {
@@ -979,7 +724,7 @@ export const getAllUsers = async (req, res) => {
         select: {
           id: true,
           name: true,
-          email: true,
+
           userType: true
         }
       });
@@ -987,13 +732,13 @@ export const getAllUsers = async (req, res) => {
       // Employees ONLY from the customer's shop
       const employees = customerShopId ? await prisma.empolyee.findMany({
         where: {
-          shopId: customerShopId,
+          shopMemberships: { some: { shopId: customerShopId, status: 'ACTIVE' } },
           ...searchFilter
         },
         select: {
           id: true,
           name: true,
-          email: true,
+
           userType: true
         }
       }) : [];
@@ -1003,7 +748,7 @@ export const getAllUsers = async (req, res) => {
         select: {
           id: true,
           name: true,
-          email: true,
+
           userType: true
         }
       });
@@ -1012,27 +757,29 @@ export const getAllUsers = async (req, res) => {
         ...customers.map(user => ({
           id: user.id.toString(),
           name: user.name,
-          phone: user.email,
+          phone: '',
           userType: 'CUSTOMER',
           isOnline: false
         })),
         ...employees.map(user => ({
           id: user.id.toString(),
           name: user.name,
-          phone: user.email,
+          phone: '',
           userType: 'EMPLOYEE',
           isOnline: false
         })),
         ...admins.map(user => ({
           id: user.id.toString(),
           name: user.name || 'Admin',
-          phone: user.email,
+          phone: '',
           userType: 'ADMIN',
           isOnline: false
         }))
       ];
     }
-    
+
+    const peers = await blockedPeers(req.user);
+    allUsers = allUsers.filter(u => !peers.some(p => p.id === Number(u.id) && p.userType === u.userType));
     res.status(200).json({
       success: true,
       users: allUsers
@@ -1040,10 +787,10 @@ export const getAllUsers = async (req, res) => {
 
   } catch (error) {
     console.error('❌ getAllUsers error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to get users', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get users',
+      error: error.message
     });
   }
 };
@@ -1069,23 +816,23 @@ export const deleteMessage = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You can only delete your own messages' });
     }
 
-    // If message has an attachment, delete the file from disk
-    if (message.attachmentUrl) {
+    // Legacy URLs are not trusted paths or proof of upload ownership.
+    await prisma.$transaction(async tx => {
+      await tx.message.delete({ where: { id: messageId } });
+      const match = typeof message.attachmentUrl === 'string' && /^\/uploads\/chat\/([a-zA-Z0-9._-]+)$/.exec(message.attachmentUrl);
+      if (!match) return;
+      await tx.$queryRaw`SELECT "filename" FROM "ChatUpload" WHERE "filename" = ${match[1]} FOR UPDATE`;
+      const upload = await tx.chatUpload.findUnique({ where: { filename: match[1] } });
+      if (!upload || upload.uploaderId !== userId || upload.uploaderType !== userType) return;
+      if (await tx.message.count({ where: { attachmentUrl: message.attachmentUrl } })) return;
       try {
-        const filePath = path.join(process.cwd(), message.attachmentUrl);
-        
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      } catch (fileError) {
-        console.error('⚠️ Error deleting attachment file:', fileError);
-        // Continue with message deletion even if file deletion fails
+        await fs.promises.unlink(path.resolve('uploads/chat', match[1])).catch(error => { if (error.code !== 'ENOENT') throw error; });
+        // Future sends cannot attach a file deleted during cleanup.
+        await tx.chatUpload.delete({ where: { filename: match[1] } });
+      } catch {
+        // Keep the ownership row for orphan-maintenance retry, without rolling back the user's message deletion.
+        console.warn('Chat attachment cleanup deferred');
       }
-    }
-
-    // Delete the message
-    await prisma.message.delete({
-      where: { id: messageId }
     });
 
     // Broadcast deletion to chat room via Socket.IO
@@ -1100,10 +847,10 @@ export const deleteMessage = async (req, res) => {
 
   } catch (error) {
     console.error('❌ deleteMessage error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to delete message', 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete message',
+      error: error.message
     });
   }
 };

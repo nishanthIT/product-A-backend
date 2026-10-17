@@ -45,6 +45,8 @@ const counts = async () => ({
 before(async () => {
   await resetDatabase();
   prisma = await getPrisma();
+  // Reproduce the pre-multi-shop schema, which allowed the deliberately orphaned historical list below.
+  await prisma.$executeRawUnsafe('ALTER TABLE "List" DROP CONSTRAINT IF EXISTS "List_supermarket_scope_fkey"');
   seed = await seedBase(prisma);
   app = await startApp();
 
@@ -100,7 +102,7 @@ describe('employee membership migration', () => {
 
   test('dry run classifies by provenance and writes nothing', async () => {
     before = await counts();
-    oldShopEmpToken = jwt.sign({ id: E.shopEmp.id, email: E.shopEmp.email, userType: 'EMPLOYEE' }, process.env.JWT_SECRET);
+    oldShopEmpToken = jwt.sign({ id: E.shopEmp.id, email: E.shopEmp.email, userType: 'EMPLOYEE' }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     plan = buildPlan(await collectFacts(prisma));
     byKey = Object.fromEntries(Object.entries(E).map(([k, e]) => [k, plan.items.find((i) => i.employeeId === e.id)]));

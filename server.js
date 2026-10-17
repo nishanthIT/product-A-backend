@@ -1,5 +1,14 @@
+import 'dotenv/config';
+import { verifyServiceSchema } from './src/services/serviceReadiness.js';
+import { serviceError } from './src/services/serviceErrors.js';
+import { startModerationWorker, moderationWorkerStatus } from './src/services/moderation.js';
+import { restoreGuard } from './src/middleware/restoreGuard.js';
+import chatSafetyRoutes from './src/routes/chatSafetyRoutes.js';
+import publicResources from './src/routes/publicResources.js';
+import accountDeletionRoutes from './src/routes/accountDeletionRoutes.js';
+import { jwtSecret } from './src/services/sessionSecurity.js';
+import privateUploads from './src/middleware/privateUploads.js';
 import express from "express";
-import dotenv from "dotenv";
 import authRoutes from "./src/routes/authRoutes.js";
 import chatRoutes from "./src/routes/chat.js";
 import priceReportsRoutes from "./src/routes/priceReports.js";
@@ -33,18 +42,23 @@ import multiLayerCache from './src/services/multiLayerCache.js';
 import expiryNotificationService from './src/services/expiryNotificationService.js';
 import { attachSocketServer } from './src/realtime/socketServer.js';
 
-dotenv.config();
+jwtSecret(); // Fail before accepting requests when the signing secret is missing.
 const app = express();
 const server = createServer(app);
 
 // Respect reverse-proxy headers in production (protocol/host forwarding).
 app.set('trust proxy', 1);
 
-// Initialize Redis connection
-(async () => {
-  const connected = await redisService.connect();
-  console.log(`📊 Redis Status:`, redisService.getStatus());
-})();
+// Dependency failures are startup errors, not a healthy HTTP server with broken auth.
+try {
+  await verifyServiceSchema();
+  console.log('Session validation dependencies ready (PostgreSQL)');
+  await redisService.connect();
+  console.log('Cache status:', redisService.getStatus());
+} catch (error) {
+  console.error('Backend dependencies unavailable; startup aborted', serviceError(error));
+  process.exit(1);
+}
 
 // Configure Socket.IO with CORS - Allow all origins
 const io = new Server(server, {
@@ -60,11 +74,13 @@ const corsOptions = {
   origin: true,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With', 'X-Supermarket-Id', 'Idempotency-Key'],
   exposedHeaders: ['Set-Cookie'],
   optionsSuccessStatus: 204
 };
 
+// A restored environment stays closed until deletion-ledger replay and operational checks finish.
+app.use(restoreGuard);
 app.use(cors(corsOptions));
 
 // Handle preflight requests explicitly
@@ -74,6 +90,8 @@ app.use(cookieParser());
 app.use(express.json());
 
 // Serve uploaded files
+app.use('/uploads', privateUploads);
+app.use('/api/uploads', privateUploads);
 app.use('/uploads', express.static('uploads'));
 app.use('/api/uploads', express.static('uploads'));
 app.use('/images', express.static('images'));
@@ -92,6 +110,9 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use('/api/chat-safety', chatSafetyRoutes);
+app.use(publicResources);
+app.use("/api/account-deletion", accountDeletionRoutes);
 app.use("/api", authRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/price-reports", priceReportsRoutes);
@@ -121,15 +142,21 @@ app.use((err, req, res, next) => {
   console.error('=== GLOBAL ERROR HANDLER ===');
   console.error('Error:', err.message);
   console.error('Stack:', err.stack);
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Health check endpoint with Redis status
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  try { await verifyServiceSchema(); }
+  catch (error) {
+    console.error('Backend health check failed', serviceError(error));
+    return res.status(503).json({ success: false, status: 'unavailable', service: error.service || 'database' });
+  }
   const status = cacheService.getStatus();
-  res.json({
-    success: true,
-    status: 'healthy',
+  res.status(moderationWorkerStatus.state === 'ready' ? 200 : 503).json({
+    success: moderationWorkerStatus.state === 'ready',
+    status: moderationWorkerStatus.state === 'ready' ? 'healthy' : 'degraded',
+    services: { sessions: 'ready', moderation: moderationWorkerStatus },
     timestamp: new Date().toISOString(),
     cache: status,
     inventoryCache: multiLayerCache.getStats(),
@@ -137,10 +164,12 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+let stopModerationWorker;
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
   
+  stopModerationWorker = startModerationWorker(io);
   // Start expiry notification service
   expiryNotificationService.start();
   console.log('✅ Expiry notification service started');
@@ -148,3 +177,11 @@ server.listen(PORT, () => {
 
 // Allow expiry notification service to push realtime events to connected users.
 expiryNotificationService.setRealtimeContext(io);
+
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+  stopModerationWorker?.();
+  void redisService.disconnect();
+  io.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+});

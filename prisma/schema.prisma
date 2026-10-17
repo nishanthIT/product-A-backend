@@ -16,7 +16,9 @@ model Admin {
   shopId           String?       // Shop owned/managed by this admin
   resetToken       String?
   resetTokenExpiry DateTime?
-  reviewedReports  PriceReport[]
+  sessionVersion   Int @default(0)
+  reviewedReports  PriceReport[] @relation("AdminPriceReviews")
+  submittedPriceReports PriceReport[] @relation("AdminPriceReports")
   employees        Empolyee[]    // Employees created by this admin
   shop             Shop?         @relation(fields: [shopId], references: [id], onDelete: SetNull)
   lists            List[]        @relation("AdminLists")
@@ -39,6 +41,7 @@ model Customer {
   points             Decimal         @default(0)
   resetToken         String?
   resetTokenExpiry   DateTime?
+  sessionVersion     Int @default(0)
   shopId             String?         // Shop owned by this customer
   lists              List[]
   priceReports       PriceReport[]
@@ -47,6 +50,14 @@ model Customer {
   employees          Empolyee[]      @relation("CustomerEmployees") // Employees created by this customer
   tasksCreated       Task[]          @relation("TasksCreated") // Tasks created by this admin
   shopEmployeeMemberships ShopEmployeeMembership[]
+  supermarketOwnerships SupermarketOwnership[] @relation("SupermarketOwners")
+  // Preference only: composite FK guarantees it is one of this customer's ownerships.
+  defaultSupermarketId String?
+  defaultSupermarketVersion Int @default(0)
+  defaultOwnership SupermarketOwnership? @relation("DefaultSupermarket", fields: [id, defaultSupermarketId], references: [customerId, shopId], onDelete: NoAction, onUpdate: NoAction)
+  supermarketMigrationReviews SupermarketMigrationReview[]
+  registrationReceipt RegistrationReceipt?
+  supermarketCreationReceipts SupermarketCreationReceipt[]
 
   @@index([shopId])
 }
@@ -61,6 +72,7 @@ model Product {
   img                   Json?
   retailSize            String?
   caseBarcode           String?
+  packagingConfigurations ProductPackaging[]
   rrp                   Decimal?
   category              String?
   actionLog             ActionLog[]
@@ -70,7 +82,30 @@ model Product {
   bundleBuyItems        BundlePromotionBuyItem[]
   bundleGetItems        BundlePromotionGetItem[]
   expiryProducts        ExpiryProduct[]
+  supermarketStock      SupermarketProductState[]
   wasteRecords          WasteRecord[]
+}
+
+// A case is a separate trade item. Product.barcode remains the unit identity;
+// legacy scalar sizes/barcode are compatibility fields, not a list of cases.
+model ProductPackaging {
+  id                 String   @id @default(cuid())
+  productId          String
+  caseBarcode        String
+  caseGtin           String   @unique
+  unitsPerCase       Int
+  packageSize        String
+  packageSizeKey     String
+  packing            String
+  source             String
+  sourceReferences   Json
+  createdAt          DateTime @default(now())
+  product            Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  supplierPrices     ProductAtShop[]
+  priceTiers         PriceTier[]
+
+  @@index([productId])
+  @@index([caseBarcode])
 }
 
 model Shop {
@@ -103,8 +138,60 @@ model Shop {
   supplierPayoutRecords SupplierPayoutRecord[] // Supplier payout records
   shiftSheetRecords ShiftSheetRecord[] // Daily shift sheet records
   employeeMemberships ShopEmployeeMembership[]
+  supermarketOwnerships SupermarketOwnership[]
+  creationReceipts SupermarketCreationReceipt[]
+  retailStock SupermarketProductState[]
+  operationalLists List[]
 
   @@index([shopType])
+  @@unique([id, shopType])
+}
+
+// Adds ownership to existing CUSTOMER Shop rows. No second supermarket table or copied data.
+model SupermarketOwnership {
+  id String @id @default(cuid())
+  customerId Int
+  shopId String
+  // SQL CHECK + composite FK prevent WHOLESALE ownership, including direct SQL writes.
+  shopType ShopType @default(CUSTOMER)
+  source String
+  createdAt DateTime @default(now())
+  customer Customer @relation("SupermarketOwners", fields: [customerId], references: [id], onDelete: Cascade)
+  shop Shop @relation(fields: [shopId, shopType], references: [id, shopType], onDelete: Restrict, onUpdate: Restrict)
+  defaultFor Customer[] @relation("DefaultSupermarket")
+
+  @@unique([customerId, shopId])
+  @@index([shopId])
+}
+
+model SupermarketMigrationReview {
+  id String @id @default(cuid())
+  customerId Int
+  reason String
+  evidence Json
+  createdAt DateTime @default(now())
+  resolvedAt DateTime?
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, reason])
+}
+
+// Durable recovery ledger committed in the same transaction as each customer's mapping.
+model SupermarketMigrationRun {
+  id String @id
+  planHash String
+  createdAt DateTime @default(now())
+  recoveredAt DateTime?
+  changes Json
+}
+
+// HMAC of the original verified registration request; never stores OTP/password plaintext.
+model RegistrationReceipt {
+  requestHash String @id
+  customerId Int @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 }
 
 // ===== AGE-RESTRICTED PRODUCT REQUEST RECORDS =====
@@ -113,8 +200,8 @@ model AgeRestrictedRecord {
   shopId          String
   requestedAt     DateTime
   childGender     ChildGender
-  productCategory String
-  productName     String
+  productCategory String?
+  productName     String?
   description     String?
   recordedBy      String
   createdById     Int
@@ -133,6 +220,8 @@ model AgeRestrictedRecord {
 
 // ===== AGE RESTRICTION INCIDENT RECORDS (shop tool) =====
 model AgeRestrictionRecord {
+  productCategory String?
+  productName     String?
   id            String    @id @default(cuid())
   shopId        String
   occurredAt    DateTime
@@ -164,6 +253,15 @@ model ProductAtShop {
   locationCode     String?
   offerExpiryDate  DateTime?
   offerPrice       Decimal?
+  // Price/offerPrice are totals for this priced pack, never inferred from Product.caseSize.
+  packagingId      String?
+  unitsPerPack     Int?
+  pricedUnitSize   String?
+  sourcePricing    Json?
+  priceObservedAt  DateTime?
+  // Explicitly imported current Dhamecha price; no fabricated promotion expiry.
+  offerPriceSource String?
+  packaging        ProductPackaging? @relation(fields: [packagingId], references: [id], onDelete: Restrict)
   outOfStock       Boolean            @default(false)
   inHandStock      Int?
   lists            ListProduct[]
@@ -176,6 +274,7 @@ model ProductAtShop {
 
   @@unique([shopId, productId])
   @@index([employeeId, updatedAt])
+  @@index([packagingId])
 }
 
 model PriceTier {
@@ -183,9 +282,15 @@ model PriceTier {
   productAtShopId String
   quantity        Int
   price           Decimal
+  // Imported tiers are case totals; quantity counts retail units when the base is one unit.
+  packagingId     String?
+  sourcePricing   Json?
+  priceObservedAt DateTime?
+  packaging       ProductPackaging? @relation(fields: [packagingId], references: [id], onDelete: Restrict)
   createdAt       DateTime      @default(now())
   productAtShop   ProductAtShop @relation(fields: [productAtShopId], references: [id], onDelete: Cascade)
 
+  @@index([packagingId])
   @@unique([productAtShopId, quantity])
   @@index([productAtShopId])
 }
@@ -217,6 +322,8 @@ model Empolyee {
   createdByCustomer   Customer?        @relation("CustomerEmployees", fields: [createdByCustomerId], references: [id], onDelete: SetNull)
   lists               List[]           @relation("EmployeeLists")
   taskAssignments     TaskAssignment[] // Tasks assigned to this employee
+  priceReports        PriceReport[] @relation("EmployeePriceReports")
+  reviewedPriceReports PriceReport[] @relation("EmployeePriceReviews")
 
   @@index([shopId])
   @@index([createdByAdminId])
@@ -331,6 +438,7 @@ model List {
   employeeId   Int?          // Employee who created the list
   adminId      Int?          // Admin who created/owns the list
   shopId       String?       // Shop this list belongs to
+  supermarket Shop? @relation(fields: [shopId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "List_supermarket_scope_fkey")
   creatorType  UserType      @default(CUSTOMER) // Who created: ADMIN, EMPLOYEE, CUSTOMER
   isTracking   Boolean       @default(false) // Is this a tracked list?
   copiedFromId String?       // If this list was copied from another list
@@ -364,6 +472,8 @@ model TrackedList {
 model ListProduct {
   id                String           @id @default(cuid())
   listId            String
+  // Provenance only; never grants access. Null for legacy items with unknown origins.
+  outOfStockSourceListId String?
   productAtShopId   String
   quantity          Int              @default(1)
   isPurchased       Boolean          @default(false)
@@ -424,6 +534,7 @@ model ExpiryCategory {
 }
 
 model Chat {
+  contentReports ContentReport[]
   id            String            @id @default(cuid())
   name          String?
   type          ChatType          @default(PERSONAL)
@@ -462,6 +573,7 @@ model Message {
   messageType    MessageType   @default(TEXT)
   sharedListId   String?       // ID of shared list (for LIST_SHARE messages)
   chat           Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  reports        ContentReport[]
   readReceipts   MessageRead[]
   sharedList     List?         @relation("SharedListMessages", fields: [sharedListId], references: [id], onDelete: SetNull)
 
@@ -484,7 +596,10 @@ model MessageRead {
 
 model PriceReport {
   id            String       @id @default(cuid())
-  reporterId    Int
+  reporterId    Int?
+  reporterType  UserType @default(CUSTOMER)
+  reporterEmployeeId Int?
+  reporterAdminId Int?
   productId     String
   shopId        String
   currentPrice  Decimal
@@ -496,12 +611,18 @@ model PriceReport {
   updatedAt     DateTime     @updatedAt
   reviewedAt    DateTime?
   reviewedBy    Int?
+  reviewedByEmployeeId Int?
   product       Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
-  reporter      Customer     @relation(fields: [reporterId], references: [id], onDelete: Cascade)
-  reviewer      Admin?       @relation(fields: [reviewedBy], references: [id])
+  reporter      Customer?    @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  reporterEmployee Empolyee? @relation("EmployeePriceReports", fields: [reporterEmployeeId], references: [id], onDelete: Cascade)
+  reporterAdmin Admin? @relation("AdminPriceReports", fields: [reporterAdminId], references: [id], onDelete: Cascade)
+  reviewer      Admin? @relation("AdminPriceReviews", fields: [reviewedBy], references: [id])
+  reviewerEmployee Empolyee? @relation("EmployeePriceReviews", fields: [reviewedByEmployeeId], references: [id], onDelete: SetNull)
   shop          Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
 
   @@index([reporterId, status])
+  @@index([reporterEmployeeId, status])
+  @@index([reporterAdminId, status])
   @@index([status, createdAt])
   @@index([productId, shopId])
 }
@@ -665,11 +786,11 @@ model Task {
   dueDate     DateTime?
   status      TaskStatus       @default(PENDING)
   shopId      String
-  createdById Int              // Customer (Admin) who created the task
+  createdById Int?             // Removed when a departing owner deletes their account
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
   shop        Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  createdBy   Customer         @relation("TasksCreated", fields: [createdById], references: [id], onDelete: Cascade)
+  createdBy   Customer?        @relation("TasksCreated", fields: [createdById], references: [id], onDelete: SetNull)
   assignments TaskAssignment[]
 
   @@index([shopId])
@@ -948,4 +1069,169 @@ enum CertificateType {
   INSURANCE
   ELECTRIC
   HYGIENE
+}
+
+// Durable owner-scoped retry receipt. Never expires: a delayed retry cannot create another shop.
+model SupermarketCreationReceipt {
+  customerId Int
+  requestKey String
+  payloadHash String
+  shopId String
+  createdAt DateTime @default(now())
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Restrict)
+  @@id([customerId, requestKey])
+}
+
+// Retail inventory belongs to a customer's supermarket, never a supplier price row.
+model SupermarketProductState {
+  shopId String
+  shopType ShopType @default(CUSTOMER)
+  productId String
+  inHandStock Int?
+  updatedAt DateTime @updatedAt
+  shop Shop @relation(fields: [shopId, shopType], references: [id, shopType], onDelete: Restrict, onUpdate: Restrict)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  @@id([shopId, productId])
+  @@index([productId])
+}
+
+// Company visibility is permission-controlled and recorded without logging customer PII.
+model SupermarketAdminAccessLog {
+  id String @id @default(cuid())
+  actorId Int
+  actorType UserType
+  action String
+  supermarketId String?
+  createdAt DateTime @default(now())
+  @@index([actorId, actorType, createdAt])
+  @@index([supermarketId, createdAt])
+}
+
+// Only a SHA-256 digest is retained; never store raw bearer credentials.
+model RevokedSession {
+  tokenHash String @id
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+
+model ChatUpload {
+  filename String @id
+  uploaderId Int
+  uploaderType UserType
+  createdAt DateTime @default(now())
+  @@index([uploaderId, uploaderType])
+}
+
+// Durable deletion workflow. IDs support backup erasure; no raw password/token is stored.
+model AccountDeletionJob {
+  id String @id @default(cuid())
+  userId Int
+  userType UserType
+  receiptHash String @unique
+  status String @default("REQUESTED")
+  attempts Int @default(0)
+  filePaths Json @default("[]")
+  reviewEvidence Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+  @@unique([userId, userType])
+  @@index([status, createdAt])
+}
+
+model UserBlock {
+  id String @id @default(cuid())
+  userId Int
+  userType UserType
+  blockedId Int
+  blockedType UserType
+  createdAt DateTime @default(now())
+  @@unique([userId, userType, blockedId, blockedType])
+  @@index([blockedId, blockedType])
+}
+model CommunityAcceptance {
+  userId Int
+  userType UserType
+  version String
+  acceptedAt DateTime @default(now())
+  @@id([userId, userType])
+}
+model ContentReport {
+  id String @id @default(cuid())
+  messageId String?
+  reporterId Int?
+  reporterType UserType
+  reason String
+  status String @default("PENDING")
+  createdAt DateTime @default(now())
+  resolvedAt DateTime?
+  moderatorId Int?
+  resolutionNote String?
+  explanation String?
+  reportedUserId Int?
+  reportedUserType UserType?
+  chatId String?
+  chat Chat? @relation(fields: [chatId], references: [id], onDelete: SetNull)
+  actions ChatModerationAction[]
+  evidence Json?
+  evidenceFile String?
+  message Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  @@index([status, createdAt])
+  @@index([reporterId, reporterType])
+}
+
+// A database expiry, rather than a process timer, survives restarts and covers all sessions.
+model ChatSuspension {
+  scope String @default("CHAT")
+  startedAt DateTime @default(now())
+  id String @id @default(cuid())
+  userId Int
+  userType UserType
+  until DateTime
+  reason String
+  moderatorId Int?
+  updatedAt DateTime @updatedAt
+  @@unique([userId, userType, scope])
+  @@index([until])
+}
+
+model ChatModerationAction {
+  reportId String?
+  report ContentReport? @relation(fields: [reportId], references: [id], onDelete: SetNull)
+  id String @id @default(cuid())
+  userId Int
+  userType UserType
+  moderatorId Int?
+  action String
+  reason String
+  until DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, userType, createdAt])
+}
+
+// Durable, resumable, bounded batches; no account deletion or other authors' messages.
+model CacheEntry {
+  key String @id
+  type String
+  value Json
+  revision String
+  expiresAt DateTime?
+  @@index([expiresAt])
+}
+
+model ModerationDeletionJob {
+  id String @id @default(cuid())
+  userId Int
+  userType UserType
+  moderatorId Int?
+  reason String
+  cutoff DateTime @default(now())
+  status String @default("PENDING")
+  removed Int @default(0)
+  attempts Int @default(0)
+  lastError String?
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+  @@index([status, updatedAt])
 }

@@ -1,3 +1,4 @@
+import { barcodeAliases } from './productBarcodes.js';
 import { PrismaClient } from '@prisma/client';
 
 /*
@@ -50,10 +51,7 @@ function parseQuery(raw) {
 
 // Scanners report UPC-A both with and without the leading 0.
 function codeVariants(code) {
-  const variants = [code];
-  if (/^0\d{12}$/.test(code)) variants.push(code.slice(1));
-  if (/^\d{12}$/.test(code)) variants.push(`0${code}`);
-  return variants;
+  return barcodeAliases(code);
 }
 
 // Elasticsearch-style AUTO fuzziness.
@@ -148,7 +146,7 @@ function makeDoc(row) {
     words,
     wordStarts,
     compact: words.join(''),
-    codes: [...new Set([normalizeCode(row.barcode), normalizeCode(row.caseBarcode)].filter(Boolean))],
+    codes: [...new Set([normalizeCode(row.barcode), normalizeCode(row.caseBarcode), ...(row.packagingConfigurations || []).map(p => normalizeCode(p.caseBarcode))].filter(Boolean))],
   };
 }
 
@@ -460,7 +458,7 @@ function scoreDoc(doc, query, interpretations, exactCode, partialCode) {
 const prisma = new PrismaClient();
 const INDEX_TTL_MS = 30 * 60 * 1000;
 const FALLBACK_CANDIDATE_LIMIT = 3000;
-const INDEX_SELECT = { id: true, title: true, barcode: true, caseBarcode: true };
+const INDEX_SELECT = { id: true, title: true, barcode: true, caseBarcode: true, packagingConfigurations: { select: { caseBarcode: true } } };
 
 let activeIndex = null;
 let builtAt = 0;
@@ -508,6 +506,9 @@ async function loadFallbackCandidates(rawQuery) {
     or.push(
       { barcode: { contains: query.code, mode: 'insensitive' } },
       { caseBarcode: { contains: query.code, mode: 'insensitive' } },
+      { barcode: { in: barcodeAliases(query.code) } },
+      { caseBarcode: { in: barcodeAliases(query.code) } },
+      { packagingConfigurations: { some: { caseBarcode: { in: barcodeAliases(query.code) } } } },
     );
   }
   if (!or.length) return [];
@@ -545,7 +546,8 @@ function applyToIndexes(op) {
 /** Adds/updates a product in the search index (row needs id, title, barcode, caseBarcode). */
 export function indexProduct(row) {
   if (!row?.id) return;
-  const snapshot = { id: row.id, title: row.title, barcode: row.barcode, caseBarcode: row.caseBarcode };
+  if (!Object.hasOwn(row, 'packagingConfigurations')) { void refreshIndexedProduct(row.id); return; }
+  const snapshot = { id: row.id, title: row.title, barcode: row.barcode, caseBarcode: row.caseBarcode, packagingConfigurations: row.packagingConfigurations };
   applyToIndexes((index) => index.upsert(snapshot));
 }
 

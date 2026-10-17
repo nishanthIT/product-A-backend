@@ -1,3 +1,4 @@
+import { parseProductDetails } from '../services/ageRecordValidation.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -55,17 +56,7 @@ const uploadImage = (req, res, next) => {
 // Shared auth: verifies the token and reloads employee memberships each request
 const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.AGE_RECORDS)];
 
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return customer?.shopId;
-  }
-  if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({ where: { id: userId }, select: { shopId: true } });
-    return employee?.shopId;
-  }
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 const loadUserNames = async (records) => {
   const customerIds = new Set();
@@ -107,6 +98,8 @@ const serialize = (req, record, nameOf) => ({
   id: record.id,
   occurredAt: record.occurredAt,
   description: record.description,
+  productCategory: record.productCategory,
+  productName: record.productName,
   imageUrl: record.imageUrl ? `${baseUrl(req)}${record.imageUrl}` : null,
   createdByName: nameOf(record.createdById, record.createdByType),
   updatedByName: nameOf(record.updatedById, record.updatedByType),
@@ -141,10 +134,59 @@ const discardUpload = (req) => {
   if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
 };
 
+const visibleCatalogProducts = (shopId) => ({
+  shops: { some: { OR: [{ shop: { shopType: 'WHOLESALE' } }, { shopId }] } },
+});
+
+// Catalog suggestions plus this shop's saved category names. A new name belongs
+// to the incident record; employees never write to the global category taxonomy.
+router.get('/categories', authenticateToken, async (req, res) => {
+  if (!req.user.shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
+  try {
+    const [catalog, products, records] = await Promise.all([
+      prisma.category.findMany({ select: { name: true }, orderBy: { name: 'asc' } }),
+      prisma.product.findMany({ where: { ...visibleCatalogProducts(req.user.shopId), category: { not: null }, NOT: { category: 'USER_SUBMITTED_PENDING' } }, select: { category: true }, distinct: ['category'] }),
+      prisma.ageRestrictionRecord.findMany({ where: { shopId: req.user.shopId, productCategory: { not: null } }, select: { productCategory: true }, distinct: ['productCategory'] }),
+    ]);
+    const unique = new Map();
+    for (const name of [...catalog.map(c => c.name), ...products.map(p => p.category), ...records.map(r => r.productCategory)]) {
+      const trimmed = name?.trim();
+      if (trimmed && !unique.has(trimmed.toLocaleLowerCase('en-GB'))) unique.set(trimmed.toLocaleLowerCase('en-GB'), trimmed);
+    }
+    res.json({ success: true, categories: [...unique.values()].sort((a, b) => a.localeCompare(b)) });
+  } catch (error) {
+    console.error('Error fetching age record categories:', error);
+    res.status(500).json({ error: 'Failed to load categories' });
+  }
+});
+
+router.get('/products', authenticateToken, async (req, res) => {
+  if (!req.user.shopId) return res.status(400).json({ error: 'User not assigned to a shop' });
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const category = typeof req.query.category === 'string' ? req.query.category.trim() : '';
+  if (query.length > 200 || category.length > 200) return res.status(400).json({ error: 'Search must be 200 characters or fewer' });
+  try {
+    const products = await prisma.product.findMany({
+      where: {
+        ...visibleCatalogProducts(req.user.shopId),
+        ...(category && { category: { equals: category, mode: 'insensitive' } }),
+        ...(query && { OR: [{ title: { contains: query, mode: 'insensitive' } }, { barcode: { contains: query } }] }),
+      },
+      select: { id: true, title: true, category: true, barcode: true },
+      orderBy: [{ title: 'asc' }, { id: 'asc' }],
+      take: 30,
+    });
+    res.json({ success: true, products, hasMore: products.length === 30 });
+  } catch (error) {
+    console.error('Error fetching age record products:', error);
+    res.status(500).json({ error: 'Failed to load products' });
+  }
+});
+
 // GET /api/age-restriction-records
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const shopId = await getUserShopId(req.user.id, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -183,10 +225,16 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, uploadImage, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       discardUpload(req);
       return res.status(400).json({ error: 'User not assigned to a shop' });
+    }
+
+    const details = parseProductDetails(req.body);
+    if (details.error) {
+      discardUpload(req);
+      return res.status(400).json({ error: details.error });
     }
 
     const occurredAt = parseOccurredAt(req.body.occurredAt);
@@ -206,6 +254,7 @@ router.post('/', authenticateToken, uploadImage, async (req, res) => {
         shopId,
         occurredAt,
         description: description.text,
+        ...details.data,
         imageUrl: req.file ? `/${UPLOAD_DIR}/${req.file.filename}` : null,
         createdById: userId,
         createdByType: userType,
@@ -225,7 +274,7 @@ router.post('/', authenticateToken, uploadImage, async (req, res) => {
 router.put('/:id', authenticateToken, uploadImage, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       discardUpload(req);
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -241,7 +290,12 @@ router.put('/:id', authenticateToken, uploadImage, async (req, res) => {
       return res.status(403).json({ error: 'Only the shop owner or the person who recorded this can edit it' });
     }
 
-    const data = { updatedById: userId, updatedByType: userType };
+    const details = parseProductDetails(req.body);
+    if (details.error) {
+      discardUpload(req);
+      return res.status(400).json({ error: details.error });
+    }
+    const data = { updatedById: userId, updatedByType: userType, ...details.data };
 
     if (req.body.occurredAt !== undefined) {
       const occurredAt = parseOccurredAt(req.body.occurredAt);
@@ -284,7 +338,7 @@ router.put('/:id', authenticateToken, uploadImage, async (req, res) => {
 // DELETE /api/age-restriction-records/:id
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
-    const shopId = await getUserShopId(req.user.id, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }

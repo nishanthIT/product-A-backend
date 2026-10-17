@@ -1,0 +1,2 @@
+# Reports contain detailed catalog snapshots. Keep local; commit the Markdown summary.
+*.json

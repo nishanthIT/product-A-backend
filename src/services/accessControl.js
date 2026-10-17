@@ -1,3 +1,4 @@
+import { activeSuspension } from './chatSafety.js';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
@@ -125,28 +126,26 @@ function toShopAccess(membership) {
  * Loads an employee account and its ACTIVE memberships. Company and shop access are
  * derived independently; neither implies the other.
  */
-export async function loadEmployeeAccess(employeeId, db = prisma) {
+export async function loadEmployeeAccess(employeeId, db = prisma, selectedShopId) {
   const employee = await db.empolyee.findUnique({
     where: { id: employeeId },
     select: employeeAccessSelect,
   });
   if (!employee) return null;
 
-  const activeShop = employee.shopMemberships[0] ?? null;
+  const memberships = employee.shopMemberships.filter((m) => m.shop?.shopType === 'CUSTOMER');
+  const activeShop = selectedShopId !== undefined
+    ? memberships.find((m) => m.shopId === selectedShopId)
+    : memberships.find((m) => m.shopId === employee.shopId) ?? (memberships.length === 1 ? memberships[0] : null);
   const company = toCompanyAccess(employee.companyMembership);
   const shop = toShopAccess(activeShop);
-
-  // Self-heal the legacy shopId mirror so shop routes that read it never see a stale shop.
-  const expectedShopId = shop?.shopId ?? null;
-  if (employee.shopId !== expectedShopId) {
-    await db.empolyee.update({ where: { id: employee.id }, data: { shopId: expectedShopId } });
-  }
 
   return {
     id: employee.id,
     name: employee.name,
     email: employee.email,
     sessionVersion: employee.sessionVersion,
+    hasShopMemberships: memberships.length > 0,
     company,
     shop,
   };
@@ -156,15 +155,40 @@ export async function loadEmployeeAccess(employeeId, db = prisma) {
  * Resolves the request principal from a verified JWT payload.
  * Returns { user } on success or { error, status, code } when the token must be rejected.
  */
-export async function resolvePrincipal(decoded, db = prisma) {
+export async function resolvePrincipal(decoded, db = prisma, selectedShopId) {
   const id = Number.parseInt(decoded?.id, 10);
   if (!Number.isInteger(id)) return { status: 401, error: 'Invalid token', code: 'INVALID_TOKEN' };
 
+  let account;
+  if (['ADMIN', 'CUSTOMER', 'EMPLOYEE'].includes(decoded.userType)) {
+    // These independent reads all validate the same signed principal. Start them
+    // together so every shop request does not pay another remote-DB round trip.
+    // No access is returned (or last-active write scheduled) before every guard passes.
+    const accountQuery = decoded.userType === 'EMPLOYEE'
+      ? loadEmployeeAccess(id, db, selectedShopId)
+      : decoded.userType === 'ADMIN'
+        ? db.admin.findUnique({ where: { id }, select: { id: true, email: true, name: true, sessionVersion: true } })
+        : db.customer.findUnique({ where: { id }, select: {
+          email: true, name: true, defaultSupermarketId: true, sessionVersion: true,
+          supermarketOwnerships: { where: { shopType: 'CUSTOMER', shop: { shopType: 'CUSTOMER' } }, select: { shopId: true } },
+        } });
+    const [suspension, deletion, loadedAccount] = await Promise.all([
+      activeSuspension({ id, userType: decoded.userType }, db, new Date(), 'ACCOUNT'),
+      db.accountDeletionJob.findUnique({ where: { userId_userType: { userId: id, userType: decoded.userType } }, select: { status: true } }),
+      accountQuery,
+    ]);
+    account = loadedAccount;
+    if (suspension) return { status: 403, code: 'ACCOUNT_SUSPENDED', error: `Account access is suspended until ${suspension.until.toISOString()}. ${suspension.reason} Contact support@paymi.co.uk to appeal.` };
+    if (deletion && deletion.status !== 'REQUESTED') return { status: 401, error: 'Personal account deletion is in progress', code: 'ACCOUNT_DELETION_PENDING' };
+  }
+
   if (decoded.userType === 'ADMIN') {
-    const admin = await db.admin.findUnique({ where: { id }, select: { id: true, email: true, name: true } });
+    const admin = account;
     if (!admin) return { status: 401, error: 'Account no longer exists', code: 'SESSION_REVOKED' };
+    if ((decoded.sv ?? 0) !== admin.sessionVersion) return { status: 401, error: 'Session revoked', code: 'SESSION_REVOKED' };
     return {
       user: {
+        sv: admin.sessionVersion,
         id: admin.id,
         email: admin.email,
         name: admin.name,
@@ -177,17 +201,19 @@ export async function resolvePrincipal(decoded, db = prisma) {
   }
 
   if (decoded.userType === 'EMPLOYEE') {
-    const access = await loadEmployeeAccess(id, db);
+    const access = account;
     if (!access) return { status: 401, error: 'Account no longer exists', code: 'SESSION_REVOKED' };
     if ((decoded.sv ?? 0) !== access.sessionVersion) {
       return { status: 401, error: 'Session expired. Please sign in again.', code: 'SESSION_REVOKED' };
     }
-    if (!access.company && !access.shop) {
+    if (selectedShopId !== undefined && !access.shop) return { status: 403, error: "No active membership for this supermarket", code: "SHOP_MEMBERSHIP_REQUIRED" };
+    if (!access.company && !access.hasShopMemberships) {
       return { status: 401, error: 'This account has no active access.', code: 'ACCESS_REVOKED' };
     }
     touchLastActive(access, db);
     return {
       user: {
+        sv: access.sessionVersion,
         id: access.id,
         email: access.email,
         name: access.name,
@@ -200,8 +226,13 @@ export async function resolvePrincipal(decoded, db = prisma) {
   }
 
   if (decoded.userType === 'CUSTOMER') {
-    // Shop owners never carry company permissions; their shop is resolved per route from Customer.shopId.
-    return { user: { id, email: decoded.email, userType: 'CUSTOMER', company: null, shop: null } };
+    const customer = account;
+    if (!customer) return { status: 401, error: 'Account no longer exists', code: 'SESSION_REVOKED' };
+    if ((decoded.sv ?? 0) !== customer.sessionVersion) return { status: 401, error: 'Session revoked', code: 'SESSION_REVOKED' };
+    const selected = selectedShopId ?? customer.defaultSupermarketId;
+    const valid = customer.supermarketOwnerships.some((o) => o.shopId === selected);
+    if (selectedShopId !== undefined && !valid) return { status: 403, error: 'Supermarket access denied', code: 'SUPERMARKET_ACCESS_REQUIRED' };
+    return { user: { id, sv: customer.sessionVersion, name: customer.name, email: customer.email, userType: 'CUSTOMER', company: null, shop: null, shopId: valid ? selected : null } };
   }
 
   return { status: 401, error: 'Invalid token', code: 'INVALID_TOKEN' };
@@ -253,15 +284,12 @@ export function describeAccess(user) {
 /** Whether a verified socket/HTTP user may observe a shop's realtime channels. */
 export async function canAccessShop(decoded, shopId, db = prisma) {
   if (!decoded || !shopId) return false;
-  const result = await resolvePrincipal(decoded, db);
+  const result = await resolvePrincipal(decoded, db, shopId);
   if (!result.user) return false;
   const { user } = result;
   if (user.userType === 'ADMIN') return true;
   if (user.userType === 'EMPLOYEE') return user.shopId === shopId;
-  if (user.userType === 'CUSTOMER') {
-    const customer = await db.customer.findUnique({ where: { id: user.id }, select: { shopId: true } });
-    return !!customer?.shopId && customer.shopId === shopId;
-  }
+  if (user.userType === 'CUSTOMER') return user.shopId === shopId;
   return false;
 }
 

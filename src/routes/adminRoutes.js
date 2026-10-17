@@ -1,3 +1,4 @@
+import adminSupermarketRoutes from './adminSupermarketRoutes.js';
 import express from 'express';
 import {
 	getDashboardOverview,
@@ -26,6 +27,7 @@ import { COMPANY_PERMISSIONS as P } from '../services/accessControl.js';
 // shop owners and shop employees never hold one.
 const router = express.Router();
 router.use(isAuthenticated);
+router.use('/supermarkets', adminSupermarketRoutes);
 
 // Dashboard overview route
 router.get('/dashboard', requireCompanyPermission(P.CUSTOMERS_VIEW), getDashboardOverview);

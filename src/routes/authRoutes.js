@@ -1,3 +1,6 @@
+import { authRateLimit } from '../middleware/authRateLimit.js';
+import { requireSupplierScope } from '../middleware/supplierScope.js';
+import { requireListScope } from '../middleware/listScope.js';
 import express from "express";
 import multer from "multer";
 import path from "path";
@@ -122,21 +125,21 @@ const productUpload = multer({
 });
 
 
-router.post("/auth/login", login);
-router.post("/auth/register/send-otp", sendRegistrationOtp);
-router.post("/auth/register", register);
+router.post("/auth/login", authRateLimit("login"), login);
+router.post("/auth/register/send-otp", authRateLimit("register/send-otp"), sendRegistrationOtp);
+router.post("/auth/register", authRateLimit("register"), register);
 router.get("/auth/me", verify); // Make sure this route exists and is correctly defined
 router.post("/auth/logout", logout);
 router.post("/auth/extend-trial", isAuthenticated, extendTrialWithPoints);
-router.post("/auth/forgot-password", forgotPassword);
-router.post("/auth/reset-password", resetPassword);
+router.post("/auth/forgot-password", authRateLimit("forgot-password"), forgotPassword);
+router.post("/auth/reset-password", authRateLimit("reset-password"), resetPassword);
 
 router.get("/image/:barcode",image)
 
 // Company catalog management: explicit company permissions only (never a shop role).
 const catalogRead = [isAuthenticated, requireCompanyPermission(P.CATALOG_READ)];
 const catalogWrite = [isAuthenticated, requireCompanyPermission(P.CATALOG_WRITE)];
-const shopsManage = [isAuthenticated, requireCompanyPermission(P.SHOPS_MANAGE)];
+const shopsManage = [isAuthenticated, requireCompanyPermission(P.SHOPS_MANAGE), requireSupplierScope];
 const staffManage = [isAuthenticated, requireCompanyPermission(P.STAFF_MANAGE)];
 
 router.get("/filterProducts", catalogRead, filterProducts); // given in query
@@ -152,7 +155,7 @@ router.delete("/deleteProduct/:id",isAuthenticated,isAdmin, deleteProduct); // A
 // Customer product search routes (for adding to lists)
 router.get("/products/barcode/:barcode",isAuthenticated, getProductByBarcode); // Allow customers to search
 router.get("/products/search",isAuthenticated, searchProducts); // Search products by name
-router.post("/products/quick-add", isAuthenticated, quickAddProductFromScan);
+router.post("/products/quick-add", isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS), quickAddProductFromScan);
 router.get("/products/pending-submissions", catalogWrite, getPendingSubmittedProducts);
 router.put("/products/pending-submissions/:id/approve", isAuthenticated, isAdmin, approveSubmittedProduct);
 router.get("/products/:id/pack-options", isAuthenticated, getPackOptions); // Pack size comparison (smart purchase recommendation)
@@ -165,7 +168,7 @@ router.post("/addShop", shopsManage, addShop);
 router.put("/editShop/:id", shopsManage, editShop);
 router.get("/getAllshop", shopsManage, getAllShops);
 router.get("/getshop/:id", shopsManage, getShopById);
-router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only - delete shop
+router.delete("/shops/:id",isAuthenticated,isAdmin, requireSupplierScope, deleteShop); // Admin only - delete shop
 
 /* <!-- ProductAtShop Routes --> */
 // router.post("/addProductAtShop", addProductAtShop);
@@ -179,7 +182,7 @@ router.delete("/shops/:id",isAuthenticated,isAdmin, deleteShop); // Admin only -
 // Add a new product and associate it with a shop (with optional image upload)
 router.post('/addProductAtShop', (req, res, next) => {
   console.log('=== addProductAtShop route hit ===');
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+
   next();
 }, shopsManage, (req, res, next) => {
   console.log('=== Passed auth, starting multer ===');
@@ -198,7 +201,7 @@ router.post('/addProductAtShop', (req, res, next) => {
     console.log('=== Multer complete, file:', req.file ? req.file.filename : 'no file');
     next();
   });
-}, addProductAtShop);
+}, requireSupplierScope, addProductAtShop);
 
 // Add an existing product to a shop (with optional image upload)
 router.post('/addProductAtShopifExistAtProduct', shopsManage, (req, res, next) => {
@@ -216,7 +219,7 @@ router.post('/addProductAtShopifExistAtProduct', shopsManage, (req, res, next) =
     // Everything went fine, continue to the next middleware
     next();
   });
-}, addProductAtShopifExistAtProduct);
+}, requireSupplierScope, addProductAtShopifExistAtProduct);
 
 // Get products at a shop with pagination and search
 router.get('/shop/:shopId/products', shopsManage, getProductsAtShop);
@@ -293,6 +296,8 @@ const applyBestPromotion = async (productAtShopId) => {
     await prisma.productAtShop.update({
       where: { id: productAtShopId },
       data: {
+        offerPriceSource: null,
+        priceObservedAt: new Date(),
         offerPrice: bestPromo.promotionPrice,
         offerExpiryDate: bestPromo.endDate,
         updatedAt: new Date()
@@ -303,6 +308,8 @@ const applyBestPromotion = async (productAtShopId) => {
     await prisma.productAtShop.update({
       where: { id: productAtShopId },
       data: {
+        offerPriceSource: null,
+        priceObservedAt: new Date(),
         offerPrice: null,
         offerExpiryDate: null,
         updatedAt: new Date()
@@ -459,6 +466,8 @@ router.post('/product-promotions/:shopId/:productId/apply', shopsManage, async (
         shopId_productId: { shopId, productId }
       },
       data: {
+        offerPriceSource: null,
+        priceObservedAt: new Date(),
         offerPrice: promotionPrice,
         offerExpiryDate: endDate ? new Date(endDate) : null,
         updatedAt: new Date()
@@ -502,7 +511,7 @@ router.get("/getHourlyProductAdds/:employeeId",isAuthenticated,isAdmin, getHourl
 
 // <!-- List Routes --> (Customer only) - With subscription checking
 // Employees reach lists only through an ACTIVE shop membership.
-const listAuth = [isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS)];
+const listAuth = [isAuthenticated, requireShopFeature(SHOP_FEATURES.LISTS), requireListScope];
 router.get("/lists", listAuth, softSubscriptionCheck, getUserLists); // Get all lists (soft check - allow viewing)
 router.post("/lists", listAuth, requireActiveSubscription, makeList); // Create new list (requires active subscription)
 router.post("/lists/addProduct", listAuth, requireActiveSubscription, addProductToList); // Add product to list (requires active subscription)
@@ -522,7 +531,7 @@ router.put("/bundle-promotions/:promotionId", shopsManage, updateBundlePromotion
 router.delete("/bundle-promotions/:promotionId", shopsManage, deleteBundlePromotion);
 
 // Customer routes for checking bundle offers
-router.get("/shop/:shopId/product/:productId/bundle-offers", isAuthenticated, checkProductBundleOffers);
-router.post("/shop/:shopId/check-cart-offers", isAuthenticated, checkCartBundleOffers);
+router.get("/shop/:shopId/product/:productId/bundle-offers", isAuthenticated, requireSupplierScope, checkProductBundleOffers);
+router.post("/shop/:shopId/check-cart-offers", isAuthenticated, requireSupplierScope, checkCartBundleOffers);
 
 export default router;

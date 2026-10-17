@@ -1,39 +1,36 @@
-import jwt from 'jsonwebtoken';
+import { serviceError } from '../services/serviceErrors.js';
+import { readSessionToken } from '../services/sessionSecurity.js';
+import { verifySessionToken, isInvalidSession } from '../services/sessionTokens.js';
 import { hasCompanyPermission, hasShopFeatureAccess, hasShopPermission, resolvePrincipal } from '../services/accessControl.js';
-
-const readToken = (req) => {
-  if (req.cookies && req.cookies.auth_token) return req.cookies.auth_token;
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-    return req.headers.authorization.split(' ')[1];
-  }
-  return null;
-};
 
 // Verifies the JWT and reloads memberships on every request, so deactivated
 // memberships and bumped session versions take effect for existing tokens.
 const isAuthenticated = async (req, res, next) => {
-  const token = readToken(req);
+  const token = readSessionToken(req);
   if (!token) {
     return res.status(401).json({ error: 'Authentication required - No token found' });
   }
 
   let decoded;
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    decoded = await verifySessionToken(token);
+  } catch (error) {
+    if (!isInvalidSession(error)) console.error('Session token lookup failed', serviceError(error));
+    return isInvalidSession(error)
+      ? res.status(401).json({ error: 'Invalid or expired token' })
+      : res.status(503).json({ error: 'Session verification is temporarily unavailable. Try again.' });
   }
 
   try {
-    const result = await resolvePrincipal(decoded);
+    const result = await resolvePrincipal(decoded, undefined, req.get('X-Supermarket-Id'));
     if (!result.user) {
       return res.status(result.status).json({ error: result.error, code: result.code });
     }
     req.user = result.user;
     next();
   } catch (error) {
-    console.error('Auth middleware error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('Session account lookup failed', serviceError(error));
+    return res.status(503).json({ error: 'Session verification is temporarily unavailable. Try again.' });
   }
 };
 
@@ -69,6 +66,7 @@ const requireShopMembershipForEmployees = (req, res, next) => {
 const ACCESS_LEVEL_BY_METHOD = { GET: 'read', HEAD: 'read', OPTIONS: 'read', POST: 'write' };
 const requireShopFeature = (feature, level) => (req, res, next) => {
   if (!req.user) return res.status(401).json({ error: 'Authentication required' });
+  if (req.user.userType === 'CUSTOMER' && !req.user.shopId) return res.status(409).json({ error: 'Your shop relationships need review. Please contact support.', code: 'SUPERMARKET_REVIEW_REQUIRED' });
   if (req.user.userType !== 'EMPLOYEE') return next();
   if (!req.user.shopId) {
     return res.status(403).json({ error: 'No active shop membership', code: 'SHOP_MEMBERSHIP_REQUIRED' });

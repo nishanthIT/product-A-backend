@@ -1,3 +1,4 @@
+import { disconnectUser } from '../services/realtime.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
@@ -10,7 +11,7 @@ import {
   defaultShopPermissions,
   normalizeShopPermissions,
 } from '../services/accessControl.js';
-import { setShopMembershipStatus } from '../services/membershipService.js';
+import { setShopMembershipStatus, createShopMembership } from '../services/membershipService.js';
 
 // Shop Employees: people who work in a customer's shop. Nothing here can create or
 // modify company staff membership.
@@ -32,21 +33,8 @@ async function resolveShopContext(req, { createShopIfMissing = false }) {
   const { user } = req;
 
   if (user.userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: user.id },
-      select: { id: true, name: true, shopId: true },
-    });
-    if (!customer) return { status: 401, error: 'Account no longer exists' };
-
-    let shopId = customer.shopId;
-    if (!shopId && createShopIfMissing) {
-      const shop = await prisma.shop.create({
-        data: { name: `${customer.name || 'My'}'s Shop`, address: 'Not specified', mobile: 'Not specified', shopType: 'CUSTOMER' },
-      });
-      await prisma.customer.update({ where: { id: customer.id }, data: { shopId: shop.id } });
-      shopId = shop.id;
-    }
-    return { shopId, actor: 'OWNER', ownerCustomerId: customer.id };
+    if (!user.shopId) return { status: 409, error: 'Shop setup needs review before managing employees.' };
+    return { shopId: user.shopId, actor: 'OWNER', ownerCustomerId: user.id };
   }
 
   return { status: 403, error: 'Only the shop owner can manage shop employees' };
@@ -122,7 +110,7 @@ async function findManageableMembership(ctx, employeeId) {
   if (!Number.isInteger(employeeId)) return { status: 400, error: 'Invalid employee id' };
   const record = await prisma.shopEmployeeMembership.findUnique({
     where: { employeeId_shopId: { employeeId, shopId: ctx.shopId } },
-    include: { employee: { select: { id: true, email: true, companyMembership: { select: { status: true } } } } },
+    include: { employee: { select: { id: true, email: true, createdByCustomerId: true, companyMembership: { select: { status: true } } } } },
   });
   if (!record || record.status === 'REMOVED') {
     return { status: 404, error: 'Employee not found or access denied' };
@@ -247,6 +235,44 @@ router.get('/', authenticateShopOwner, async (req, res) => {
   }
 });
 
+// Existing identities are assigned only with verified ownership provenance.
+router.get('/assignable', authenticateShopOwner, async (req, res, next) => {
+  try {
+    const employees = await prisma.empolyee.findMany({
+      where: { createdByCustomerId: req.user.id, companyMembership: { is: null },
+        shopMemberships: { some: { status: 'ACTIVE', shop: { supermarketOwnerships: { some: { customerId: req.user.id } } } }, none: { shopId: req.shopContext.shopId } } },
+      select: { id: true, name: true, email: true }, orderBy: { name: 'asc' }, take: 250,
+    });
+    res.json({ employees });
+  } catch (error) { next(error); }
+});
+router.post('/assign', authenticateShopOwner, async (req, res, next) => {
+  try {
+    const forbidden = rejectForbiddenFields(req.body, req.shopContext);
+    if (forbidden) return res.status(forbidden.status).json({ error: forbidden.error });
+    const role = validateRoleAndPermissions(req.body, { partial: false });
+    if (role.error) return res.status(400).json({ error: role.error });
+    const id = Number(req.body.employeeId);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Choose an existing team member' });
+    await prisma.$transaction(async (tx) => {
+      const employee = await tx.empolyee.findFirst({ where: { id, createdByCustomerId: req.user.id, companyMembership: { is: null },
+        shopMemberships: { some: { status: 'ACTIVE', shop: { supermarketOwnerships: { some: { customerId: req.user.id } } } } } }, select: { id: true } });
+      if (!employee) throw Object.assign(new Error('Team member not available for assignment'), { status: 404 });
+      const existing = await tx.shopEmployeeMembership.findUnique({ where: { employeeId_shopId: { employeeId: id, shopId: req.shopContext.shopId } } });
+      if (existing) {
+        if (existing.status === 'ACTIVE') return;
+        throw Object.assign(new Error('Manage this existing membership from the employee list.'), { status: 409 });
+      }
+      await createShopMembership(tx, { employeeId: id, shopId: req.shopContext.shopId, role: 'EMPLOYEE', permissions: role.permissions, createdByCustomerId: req.user.id, source: 'OWNER_EXPLICIT_ASSIGNMENT' });
+    }, { timeout: 60000 });
+    res.json({ employee: await loadShopEmployee(req.shopContext.shopId, id) });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    if (error.code === 'P2002') return res.status(409).json({ error: 'This membership already exists. Refresh the employee list.' });
+    next(error);
+  }
+});
+
 // POST /api/employees - Create a shop employee account with a membership in the caller's shop only
 router.post('/', authenticateShopCreator, async (req, res) => {
   try {
@@ -348,7 +374,7 @@ router.put('/:id', authenticateShopOwner, async (req, res) => {
     const roleUpdate = validateRoleAndPermissions(req.body, { partial: true });
     if (roleUpdate.error) return res.status(400).json({ error: roleUpdate.error });
 
-    const credentialsLocked = record.employee.companyMembership?.status === 'ACTIVE';
+    const credentialsLocked = record.employee.companyMembership?.status === 'ACTIVE' || record.employee.createdByCustomerId !== req.user.id;
     if (credentialsLocked && (email || password)) {
       return res.status(403).json({ error: 'Login details for this account cannot be changed from the shop.' });
     }
@@ -391,6 +417,7 @@ router.put('/:id', authenticateShopOwner, async (req, res) => {
         : []),
     ]);
 
+    disconnectUser('EMPLOYEE', employeeId);
     const updated = await loadShopEmployee(ctx.shopId, employeeId);
     res.json({ success: true, message: 'Employee updated successfully', employee: updated });
   } catch (error) {
@@ -413,6 +440,7 @@ router.patch('/:id/status', authenticateShopOwner, async (req, res) => {
     if (membership.error) return res.status(membership.status).json({ error: membership.error });
 
     await setShopMembershipStatus(membership.record.id, status);
+    disconnectUser('EMPLOYEE', employeeId);
     const updated = await loadShopEmployee(ctx.shopId, employeeId);
     res.json({
       success: true,
@@ -422,7 +450,7 @@ router.patch('/:id/status', authenticateShopOwner, async (req, res) => {
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
     if (error.code === 'P2002') {
-      return res.status(409).json({ error: 'This person is already active in another shop' });
+      return res.status(409).json({ error: 'This membership already exists. Refresh and try again.' });
     }
     console.error('Error updating employee status:', error);
     res.status(500).json({ error: 'Failed to update employee status' });

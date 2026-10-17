@@ -2,6 +2,7 @@ import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
 import { SHOP_FEATURES } from '../services/accessControl.js';
+import { parseTemperature, validateTemperatureFields } from '../services/temperatureValidation.js';
 import { userRoom } from '../services/realtime.js';
 
 const router = express.Router();
@@ -19,34 +20,17 @@ const requireCustomer = (req, res, next) => {
 };
 
 // Helper to get user's shop ID
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return customer?.shopId;
-  } else if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return employee?.shopId;
-  }
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 const toNullableFloat = (value) => {
   if (value === undefined || value === null || value === '') {
     return null;
   }
-  const parsed = parseFloat(value);
-  return Number.isNaN(parsed) ? null : parsed;
+  return parseTemperature(String(value));
 };
 
 const toFloatWithDefault = (value, fallback) => {
-  const parsed = parseFloat(value);
-  return Number.isNaN(parsed) ? fallback : parsed;
+  return parseTemperature(value == null ? value : String(value)) ?? fallback;
 };
 
 const isFreezerOnlyUnit = (fridge) => {
@@ -79,7 +63,7 @@ const getRangeForCompartment = (fridge, compartment) => {
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -88,7 +72,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const { includeInactive } = req.query;
 
     const whereClause = { shopId };
-    if (!includeInactive) {
+    if (includeInactive !== 'true') {
       whereClause.isActive = true;
     }
 
@@ -127,7 +111,7 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // POST /api/fridges - Create a new fridge (Admin only)
-router.post('/', authenticateToken, requireCustomer, async (req, res) => {
+router.post('/', authenticateToken, requireCustomer, validateTemperatureFields, async (req, res) => {
   try {
     const customerId = req.user.id;
     const {
@@ -145,7 +129,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'Fridge name is required' });
     }
 
-    const shopId = await getUserShopId(customerId, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -177,13 +161,6 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'Freezer minimum temperature must be less than maximum' });
     }
 
-    if (
-      parsedHasFreezer &&
-      (parsedFreezerMinSafeTemp < -17 || parsedFreezerMinSafeTemp > -11 || parsedFreezerMaxSafeTemp < -17 || parsedFreezerMaxSafeTemp > -11)
-    ) {
-      return res.status(400).json({ error: 'Freezer safe range must stay between -17°C and -11°C' });
-    }
-
     const fridge = await prisma.fridge.create({
       data: {
         name,
@@ -210,7 +187,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
 });
 
 // PUT /api/fridges/:id - Update a fridge (Admin only)
-router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
+router.put('/:id', authenticateToken, requireCustomer, validateTemperatureFields, async (req, res) => {
   try {
     const customerId = req.user.id;
     const fridgeId = req.params.id;
@@ -226,7 +203,7 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
       freezerMaxSafeTemp
     } = req.body;
 
-    const shopId = await getUserShopId(customerId, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -278,15 +255,6 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
         return res.status(400).json({ error: 'Freezer minimum temperature must be less than maximum' });
       }
 
-      if (
-        resolvedFreezerMin < -17 ||
-        resolvedFreezerMin > -11 ||
-        resolvedFreezerMax < -17 ||
-        resolvedFreezerMax > -11
-      ) {
-        return res.status(400).json({ error: 'Freezer safe range must stay between -17°C and -11°C' });
-      }
-
       const resolvedFreezerTarget = freezerTargetTemp !== undefined
         ? toFloatWithDefault(freezerTargetTemp, -18)
         : (existingFridge.freezerTargetTemp !== null
@@ -332,7 +300,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const customerId = req.user.id;
     const fridgeId = req.params.id;
 
-    const shopId = await getUserShopId(customerId, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -366,7 +334,7 @@ router.get('/:id/logs', authenticateToken, async (req, res) => {
     const fridgeId = req.params.id;
     const { startDate, endDate, entryType, limit } = req.query;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -468,8 +436,9 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
     const fridgeId = req.params.id;
     const { temperature, entryType, notes, compartment } = req.body;
 
-    if (temperature === undefined || temperature === null) {
-      return res.status(400).json({ error: 'Temperature is required' });
+    const parsedTemperature = parseTemperature(temperature);
+    if (parsedTemperature === null) {
+      return res.status(400).json({ error: 'A valid temperature is required' });
     }
 
     if (!entryType || !['MORNING', 'EVENING'].includes(entryType)) {
@@ -481,7 +450,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Compartment must be FRIDGE or FREEZER' });
     }
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -526,7 +495,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
     const log = await prisma.fridgeTemperatureLog.create({
       data: {
         fridgeId,
-        temperature: parseFloat(temperature),
+        temperature: parsedTemperature,
         entryType,
         compartment: parsedCompartment,
         notes: notes || null,
@@ -536,7 +505,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
     });
 
     // Check if temperature is within safe range
-    const temp = parseFloat(temperature);
+    const temp = parsedTemperature;
     const { minSafe, maxSafe } = getRangeForCompartment(fridge, parsedCompartment);
     const isAlert = temp < minSafe || temp > maxSafe;
     const alertMessage = isAlert
@@ -548,8 +517,8 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
     // Out-of-range readings notify everyone at the shop in real time.
     if (isAlert && req.io) {
       try {
-        const [owner, employees] = await Promise.all([
-          prisma.customer.findFirst({ where: { shopId }, select: { id: true } }),
+        const [owners, employees] = await Promise.all([
+          prisma.customer.findMany({ where: { supermarketOwnerships: { some: { shopId } } }, select: { id: true } }),
           prisma.empolyee.findMany({
             where: { shopMemberships: { some: { shopId, status: 'ACTIVE', permissions: { has: SHOP_FEATURES.FRIDGES } } } },
             select: { id: true }
@@ -557,6 +526,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
         ]);
         const payload = {
           type: 'temperature_alert',
+          supermarketId: shopId,
           title: 'Temperature Alert',
           message: `${fridge.name}: ${temp.toFixed(1)}°C is outside the safe range (${minSafe}° to ${maxSafe}°C)`,
           fridgeId: fridge.id,
@@ -569,7 +539,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
           createdAt: new Date().toISOString(),
         };
         const recipients = [];
-        if (owner) recipients.push(['CUSTOMER', owner.id]);
+        for (const owner of owners) recipients.push(['CUSTOMER', owner.id]);
         for (const employee of employees) recipients.push(['EMPLOYEE', employee.id]);
         for (const [type, recipientId] of recipients) {
           req.io.to(userRoom(type, recipientId)).emit('temperature_alert', payload);
@@ -601,7 +571,7 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
     const { id: userId, userType } = req.user;
     const { fridgeId, startDate, endDate, limit, compartment, recordedById, recordedByName } = req.query;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -621,7 +591,7 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
       }
     });
 
-    const fridgeIds = fridgeId ? [fridgeId] : fridges.map(f => f.id);
+    const fridgeIds = fridgeId ? fridges.filter((item) => item.id === fridgeId).map((item) => item.id) : fridges.map(f => f.id);
     const fridgeMap = new Map(fridges.map(f => [f.id, f]));
 
     const whereClause = { fridgeId: { in: fridgeIds } };
@@ -664,14 +634,14 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
         const [matchedCustomers, matchedEmployees] = await Promise.all([
           prisma.customer.findMany({
             where: {
-              shopId,
+              supermarketOwnerships: { some: { shopId } },
               name: { contains: nameQuery, mode: 'insensitive' }
             },
             select: { id: true }
           }),
           prisma.empolyee.findMany({
             where: {
-              shopId,
+              shopMemberships: { some: { shopId } },
               name: { contains: nameQuery, mode: 'insensitive' }
             },
             select: { id: true }
@@ -762,7 +732,7 @@ router.get('/today-status', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }

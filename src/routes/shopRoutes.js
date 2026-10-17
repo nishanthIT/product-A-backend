@@ -1,8 +1,9 @@
+import supermarketRoutes from './supermarketRoutes.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
-import { SHOP_FEATURES } from '../services/accessControl.js';
-import cacheService from '../services/cacheService.js';
+import { SHOP_FEATURES, hasShopFeatureAccess } from '../services/accessControl.js';
+import { resumeInitialSupermarket } from '../services/supermarketProvisioning.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -32,21 +33,7 @@ router.get('/my-shop', authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const userType = req.user.userType;
 
-    let shopId = null;
-
-    if (userType === 'CUSTOMER') {
-      const customer = await prisma.customer.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = customer?.shopId;
-    } else if (userType === 'EMPLOYEE') {
-      const employee = await prisma.empolyee.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = employee?.shopId;
-    }
+    const shopId = req.user.shopId;
 
     if (!shopId) {
       return res.status(404).json({ error: 'User is not assigned to a shop' });
@@ -55,12 +42,8 @@ router.get('/my-shop', authenticateToken, async (req, res) => {
     const shop = await prisma.shop.findUnique({
       where: { id: shopId },
       include: {
-        customers: {
-          select: { id: true, name: true, email: true }
-        },
-        employees: {
-          select: { id: true, name: true, email: true }
-        }
+        supermarketOwnerships: { select: { customer: { select: { id: true, name: true } } } },
+        ...(userType === 'CUSTOMER' && { employeeMemberships: { where: { status: 'ACTIVE' }, select: { employee: { select: { id: true, name: true, email: true } } } } }),
       }
     });
 
@@ -74,74 +57,15 @@ router.get('/my-shop', authenticateToken, async (req, res) => {
 // POST /api/shop/assign - Assign customer to a shop (or create new shop)
 router.post('/assign', authenticateToken, requireCustomer, async (req, res) => {
   try {
-    const customerId = req.user.id;
-    const { shopId, shopName, shopAddress, shopMobile } = req.body;
-
-    let shop;
-
-    if (shopId) {
-      // Ownership cannot be claimed by submitting another shop's id.
-      const customer = await prisma.customer.findUnique({ where: { id: customerId }, select: { shopId: true } });
-      if (customer?.shopId !== shopId) {
-        return res.status(403).json({ error: 'You can only use a shop you already own' });
-      }
-      shop = await prisma.shop.findUnique({ where: { id: shopId } });
-      if (!shop) {
-        return res.status(404).json({ error: 'Shop not found' });
-      }
-    } else if (shopName) {
-      // Create new CUSTOMER shop (not a wholesale shop)
-      shop = await prisma.shop.create({
-        data: {
-          name: shopName,
-          address: shopAddress || '',
-          mobile: shopMobile || '',
-          shopType: 'CUSTOMER' // This is a customer retail shop
-        }
-      });
-    } else {
-      return res.status(400).json({ error: 'Either shopId or shopName is required' });
-    }
-
-    // Update customer with shop assignment
-    await prisma.customer.update({
-      where: { id: customerId },
-      data: { shopId: shop.id }
-    });
-
-    // Create shop group chat if it doesn't exist
-    if (!shop.groupChatId) {
-      const groupChat = await prisma.chat.create({
-        data: {
-          name: `${shop.name} - Team Chat`,
-          type: 'GROUP',
-          participants: {
-            create: {
-              userId: customerId,
-              userType: 'CUSTOMER',
-              isAdmin: true
-            }
-          }
-        }
-      });
-
-      // Update shop with group chat ID
-      shop = await prisma.shop.update({
-        where: { id: shop.id },
-        data: { groupChatId: groupChat.id }
-      });
-    }
-
-    res.json({ 
-      success: true, 
-      message: 'Shop assigned successfully',
-      shop 
-    });
+    // Registration has already created the first shop. Retrying setup must reuse it.
+    const shop = await resumeInitialSupermarket(prisma, req.user, req.body.shopId);
+    res.json({ success: true, message: 'Your shop is ready', shop });
   } catch (error) {
-    console.error('Error assigning shop:', error);
-    res.status(500).json({ error: 'Failed to assign shop' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Failed to resume shop setup', code: error.code });
   }
 });
+
+router.use('/supermarkets', supermarketRoutes);
 
 // GET /api/shop/group-chat - Get shop's group chat
 router.get('/group-chat', authenticateToken, async (req, res) => {
@@ -149,21 +73,7 @@ router.get('/group-chat', authenticateToken, async (req, res) => {
     const userId = req.user.id;
     const userType = req.user.userType;
 
-    let shopId = null;
-
-    if (userType === 'CUSTOMER') {
-      const customer = await prisma.customer.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = customer?.shopId;
-    } else if (userType === 'EMPLOYEE') {
-      const employee = await prisma.empolyee.findUnique({
-        where: { id: userId },
-        select: { shopId: true }
-      });
-      shopId = employee?.shopId;
-    }
+    const shopId = req.user.shopId;
 
     if (!shopId) {
       return res.status(404).json({ error: 'User is not assigned to a shop' });
@@ -205,6 +115,10 @@ router.get('/group-chat', authenticateToken, async (req, res) => {
       }
     });
 
+    if (chat) chat.messages = chat.messages.map((message) => {
+      const canRead = message.sharedList?.shopId === shopId && (userType !== 'EMPLOYEE' || hasShopFeatureAccess(req.user, SHOP_FEATURES.LISTS));
+      return canRead ? message : { ...message, sharedList: null, sharedListId: null };
+    });
     res.json({ success: true, chat, shopName: shop.name });
   } catch (error) {
     console.error('Error fetching group chat:', error);
@@ -217,10 +131,7 @@ router.get('/employees', authenticateToken, requireCustomer, async (req, res) =>
   try {
     const customerId = req.user.id;
 
-    const customer = await prisma.customer.findUnique({
-      where: { id: customerId },
-      select: { shopId: true }
-    });
+    const customer = { shopId: req.user.shopId };
 
     if (!customer?.shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
@@ -265,10 +176,7 @@ router.get('/all-lists', authenticateToken, requireCustomer, async (req, res) =>
   try {
     const customerId = req.user.id;
 
-    const customer = await prisma.customer.findUnique({
-      where: { id: customerId },
-      select: { shopId: true }
-    });
+    const customer = { shopId: req.user.shopId };
 
     if (!customer?.shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
@@ -277,10 +185,7 @@ router.get('/all-lists', authenticateToken, requireCustomer, async (req, res) =>
     // Employee lists belong to the shop they were created in, even after the employee is deactivated.
     const lists = await prisma.list.findMany({
       where: {
-        OR: [
-          { shopId: customer.shopId, employeeId: { not: null } },
-          { customerId: customerId }
-        ]
+        shopId: customer.shopId
       },
       include: {
         employee: {
@@ -354,13 +259,10 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
     }
 
     // Verify the customer has access (same shop)
-    const customer = await prisma.customer.findUnique({
-      where: { id: customerId },
-      select: { shopId: true }
-    });
+    const customer = { shopId: req.user.shopId };
 
     // Check if source list is from the same shop (either employee or customer owned)
-    const sourceShopId = sourceList.shopId || sourceList.customer?.shopId;
+    const sourceShopId = sourceList.shopId;
     if (sourceShopId !== customer?.shopId) {
       return res.status(403).json({ error: 'Access denied - list belongs to a different shop' });
     }
@@ -388,9 +290,6 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
       }
     });
 
-    // Invalidate cache so new list shows up
-    await cacheService.invalidateUserLists(customerId);
-
     res.json({ 
       success: true, 
       message: existingTrack
@@ -417,10 +316,7 @@ router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, r
     }
 
     // Get the employee's shop
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: employeeId },
-      select: { id: true, name: true, shopId: true }
-    });
+    const employee = { shopId: req.user.shopId };
 
     if (!employee?.shopId) {
       return res.status(403).json({ error: 'Employee not assigned to a shop' });
@@ -449,7 +345,7 @@ router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, r
     }
 
     // Verify the list belongs to the same shop
-    const sourceShopId = sourceList.shopId || sourceList.customer?.shopId;
+    const sourceShopId = sourceList.shopId;
     if (sourceShopId !== employee.shopId) {
       return res.status(403).json({ error: 'Access denied - list belongs to a different shop' });
     }

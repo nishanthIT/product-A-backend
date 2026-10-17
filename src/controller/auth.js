@@ -1,4 +1,7 @@
-﻿
+import { serviceError } from '../services/serviceErrors.js';
+import { verifySessionToken, revokeSessionToken, isInvalidSession } from '../services/sessionTokens.js';
+import { jwtSecret, readSessionToken, sessionCookieOptions } from '../services/sessionSecurity.js';
+
 
 
 import bcrypt from 'bcryptjs';
@@ -8,6 +11,7 @@ import { PrismaClient } from '@prisma/client';
 import redisService from '../services/redisService.js';
 import { sendRegistrationOtpEmail, sendPasswordResetOtpEmail } from '../services/mailService.js';
 import { describeAccess, resolvePrincipal } from '../services/accessControl.js';
+import { findRegistrationRetry, normalizeRegistration, provisionRegistration, registrationRequestHash } from '../services/supermarketProvisioning.js';
 
 const prisma = new PrismaClient();
 
@@ -22,7 +26,7 @@ const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
 const hashOtp = (email, code) =>
   crypto
-    .createHmac('sha256', process.env.JWT_SECRET || 'your-secret-key')
+    .createHmac('sha256', jwtSecret())
     .update(`${email}:${code}`)
     .digest('hex');
 
@@ -54,7 +58,7 @@ async function issueOtp(kind, email) {
 }
 
 /** Verifies an OTP. On success the code is consumed. Returns { ok, error }. */
-async function verifyOtp(kind, email, code) {
+async function verifyOtp(kind, email, code, { consume = true } = {}) {
   const record = await redisService.get(otpKey(kind, email), true);
   if (!record || !record.hash || Date.now() > Number(record.expiresAt)) {
     return { ok: false, error: 'This code has expired. Please request a new one.' };
@@ -85,14 +89,14 @@ async function verifyOtp(kind, email, code) {
     };
   }
 
-  await redisService.del(otpKey(kind, email));
+  if (consume) await redisService.del(otpKey(kind, email));
   return { ok: true };
 }
 
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
-    console.log("Login attempt:", email);
+    const { password } = req.body;
+    const email = normalizeEmail(req.body.email);
     
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
@@ -102,44 +106,43 @@ const login = async (req, res) => {
     let userType;
     
     // Try to find user in all tables and detect user type automatically
-    user = await prisma.admin.findFirst({ where: { email } });
+    user = await prisma.admin.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
     if (user) {
       userType = 'ADMIN';
     }
     
     if (!user) {
-      user = await prisma.empolyee.findFirst({ where: { email } });
+      user = await prisma.empolyee.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
       if (user) {
         userType = 'EMPLOYEE';
       }
     }
     
     if (!user) {
-      user = await prisma.customer.findFirst({ where: { email } });
+      user = await prisma.customer.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
       if (user) {
         userType = 'CUSTOMER';
       }
     }
     
     if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials - User not found' });
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
     
-    console.log("User found with type:", userType);
     
     const isPasswordValid = await bcrypt.compare(password, user.password);
     
     if (!isPasswordValid) {
-      return res.status(401).json({ error: 'Invalid credentials - Password mismatch' });
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
     // Company and shop access come only from memberships, never from the EMPLOYEE type itself.
     const tokenPayload = { id: user.id, email: user.email, userType };
-    if (userType === 'EMPLOYEE') tokenPayload.sv = user.sessionVersion ?? 0;
+    tokenPayload.sv = user.sessionVersion ?? 0;
     const principal = await resolvePrincipal(tokenPayload);
     if (!principal.user) {
       return res.status(403).json({
-        error: 'This account has no active access. Please contact your shop owner or administrator.',
+        error: principal.error || 'This account has no active access. Please contact your shop owner or administrator.',
         code: principal.code,
       });
     }
@@ -147,24 +150,16 @@ const login = async (req, res) => {
     // Generate JWT - Extended to 7 days for better mobile UX
     const token = jwt.sign(
       tokenPayload,
-      process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '7d' }
+      jwtSecret(),
+      { expiresIn: '7d', jwtid: crypto.randomUUID() }
     );
     
     // CRITICAL: Send token both as cookie AND in response body
-    res.cookie('auth_token', token, {
-      httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days to match JWT expiry
-      secure: false, // Only for development
-      sameSite: 'none', // Try 'none' instead of 'lax'
-      path: '/'
-    });
-    
-    console.log(token)
+    res.cookie('auth_token', token, { ...sessionCookieOptions(), maxAge: 7 * 24 * 60 * 60 * 1000 });
     const { password: _, resetToken: _rt, resetTokenExpiry: _rte, sessionVersion: _sv, ...userWithoutPassword } = user;
     return res.status(200).json({
       message: 'Login successful',
-      user: { ...userWithoutPassword, userType, ...describeAccess(principal.user) },
+      user: { ...userWithoutPassword, userType, shopId: principal.user.shopId, ...describeAccess(principal.user) },
       token: token // Send token in response body as backup
     });
   } catch (error) {
@@ -179,7 +174,6 @@ const sendRegistrationOtp = async (req, res) => {
   try {
     const { name, password } = req.body;
     const email = normalizeEmail(req.body.email);
-    console.log('Registration OTP requested for:', email);
 
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email and password are required' });
@@ -193,9 +187,9 @@ const sendRegistrationOtp = async (req, res) => {
 
     // Check if user already exists in any table
     const [existingAdmin, existingEmployee, existingCustomer] = await Promise.all([
-      prisma.admin.findFirst({ where: { email } }),
-      prisma.empolyee.findFirst({ where: { email } }),
-      prisma.customer.findFirst({ where: { email } }),
+      prisma.admin.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }),
+      prisma.empolyee.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }),
+      prisma.customer.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }),
     ]);
     if (existingAdmin || existingEmployee || existingCustomer) {
       return res.status(400).json({ error: 'User with this email already exists' });
@@ -211,7 +205,6 @@ const sendRegistrationOtp = async (req, res) => {
 
     const code = await issueOtp('register', email);
     await sendRegistrationOtpEmail(email, code);
-    console.log('Registration OTP sent to:', email);
 
     return res.status(200).json({
       success: true,
@@ -227,130 +220,54 @@ const sendRegistrationOtp = async (req, res) => {
 
 const register = async (req, res) => {
   try {
-    const { name, password, otp, shopName, shopAddress, shopMobile } = req.body;
-    const email = normalizeEmail(req.body.email);
-    console.log("Registration attempt:", email);
-    
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: 'Name, email and password are required' });
-    }
-    
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
-    }
-
-    if (!otp) {
-      return res.status(400).json({ error: 'Verification code is required' });
-    }
-
-    // Verify the emailed code â€” accounts are only created after verification.
-    const verification = await verifyOtp('register', email, otp);
-    if (!verification.ok) {
-      return res.status(400).json({ error: verification.error });
-    }
-    
-    // Check if user already exists in any table
-    const existingAdmin = await prisma.admin.findFirst({ where: { email } });
-    const existingEmployee = await prisma.empolyee.findFirst({ where: { email } });
-    const existingCustomer = await prisma.customer.findFirst({ where: { email } });
-    
-    if (existingAdmin || existingEmployee || existingCustomer) {
-      return res.status(400).json({ error: 'User with this email already exists' });
-    }
-    
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12);
-    
-    // Create a personal shop for the user, using their name if no shop name is provided
-    const shopNameToCreate = shopName || `${name}'s Shop`;
-    const customerShop = await prisma.shop.create({
-      data: {
-        name: shopNameToCreate.trim(),
-        address: shopAddress?.trim() || '',
-        mobile: shopMobile?.trim() || '',
-        shopType: 'CUSTOMER' // This is a customer retail shop
+    const input = normalizeRegistration(req.body);
+    const requestHash = registrationRequestHash(input, jwtSecret());
+    let result = await findRegistrationRetry(prisma, requestHash, input.password);
+    if (!result) {
+      // Keep the proof usable after a transaction failure. Consume only after commit.
+      const verification = await verifyOtp('register', input.email, input.otp, { consume: false });
+      if (!verification.ok) {
+        // Another request may have committed and consumed the OTP between our reads.
+        result = await findRegistrationRetry(prisma, requestHash, input.password);
+        if (!result) return res.status(400).json({ error: verification.error });
+      } else {
+        const passwordHash = await bcrypt.hash(input.password, 12);
+        result = await provisionRegistration(prisma, input, passwordHash, requestHash);
+        await redisService.del(otpKey('register', input.email)).catch(() => {});
       }
-    });
-    console.log('Created CUSTOMER shop:', customerShop.id);
-    
-    // Create new customer with free trial
-    const customer = await prisma.customer.create({
-      data: {
-        name: name.trim(),
-        email,
-        password: hashedPassword,
-        mobile: `temp_${Date.now()}`, // Temporary unique mobile number
-        subscriptionStatus: 'free_trial', // Set as free trial (lowercase to match schema default)
-        trialStartDate: new Date(),
-        trialEndDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days from now
-        shopId: customerShop?.id // Link to the created shop
-      }
-    });
-    
-    // If shop was created, create a group chat for it
-    if (customerShop) {
-      const groupChat = await prisma.chat.create({
-        data: {
-          name: `${customerShop.name} - Team Chat`,
-          type: 'GROUP',
-          participants: {
-            create: {
-              userId: customer.id,
-              userType: 'CUSTOMER',
-              isAdmin: true
-            }
-          }
-        }
-      });
-      
-      // Update shop with group chat ID
-      await prisma.shop.update({
-        where: { id: customerShop.id },
-        data: { groupChatId: groupChat.id }
-      });
     }
-    
-    // Generate JWT - Extended to 7 days for better mobile UX
+    const { customer, shop, replayed } = result;
     const token = jwt.sign(
-      {
-        id: customer.id,
-        email: customer.email,
-        userType: 'CUSTOMER'
-      },
-      process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '7d' }
+      { id: customer.id, email: customer.email, userType: 'CUSTOMER', sv: customer.sessionVersion ?? 0 },
+      jwtSecret(),
+      { expiresIn: '7d', jwtid: crypto.randomUUID() }
     );
-    
-    // Set cookie and return response
-    res.cookie('auth_token', token, {
-      httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days to match JWT expiry
-      secure: false,
-      sameSite: 'none',
-      path: '/'
-    });
-    
-    const { password: _, ...customerWithoutPassword } = customer;
-    return res.status(201).json({
-      message: 'Registration successful - Welcome to your free trial!',
-      user: { ...customerWithoutPassword, userType: 'CUSTOMER' },
-      shop: customerShop ? { id: customerShop.id, name: customerShop.name, shopType: 'CUSTOMER' } : null,
-      token: token
+    res.cookie('auth_token', token, { ...sessionCookieOptions(), maxAge: 7 * 24 * 60 * 60 * 1000 });
+    const { password: _, resetToken: _rt, resetTokenExpiry: _rte, shop: _shop, sessionVersion: _sv, ...safeCustomer } = customer;
+    return res.status(replayed ? 200 : 201).json({
+      message: replayed ? 'Your account and shop are ready.' : 'Your free account and shop are ready.',
+      user: { ...safeCustomer, userType: 'CUSTOMER' },
+      shop: { id: shop.id, name: shop.name, shopType: shop.shopType },
+      token,
     });
   } catch (error) {
-    console.error('Registration error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    if (error.status) return res.status(error.status).json({ error: error.message, code: error.code });
+    console.error('Registration failed:', error.code || error.name);
+    return res.status(500).json({ error: 'Unable to complete registration. Please retry.' });
   }
 };
 
-const logout = (req, res) => {
-  res.cookie('auth_token', '', {
-    httpOnly: true,
-    expires: new Date(0),
-    secure: false, // Only for development
-    sameSite: 'none', // Match login cookie settings
-    path: '/'
-  });
+const logout = async (req, res) => {
+  try {
+    const token = readSessionToken(req);
+    if (token) await revokeSessionToken(token);
+    for (const socket of req.io?.sockets?.sockets?.values() ?? []) {
+      if (socket.sessionToken === token) socket.disconnect(true);
+    }
+  } catch {
+    return res.status(503).json({ error: 'Unable to revoke this session. Please retry.' });
+  }
+  res.clearCookie('auth_token', sessionCookieOptions());
   res.status(200).json({ message: 'Logged out successfully' });
 };
 
@@ -360,21 +277,13 @@ const verify = async (req, res) => {
     // console.log('Headers:', req.headers);
     
     // Try to get token from cookie OR authorization header
-    let token = null;
-    
-    if (req.cookies && req.cookies.auth_token) {
-      token = req.cookies.auth_token;
-      console.log('Token found in cookie');
-    } else if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
-      token = req.headers.authorization.split(' ')[1];
-      console.log('Token found in Authorization header');
-    }
-    
+    const token = readSessionToken(req);
+
     if (!token) {
       return res.status(401).json({ error: 'Authentication required - No token found' });
     }
     
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const decoded = await verifySessionToken(token);
 
     if (decoded.userType === 'EMPLOYEE' || decoded.userType === 'ADMIN') {
       const principal = await resolvePrincipal(decoded);
@@ -395,7 +304,7 @@ const verify = async (req, res) => {
     }
     
     if( decoded.userType == "CUSTOMER"){
-      const user = await prisma.customer.findUnique({
+      const [user, principal] = await Promise.all([prisma.customer.findUnique({
         where: { id: decoded.id },
         select: {
           id: true,
@@ -403,40 +312,23 @@ const verify = async (req, res) => {
           email: true,
           mobile: true,
           shopId: true,
+          defaultSupermarketId: true,
           earnings: true,
           subscriptionStatus: true,
           trialStartDate: true,
           trialEndDate: true,
           points: true
         }
-      });
+      }), resolvePrincipal(decoded, undefined, req.get('X-Supermarket-Id'))]);
 
-      // Calculate subscription details
-      let subscriptionInfo = null;
-      if (user && user.subscriptionStatus === 'free_trial') {
-        const now = new Date();
-        let trialEndDate = user.trialEndDate ? new Date(user.trialEndDate) : null;
-        
-        if (!trialEndDate && user.trialStartDate) {
-          trialEndDate = new Date(user.trialStartDate);
-          trialEndDate.setDate(trialEndDate.getDate() + 90);
-        }
-        
-        if (trialEndDate) {
-          const daysRemaining = Math.ceil((trialEndDate - now) / (1000 * 60 * 60 * 24));
-          subscriptionInfo = {
-            daysRemaining: Math.max(0, daysRemaining),
-            isExpired: daysRemaining <= 0,
-            trialEndDate: trialEndDate.toISOString(),
-            status: daysRemaining <= 0 ? 'expired' : 'active',
-            points: parseFloat(user.points || 0)
-          };
-        }
-      }
+      if (!user) return res.status(401).json({ error: 'Account no longer exists', code: 'SESSION_REVOKED' });
+      if (!principal.user) return res.status(principal.status).json({ error: principal.error, code: principal.code });
+      const subscriptionInfo = { status: 'free', isActive: true, isExpired: false };
 
       return res.status(200).json({
         user: {
           ...user,
+          shopId: principal.user.shopId,
           userType: decoded.userType,
           subscriptionInfo,
           companyAccess: null,
@@ -447,102 +339,23 @@ const verify = async (req, res) => {
     
     return res.status(401).json({ error: 'Invalid or expired token' });
   } catch (error) {
-    console.error('Auth error:', error);
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    if (isInvalidSession(error)) return res.status(401).json({ error: 'Invalid or expired token' });
+    console.error('Session validation service unavailable', serviceError(error));
+    return res.status(503).json({ error: 'Session verification is temporarily unavailable. Try again.' });
   }
 };
 
-const extendTrialWithPoints = async (req, res) => {
-  try {
-    const { days } = req.body;
-    const userId = req.user.id;
-    
-    if (!days || days <= 0) {
-      return res.status(400).json({ error: 'Invalid number of days' });
-    }
-
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: {
-        points: true,
-        subscriptionStatus: true,
-        trialEndDate: true,
-        trialStartDate: true
-      }
-    });
-
-    if (!customer) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
-
-    const pointsNeeded = days;
-    const currentPoints = parseFloat(customer.points || 0);
-
-    if (currentPoints < pointsNeeded) {
-      return res.status(400).json({ 
-        error: 'Insufficient points',
-        pointsNeeded,
-        currentPoints,
-        shortfall: pointsNeeded - currentPoints
-      });
-    }
-
-    // Calculate new trial end date
-    let currentEndDate = customer.trialEndDate ? new Date(customer.trialEndDate) : null;
-    if (!currentEndDate && customer.trialStartDate) {
-      currentEndDate = new Date(customer.trialStartDate);
-      currentEndDate.setDate(currentEndDate.getDate() + 30);
-    }
-    
-    if (!currentEndDate) {
-      currentEndDate = new Date();
-    }
-
-    // If trial has already expired, start from today
-    const now = new Date();
-    if (currentEndDate < now) {
-      currentEndDate = now;
-    }
-
-    const newEndDate = new Date(currentEndDate);
-    newEndDate.setDate(newEndDate.getDate() + days);
-
-    // Update customer
-    const updatedCustomer = await prisma.customer.update({
-      where: { id: userId },
-      data: {
-        points: currentPoints - pointsNeeded,
-        trialEndDate: newEndDate,
-        subscriptionStatus: 'free_trial'
-      }
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: `Trial extended by ${days} days`,
-      data: {
-        daysExtended: days,
-        pointsUsed: pointsNeeded,
-        remainingPoints: parseFloat(updatedCustomer.points),
-        newTrialEndDate: newEndDate.toISOString(),
-        daysRemaining: Math.ceil((newEndDate - now) / (1000 * 60 * 60 * 24))
-      }
-    });
-  } catch (error) {
-    console.error('Extend trial error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-};
+const extendTrialWithPoints = (_req, res) => res.status(409).json({ error: 'Paymi is free in this release. Trial extensions are not needed.' });
 
 // â”€â”€â”€ Password reset (OTP) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Finds a user by email across all three tables. Returns { user, userTable } or null. */
 async function findUserByEmail(email) {
-  let user = await prisma.admin.findFirst({ where: { email } });
+  let user = await prisma.admin.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
   if (user) return { user, userTable: 'admin' };
-  user = await prisma.empolyee.findFirst({ where: { email } });
+  user = await prisma.empolyee.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
   if (user) return { user, userTable: 'empolyee' };
-  user = await prisma.customer.findFirst({ where: { email } });
+  user = await prisma.customer.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } });
   if (user) return { user, userTable: 'customer' };
   return null;
 }
@@ -580,7 +393,6 @@ const forgotPassword = async (req, res) => {
 
     const code = await issueOtp('reset', email);
     await sendPasswordResetOtpEmail(email, code);
-    console.log('Password reset code sent to:', email);
 
     return res.status(200).json(genericResponse);
   } catch (error) {
@@ -616,11 +428,14 @@ const resetPassword = async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 12);
     await prisma[found.userTable].update({
       where: { id: found.user.id },
-      data: { password: hashedPassword },
+      data: { password: hashedPassword, sessionVersion: { increment: 1 } },
     });
 
-    console.log('Password reset successful for:', email);
 
+    for (const socket of req.io?.sockets?.sockets?.values() ?? []) {
+      const type = { admin: 'ADMIN', customer: 'CUSTOMER', empolyee: 'EMPLOYEE' }[found.userTable];
+      if (socket.claims?.id === found.user.id && socket.claims?.userType === type) socket.disconnect(true);
+    }
     return res.status(200).json({
       success: true,
       message: 'Password has been reset successfully. You can now sign in with your new password.',

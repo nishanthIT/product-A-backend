@@ -1,7 +1,8 @@
+import { resolveProductBarcode } from '../services/productBarcodes.js';
+import { SHOP_FEATURES } from '../services/accessControl.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
-import { SHOP_FEATURES } from '../services/accessControl.js';
 import expiryNotificationService from '../services/expiryNotificationService.js';
 import { orderByRank, searchProductIds } from '../services/productSearchService.js';
 
@@ -12,28 +13,13 @@ const prisma = new PrismaClient();
 const authenticateToken = [isAuthenticated, requireShopFeature(SHOP_FEATURES.EXPIRY)];
 
 // Helper to get user's shopId
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return customer?.shopId;
-  } else if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return employee?.shopId;
-  }
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 // GET /api/expiry - Get all expiry products for user's shop
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     
     if (!shopId) {
       return res.status(400).json({ error: 'No shop associated with user' });
@@ -165,7 +151,7 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     
     if (!shopId) {
       return res.status(400).json({ error: 'No shop associated with user' });
@@ -260,7 +246,7 @@ router.post('/', authenticateToken, async (req, res) => {
 router.put('/:id', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     const expiryId = req.params.id;
     
     if (!shopId) {
@@ -337,7 +323,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     const expiryId = req.params.id;
     
     if (!shopId) {
@@ -371,7 +357,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 router.get('/notifications', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     
     if (!shopId) {
       return res.status(400).json({ error: 'No shop associated with user' });
@@ -476,7 +462,8 @@ router.get('/search-product', authenticateToken, async (req, res) => {
     let rankedIds = null;
     
     if (barcode) {
-      whereClause.barcode = barcode;
+      const product = await resolveProductBarcode(prisma, String(barcode));
+      whereClause.id = product?.id || '__no_product__';
     } else if (query) {
       rankedIds = (await searchProductIds(String(query), { limit: 20 })).map((r) => r.id);
       whereClause.id = { in: rankedIds };
@@ -494,7 +481,8 @@ router.get('/search-product', authenticateToken, async (req, res) => {
         category: true,
         rrp: true,
         caseSize: true,
-        packetSize: true
+        packetSize: true,
+        packagingConfigurations: true
       },
       take: 20
     });
@@ -504,6 +492,7 @@ router.get('/search-product', authenticateToken, async (req, res) => {
       products: rankedIds ? orderByRank(products, rankedIds) : products
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     console.error('Error searching products:', error);
     res.status(500).json({ error: 'Failed to search products' });
   }
@@ -538,7 +527,7 @@ router.post('/trigger-notifications', authenticateToken, async (req, res) => {
 router.get('/categories', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     
     if (!shopId) {
       return res.status(400).json({ error: 'No shop associated with user' });
@@ -576,7 +565,7 @@ router.get('/categories', authenticateToken, async (req, res) => {
 router.post('/categories', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     
     if (!shopId) {
       return res.status(400).json({ error: 'No shop associated with user' });
@@ -631,7 +620,7 @@ router.post('/categories', authenticateToken, async (req, res) => {
 router.put('/categories/:id', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     const categoryId = req.params.id;
     
     if (!shopId) {
@@ -695,7 +684,7 @@ router.put('/categories/:id', authenticateToken, async (req, res) => {
 router.delete('/categories/:id', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     const categoryId = req.params.id;
     
     if (!shopId) {

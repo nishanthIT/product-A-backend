@@ -1,0 +1,37 @@
+import { before, after, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { getPrisma, resetDatabase, seedBase, startApp } from './helpers/harness.js';
+import { requestDeletion, processDeletion } from '../src/services/accountDeletion.js';
+import { exportDeletionLedger, replayDeletionLedger } from '../src/services/deletionLedger.js';
+let db, app, directory;
+before(async () => { await resetDatabase(); db = await getPrisma(); app = await startApp(); directory = await fs.mkdtemp(path.join(os.tmpdir(), 'paymi-backup-fixture-')); });
+after(async () => { delete process.env.PAYMI_RESTORE_MODE; await app?.close(); await db?.$disconnect(); if (directory) await fs.rm(directory, { recursive: true, force: true }); });
+test('actual synthetic pg_dump/pg_restore stays closed until ledger replay removes erased identities', async () => {
+  const seed = await seedBase(db);
+  const session = await app.login(seed.a.owner.email, seed.password);
+  const dump = path.join(directory, 'synthetic.dump');
+  execFileSync('/usr/lib/postgresql/18/bin/pg_dump', ['--format=custom', '--file', dump, process.env.TEST_DATABASE_URL], { stdio: 'pipe' });
+  const job = await requestDeletion(db, { id: seed.a.owner.id, userType: 'CUSTOMER' });
+  await processDeletion(db, job.id);
+  const key = 'synthetic-backup-replay-integrity-key-only';
+  const envelope = await exportDeletionLedger(db, key);
+  process.env.PAYMI_RESTORE_MODE = '1';
+  assert.equal((await app.request('GET', '/auth/me', { token: session.token })).status, 503);
+  const tables = await db.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`;
+  const quoted = tables.map(t => '"' + t.tablename.replaceAll('"', '""') + '"').join(',');
+  // Harness has already refused every non-local/non-test database. This is synthetic data only.
+  await db.$executeRawUnsafe(`TRUNCATE TABLE ${quoted} RESTART IDENTITY CASCADE`);
+  execFileSync('/usr/lib/postgresql/18/bin/pg_restore', ['--data-only', '--disable-triggers', '--exit-on-error', '--dbname', process.env.TEST_DATABASE_URL, dump], { stdio: 'pipe' });
+  assert.ok(await db.customer.findUnique({ where: { id: seed.a.owner.id } }));
+  assert.equal((await app.request('GET', '/auth/me', { token: session.token })).status, 503);
+  await replayDeletionLedger(db, envelope, key);
+  assert.equal(await db.customer.findUnique({ where: { id: seed.a.owner.id } }), null);
+  assert.ok(await db.shop.findUnique({ where: { id: seed.a.shop.id } }));
+  assert.ok(await db.customer.findUnique({ where: { id: seed.b.owner.id } }));
+  delete process.env.PAYMI_RESTORE_MODE;
+  assert.equal((await app.request('GET', '/auth/me', { token: session.token })).status, 401);
+});

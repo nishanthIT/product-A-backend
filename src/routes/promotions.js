@@ -101,8 +101,29 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+// Public catalogue only: no retail workspace, contact details, drafts or future/expired offers.
+router.get('/public', async (_req, res, next) => {
+  try {
+    const now = new Date();
+    const rows = await prisma.promotion.findMany({
+      where: { isActive: true, startDate: { lte: now }, OR: [{ endDate: null }, { endDate: { gt: now } }], shop: { shopType: 'WHOLESALE' } },
+      select: { id: true, title: true, description: true, imageUrl: true, imageUrls: true, pdfUrl: true, startDate: true, endDate: true, isActive: true,
+        shop: { select: { id: true, name: true } }, products: { select: { id: true, title: true, barcode: true, img: true, rrp: true, category: true } } },
+      orderBy: { createdAt: 'desc' }, take: 100,
+    });
+    const promotions = await Promise.all(rows.map(async row => {
+      const prices = await prisma.productAtShop.findMany({ where: { shopId: row.shop.id, productId: { in: row.products.map(p => p.id) } }, select: { productId: true, price: true, offerPrice: true } });
+      return normalizePromotionAssets({ ...row, products: row.products.map(product => {
+        const price = prices.find(p => p.productId === product.id);
+        return { ...product, price: price?.price ?? null, offerPrice: price?.offerPrice ?? null };
+      }) });
+    }));
+    res.set('Cache-Control', 'public, max-age=60').json({ promotions });
+  } catch (error) { next(error); }
+});
+
 // GET /api/promotions - Get all promotions
-router.get('/', async (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
   try {
     const { active, shopId } = req.query;
     
@@ -112,6 +133,12 @@ router.get('/', async (req, res) => {
     }
     if (shopId) {
       whereCondition.shopId = shopId;
+    }
+    if (req.user.userType !== 'ADMIN') {
+      whereCondition.isActive = true;
+      whereCondition.startDate = { lte: new Date() };
+      whereCondition.OR = [{ endDate: null }, { endDate: { gt: new Date() } }];
+      whereCondition.shop = { shopType: 'WHOLESALE' };
     }
 
     const promotions = await prisma.promotion.findMany({
@@ -222,6 +249,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Promotion not found' });
     }
 
+    if (req.user.userType !== 'ADMIN' && (!promotion.isActive || +promotion.startDate > Date.now() || (promotion.endDate && +promotion.endDate <= Date.now()) || !await prisma.shop.findFirst({ where: { id: promotion.shopId, shopType: 'WHOLESALE' } }))) return res.sendStatus(404);
     res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
     console.error('Error fetching promotion:', error);

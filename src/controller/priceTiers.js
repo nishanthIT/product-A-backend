@@ -1,3 +1,4 @@
+import { getEffectivePrice } from '../services/supplierPricing.js';
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
@@ -22,6 +23,7 @@ export const getShopProductPriceTiers = async (req, res) => {
       basePrice: toMoney(productAtShop.price),
       tiers: productAtShop.priceTiers.map((t) => ({
         id: t.id,
+        packagingId: t.packagingId,
         quantity: t.quantity,
         price: toMoney(t.price),
       })),
@@ -112,34 +114,32 @@ export const getProductPriceTiers = async (req, res) => {
       return res.json({ productId, basePrice: null, shopName: null, tiers: [], hasTiers: false });
     }
 
-    const now = new Date();
-    const effectivePrice = (pas) => {
-      const hasActiveOffer =
-        pas.offerPrice !== null &&
-        pas.offerExpiryDate !== null &&
-        new Date(pas.offerExpiryDate) >= now;
-      return parseFloat(hasActiveOffer ? pas.offerPrice : pas.price);
-    };
+    const effectivePrice = pas => getEffectivePrice(pas).price;
 
     const lowest = productAtShops.reduce((best, current) =>
-      effectivePrice(current) < effectivePrice(best) ? current : best,
+      getEffectivePrice(current).unitPrice < getEffectivePrice(best).unitPrice ? current : best,
     );
 
     const basePrice = effectivePrice(lowest);
     const tiers = lowest.priceTiers.map((t) => {
       const price = toMoney(t.price);
+      const units = t.packagingId ? t.quantity : t.quantity * (lowest.unitsPerPack ?? 1);
       return {
+        packagingId: t.packagingId,
         quantity: t.quantity,
         price,
-        unitPrice: Math.round((price / t.quantity) * 100) / 100,
+        unitsIncluded: units,
+        unitPrice: Math.round((price / units) * 100) / 100,
         savings:
-          basePrice > 0 ? Math.max(0, toMoney(basePrice * t.quantity - price)) : null,
+          basePrice > 0 ? Math.max(0, toMoney((basePrice / (lowest.unitsPerPack ?? 1)) * units - price)) : null,
       };
     });
 
     res.json({
       productId,
       shopName: lowest.shop?.name ?? null,
+      unitsPerPack: lowest.unitsPerPack ?? 1,
+      packagingId: lowest.packagingId,
       basePrice: toMoney(basePrice),
       tiers,
       hasTiers: tiers.length > 0,

@@ -1,3 +1,4 @@
+import { getEffectivePrice } from '../services/supplierPricing.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated } from '../middleware/authware.js';
@@ -16,7 +17,7 @@ const num = (v) => (v == null ? null : Number.parseFloat(v));
  * bundle promotions. Remote DB latency dominates, so we do one wave of
  * parallel queries and let the client compute effective unit prices.
  */
-router.get('/:id/compare', authenticateToken, async (req, res) => {
+export async function getProductComparison(req, res) {
   const started = Date.now();
   try {
     const { id: productId } = req.params;
@@ -40,7 +41,7 @@ router.get('/:id/compare', authenticateToken, async (req, res) => {
     const now = new Date();
     const [productAtShops, bundlePromotions] = await Promise.all([
       prisma.productAtShop.findMany({
-        where: { productId, outOfStock: false },
+        where: { productId, outOfStock: false, shop: { shopType: 'WHOLESALE' } },
         include: {
           shop: { select: { id: true, name: true, address: true, mobile: true } },
           priceTiers: { orderBy: { quantity: 'asc' } },
@@ -48,7 +49,7 @@ router.get('/:id/compare', authenticateToken, async (req, res) => {
       }),
       prisma.bundlePromotion.findMany({
         where: {
-          isActive: true,
+          isActive: true, shop: { shopType: 'WHOLESALE' },
           OR: [{ startDate: null }, { startDate: { lte: now } }],
           AND: [{ OR: [{ endDate: null }, { endDate: { gte: now } }] }],
           buyItems: { some: { productId } },
@@ -66,25 +67,25 @@ router.get('/:id/compare', authenticateToken, async (req, res) => {
     ]);
 
     const shops = productAtShops.map((pas) => {
-      const hasActiveOffer =
-        pas.offerPrice != null &&
-        pas.offerExpiryDate != null &&
-        new Date(pas.offerExpiryDate) >= now;
-      const basePrice = num(pas.price);
-      const offerPrice = hasActiveOffer ? num(pas.offerPrice) : null;
-      const effectivePrice = hasActiveOffer ? offerPrice : basePrice;
+      const pricing = getEffectivePrice(pas, now);
+      const { hasActiveOffer } = pricing;
+      const offerPrice = hasActiveOffer || pricing.isSupplierCurrentPrice ? pricing.offerPrice : null;
+      const basePrice = pricing.originalPrice;
+      const effectivePrice = pricing.price;
       return {
         productAtShopId: pas.id,
         shopId: pas.shop.id,
         shopName: pas.shop.name,
         shopAddress: pas.shop.address,
         shopMobile: pas.shop.mobile,
+        ...pricing,
         price: basePrice,
         offerPrice,
         offerExpiryDate: pas.offerExpiryDate,
         hasActiveOffer,
         effectivePrice,
         priceTiers: pas.priceTiers.map((t) => ({
+          packagingId: t.packagingId,
           quantity: t.quantity,
           price: num(t.price),
         })),
@@ -125,6 +126,7 @@ router.get('/:id/compare', authenticateToken, async (req, res) => {
     console.error('Error building compare payload:', error);
     res.status(500).json({ error: 'Failed to load comparison data' });
   }
-});
+}
+router.get('/:id/compare', authenticateToken, getProductComparison);
 
 export default router;

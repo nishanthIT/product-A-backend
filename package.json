@@ -13,7 +13,11 @@
     "fast-import": "node scripts/fastImport.js",
     "import-excel": "node scripts/importExcel.js",
     "import-excel-simple": "node scripts/importSimpleExcel.js",
-    "download-images": "node scripts/downloadImages.js"
+    "download-images": "node scripts/downloadImages.js",
+    "migrate:default-supermarkets": "node scripts/migrateDefaultSupermarkets.js",
+    "test:default-supermarkets": "node --test --test-concurrency=1 tests/defaultSupermarkets.test.js",
+    "migrate:list-scopes": "node scripts/migrateListScopes.js",
+    "test:multi-supermarkets": "node --test --test-concurrency=1 tests/multiSupermarkets.test.js"
   },
   "prisma": {
     "seed": "node prisma/seed.js",

@@ -40,7 +40,7 @@ async function startLatencyProxy(targetUrl, delayMs) {
     client.on('error', close).on('close', close);
     upstream.on('error', close).on('close', close);
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve) => server.listen(Number(process.env.TEST_HTTP_PORT || 0), '127.0.0.1', resolve));
   server.unref();
   const proxied = new URL(targetUrl);
   proxied.hostname = '127.0.0.1';
@@ -69,12 +69,8 @@ export async function resetDatabase() {
   fs.rmSync(dir, { recursive: true, force: true });
 
   const prisma = await getPrisma();
-  const migrationSql = fs.readFileSync(
-    path.join(root, 'prisma/migrations/20261007120000_separate_company_staff_and_shop_employees/migration.sql'),
-    'utf8'
-  );
-  const partialIndex = migrationSql.split('\n').find((l) => l.includes('one_active_per_employee'));
-  await prisma.$executeRawUnsafe(partialIndex);
+  // db push cannot express the typed-shop CHECK included in the additive migration.
+  await prisma.$executeRawUnsafe('ALTER TABLE "SupermarketOwnership" ADD CONSTRAINT "SupermarketOwnership_customer_shop_only" CHECK ("shopType" = \'CUSTOMER\')');
 }
 
 let prismaInstance;
@@ -111,6 +107,8 @@ export async function startApp() {
   const userSockets = new Map();
   socketServer.attachSocketServer(io, { userSockets, cacheService: cacheService.default });
 
+  app.use((await import('../../src/middleware/restoreGuard.js')).restoreGuard);
+  app.use((await import('cors')).default({ origin: true, credentials: true }));
   app.use(cookieParser());
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -118,25 +116,37 @@ export async function startApp() {
     req.userSockets = userSockets;
     next();
   });
+  app.use((await import('../../src/routes/publicResources.js')).default);
   app.use('/api', authRoutes.default);
   app.use('/api/chat', chatRoutes.default);
+  app.use('/api/promotions', (await import('../../src/routes/promotions.js')).default);
+  app.use('/api/chat-safety', (await import('../../src/routes/chatSafetyRoutes.js')).default);
   app.use('/api/price-reports', priceReports.default);
+  app.use('/api/products', (await import('../../src/routes/compareRoutes.js')).default);
   app.use('/api/admin', adminRoutes.default);
   app.use('/api/lists', listRoutes.default);
   app.use('/api/employees', employeeRoutes.default);
   app.use('/api/shop', shopRoutes.default);
+  app.use('/api/account-deletion', (await import('../../src/routes/accountDeletionRoutes.js')).default);
   app.use('/api/tasks', taskRoutes.default);
+  app.use('/api/uploads', (await import('../../src/middleware/privateUploads.js')).default);
+  app.use('/uploads', (await import('../../src/middleware/privateUploads.js')).default);
+  for (const [route, file] of Object.entries({ expiry: 'expiry', fridges: 'fridge', cleaning: 'cleaning', incidents: 'incident', 'age-restriction-records': 'ageRestrictionRecord', 'age-restricted-records': 'ageRestrictedRecord', certificates: 'certificate', waste: 'waste', 'supplier-payouts': 'supplierPayout', 'shift-sheet': 'shiftSheet' })) {
+    app.use(`/api/${route}`, (await import(`../../src/routes/${file}Routes.js`)).default);
+  }
 
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve) => server.listen(Number(process.env.TEST_HTTP_PORT || 0), '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
   const base = `${origin}/api`;
   const sockets = [];
 
-  const request = async (method, url, { token, body } = {}) => {
+  const request = async (method, url, { token, body, shopId, headers = {} } = {}) => {
     const res = await fetch(`${base}${url}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
+        ...headers,
+        ...(shopId && { 'X-Supermarket-Id': shopId }),
         ...(token && { Authorization: `Bearer ${token}` }),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -165,6 +175,7 @@ export async function startApp() {
   };
 
   return {
+    origin,
     request,
     connectSocket,
     login: async (email, password) => {
@@ -180,7 +191,7 @@ export async function startApp() {
 }
 
 /** Seeds an Admin, two customers with their own shops, and a wholesale shop. */
-export async function seedBase(prisma) {
+export async function seedBase(prisma, { ownership = true } = {}) {
   const bcrypt = (await import('bcryptjs')).default;
   const password = await bcrypt.hash('Passw0rd!', 4);
 
@@ -205,6 +216,10 @@ export async function seedBase(prisma) {
         trialEndDate: new Date(Date.now() + 365 * 86400000),
       },
     });
+    if (ownership) {
+      await prisma.supermarketOwnership.create({ data: { customerId: owner.id, shopId: shop.id, source: 'VERIFIED_TEST_FIXTURE' } });
+      await prisma.customer.update({ where: { id: owner.id }, data: { defaultSupermarketId: shop.id } });
+    }
     await prisma.chatParticipant.create({ data: { chatId: chat.id, userId: owner.id, userType: 'CUSTOMER', isAdmin: true } });
     return { shop, owner };
   };
@@ -214,6 +229,7 @@ export async function seedBase(prisma) {
   const product = await prisma.product.create({ data: { title: 'Test Cola 330ml', barcode: '5000000000001' } });
   await prisma.productAtShop.create({ data: { shopId: wholesale.id, productId: product.id, price: 1.25 } });
 
+  await prisma.communityAcceptance.createMany({ data: [a.owner, b.owner, admin].map(u => ({ userId: u.id, userType: u.userType, version: '2026-10-12' })) });
   return { password: 'Passw0rd!', passwordHash: password, admin, wholesale, a, b, product };
 }
 

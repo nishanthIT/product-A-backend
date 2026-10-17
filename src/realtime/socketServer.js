@@ -1,5 +1,6 @@
-import jwt from 'jsonwebtoken';
-import { canAccessShop, resolvePrincipal } from '../services/accessControl.js';
+import { activeSuspension, blockedPeers } from '../services/chatSafety.js';
+import { verifySessionToken } from '../services/sessionTokens.js';
+import { canAccessShop, resolvePrincipal, hasShopFeatureAccess, SHOP_FEATURES } from '../services/accessControl.js';
 import { getChatAccess } from '../services/chatAccess.js';
 import { setRealtimeServer, userKey, userRoom } from '../services/realtime.js';
 
@@ -18,12 +19,13 @@ export function attachSocketServer(io, { userSockets, cacheService }) {
       return next();
     }
     try {
-      const claims = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-      const principal = await resolvePrincipal(claims);
+      const claims = await verifySessionToken(token);
+      const principal = await resolvePrincipal(claims, undefined, socket.handshake.auth?.supermarketId);
       if (!principal.user) {
         socket.emit('auth_error', { message: principal.error });
         return next(new Error('Authentication error: ' + principal.error));
       }
+      socket.sessionToken = token;
       socket.claims = claims;
       socket.user = principal.user;
       next();
@@ -36,7 +38,7 @@ export function attachSocketServer(io, { userSockets, cacheService }) {
   // Re-checks the token's memberships so revoked access stops at the next join.
   const currentUser = async (socket) => {
     if (!socket.claims) return null;
-    const principal = await resolvePrincipal(socket.claims);
+    const principal = await resolvePrincipal(socket.claims, undefined, socket.handshake.auth?.supermarketId);
     return principal.user ?? null;
   };
 
@@ -48,6 +50,24 @@ export function attachSocketServer(io, { userSockets, cacheService }) {
   };
 
   io.on('connection', (socket) => {
+    const expiresIn = socket.claims ? Math.max(0, socket.claims.exp * 1000 - Date.now()) : null;
+    const expiryTimer = expiresIn === null ? null : setTimeout(() => socket.disconnect(true), expiresIn);
+    socket.on('disconnect', () => { if (expiryTimer) clearTimeout(expiryTimer); });
+    socket.use(async (packet, next) => {
+      try {
+        if (!socket.sessionToken) return next(); // Anonymous handlers cannot join private rooms.
+        await verifySessionToken(socket.sessionToken);
+        if (!await currentUser(socket)) throw new Error('Session revoked');
+        if (['typing_start', 'typing_stop'].includes(packet[0])) {
+          const suspension = await activeSuspension(socket.user);
+          if (suspension) {
+            socket.emit('chat_suspended', suspension);
+            return next(new Error('Chat posting suspended'));
+          }
+        }
+        next();
+      } catch { socket.disconnect(true); next(new Error('Session expired or revoked')); }
+    });
     if (socket.user) joinOwnRoom(socket);
 
     // Legacy clients send their id; the room is always taken from the verified token.
@@ -73,32 +93,30 @@ export function attachSocketServer(io, { userSockets, cacheService }) {
       socket.leave(`chat_${chatId}`);
     });
 
-    // Relays only within rooms this socket was authorized to join.
-    socket.on('new_message', async (data) => {
-      const { chatId, message } = data || {};
-      if (!chatId || !socket.rooms.has(`chat_${chatId}`)) return;
-      await cacheService.addMessageToCache(chatId, message);
-      socket.to(`chat_${chatId}`).emit('message_received', message);
-    });
+    // Messages are created and broadcast by the authenticated REST endpoint.
+    // Never relay a client-supplied sender or an unpersisted message.
 
     socket.on('typing_start', async (data) => {
-      const { chatId, userInfo } = data || {};
-      if (!chatId || !socket.rooms.has(`chat_${chatId}`)) return;
+      const { chatId } = data || {};
+      const userInfo = socket.user && { id: socket.user.id, userType: socket.user.userType, name: socket.user.name };
+      if (!userInfo || !chatId || !socket.rooms.has(`chat_${chatId}`)) return;
       await cacheService.setTyping(userInfo?.id || userInfo?.userId, chatId);
-      socket.to(`chat_${chatId}`).emit('user_typing', userInfo);
+      socket.to(`chat_${chatId}`).except((await blockedPeers(socket.user)).map(p => userRoom(p.userType, p.id))).emit('user_typing', userInfo);
     });
 
     socket.on('typing_stop', async (data) => {
-      const { chatId, userInfo } = data || {};
-      if (!chatId || !socket.rooms.has(`chat_${chatId}`)) return;
+      const { chatId } = data || {};
+      const userInfo = socket.user && { id: socket.user.id, userType: socket.user.userType, name: socket.user.name };
+      if (!userInfo || !chatId || !socket.rooms.has(`chat_${chatId}`)) return;
       await cacheService.clearTyping(userInfo?.id || userInfo?.userId, chatId);
-      socket.to(`chat_${chatId}`).emit('user_stopped_typing', userInfo);
+      socket.to(`chat_${chatId}`).except((await blockedPeers(socket.user)).map(p => userRoom(p.userType, p.id))).emit('user_stopped_typing', userInfo);
     });
 
     socket.on('join_shop_lists', async (shopId) => {
       if (!shopId) return;
       try {
-        if (!(await canAccessShop(socket.claims, String(shopId)))) {
+        const principal = await resolvePrincipal(socket.claims, undefined, String(shopId));
+        if (!principal.user || (principal.user.userType === 'EMPLOYEE' && !hasShopFeatureAccess(principal.user, SHOP_FEATURES.LISTS)) || !(await canAccessShop(socket.claims, String(shopId)))) {
           socket.emit('shop_lists_denied', { shopId });
           return;
         }

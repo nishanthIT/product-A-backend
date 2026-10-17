@@ -2,7 +2,7 @@ import redisService from './redisService.js';
 
 /**
  * Cache Service - High-level caching utilities for the application
- * Uses Redis when available, falls back to in-memory
+ * Uses Redis with a durable PostgreSQL fallback
  */
 
 // Cache TTL constants (in seconds)
@@ -251,12 +251,7 @@ class CacheService {
    */
   async checkRateLimit(identifier, limit = 100, windowSeconds = 60) {
     const key = `${KEY_PREFIX.RATE_LIMIT}${identifier}`;
-    const current = await redisService.incr(key);
-    
-    // Set expiry on first request
-    if (current === 1) {
-      await redisService.expire(key, windowSeconds);
-    }
+    const current = await redisService.incr(key, windowSeconds);
     
     return {
       allowed: current <= limit,

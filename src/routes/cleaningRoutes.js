@@ -18,22 +18,7 @@ const requireCustomer = (req, res, next) => {
 };
 
 // Helper to get user's shop ID
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return customer?.shopId;
-  } else if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return employee?.shopId;
-  }
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 // ===== CLEANING AREA MANAGEMENT (Admin) =====
 
@@ -41,7 +26,7 @@ const getUserShopId = async (userId, userType) => {
 router.get('/areas', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -76,7 +61,7 @@ router.post('/areas', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'Cleaning area name is required' });
     }
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -110,7 +95,7 @@ router.post('/areas/bulk', authenticateToken, requireCustomer, async (req, res) 
       return res.status(400).json({ error: 'Areas array is required' });
     }
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -147,7 +132,7 @@ router.put('/areas/:id', authenticateToken, requireCustomer, async (req, res) =>
     const areaId = req.params.id;
     const { name, description, isActive } = req.body;
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -188,7 +173,7 @@ router.delete('/areas/:id', authenticateToken, requireCustomer, async (req, res)
     const customerId = req.user.id;
     const areaId = req.params.id;
 
-    const shopId = await getUserShopId(customerId, 'CUSTOMER');
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -220,7 +205,7 @@ router.get('/today', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -300,7 +285,7 @@ router.post('/complete/:areaId', authenticateToken, async (req, res) => {
     const areaId = req.params.areaId;
     const { notes } = req.body;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -380,7 +365,7 @@ router.get('/history', authenticateToken, async (req, res) => {
     const { id: userId, userType } = req.user;
     const { areaId, startDate, endDate, employeeId, limit } = req.query;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }
@@ -391,7 +376,7 @@ router.get('/history', authenticateToken, async (req, res) => {
       select: { id: true, name: true }
     });
 
-    const areaIds = areaId ? [areaId] : areas.map(a => a.id);
+    const areaIds = areaId ? areas.filter((item) => item.id === areaId).map((item) => item.id) : areas.map(a => a.id);
     const areaMap = new Map(areas.map(a => [a.id, a.name]));
 
     const whereClause = { cleaningAreaId: { in: areaIds } };
@@ -461,7 +446,7 @@ router.delete('/undo/:areaId', authenticateToken, async (req, res) => {
     const { id: userId, userType } = req.user;
     const areaId = req.params.areaId;
 
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
     }

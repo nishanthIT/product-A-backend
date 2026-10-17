@@ -1,518 +1,161 @@
 import Redis from 'ioredis';
+import { DatabaseCache, cacheKey } from './databaseCache.js';
+import { serviceError } from './serviceErrors.js';
 
-/**
- * Redis Service with graceful fallback to in-memory storage
- * - Works with Redis when available (production Linux: sudo apt install redis-server)
- * - Falls back to in-memory Map when Redis is not available (development)
- */
-
-class RedisService {
-  constructor() {
-    this.client = null;
-    this.isConnected = false;
-    this.memoryStore = new Map(); // Fallback storage
-    this.memoryExpiry = new Map(); // Track expiry times for fallback
-  }
-
-  async connect() {
-    const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-    
-    try {
-      this.client = new Redis(redisUrl, {
-        maxRetriesPerRequest: 1,
-        retryStrategy: (times) => {
-          // Only try once, then give up
-          if (times > 1) {
-            return null; // Stop retrying
-          }
-          return 100; // Wait 100ms before first retry
-        },
-        enableOfflineQueue: false,
-        connectTimeout: 3000,
-        lazyConnect: true,
-      });
-
-      // Suppress unhandled error events
-      this.client.on('error', (err) => {
-        // Silently handle errors when in fallback mode
-        if (!this.isConnected) {
-          return; // Already in fallback mode, ignore
-        }
-        console.warn('⚠️ Redis error:', err.message);
-        this.isConnected = false;
-      });
-
-      this.client.on('connect', () => {
-        console.log('✅ Redis connected successfully');
-        this.isConnected = true;
-      });
-
-      this.client.on('close', () => {
-        if (this.isConnected) {
-          console.log('🔌 Redis connection closed');
-        }
-        this.isConnected = false;
-      });
-
-      // Try to connect with timeout
-      await Promise.race([
-        this.client.connect(),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection timeout')), 3000)
-        )
-      ]);
-      
-      // Test connection
-      await this.client.ping();
-      this.isConnected = true;
-      console.log('✅ Redis connected at:', redisUrl);
-      
-    } catch (error) {
-      console.warn('⚠️ Redis not available, using in-memory fallback');
-      console.warn('   To use Redis on Linux: sudo apt install redis-server && sudo systemctl start redis');
-      this.isConnected = false;
-      
-      // Clean up the failed client
-      if (this.client) {
-        this.client.disconnect();
-        this.client = null;
-      }
-    }
-
-    // Start memory cleanup interval for fallback mode
-    this._startMemoryCleanup();
-    
-    return this.isConnected;
-  }
-
-  // Clean up expired keys in memory fallback
-  _startMemoryCleanup() {
-    setInterval(() => {
-      const now = Date.now();
-      for (const [key, expiry] of this.memoryExpiry.entries()) {
-        if (expiry && expiry < now) {
-          this.memoryStore.delete(key);
-          this.memoryExpiry.delete(key);
-        }
-      }
-    }, 60000); // Clean up every minute
-  }
-
-  /**
-   * SET a key with optional expiry
-   * @param {string} key 
-   * @param {string|object} value 
-   * @param {number} expirySeconds - optional TTL in seconds
-   */
-  async set(key, value, expirySeconds = null) {
-    const stringValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    
-    if (this.isConnected && this.client) {
-      try {
-        if (expirySeconds) {
-          await this.client.setex(key, expirySeconds, stringValue);
-        } else {
-          await this.client.set(key, stringValue);
-        }
-        return true;
-      } catch (error) {
-        console.error('Redis SET error:', error.message);
-      }
-    }
-    
-    // Fallback to memory
-    this.memoryStore.set(key, stringValue);
-    if (expirySeconds) {
-      this.memoryExpiry.set(key, Date.now() + (expirySeconds * 1000));
-    }
-    return true;
-  }
-
-  /**
-   * GET a key
-   * @param {string} key 
-   * @param {boolean} parseJson - auto-parse JSON
-   */
-  async get(key, parseJson = false) {
-    let value = null;
-    
-    if (this.isConnected && this.client) {
-      try {
-        value = await this.client.get(key);
-      } catch (error) {
-        console.error('Redis GET error:', error.message);
-      }
-    } else {
-      // Check expiry for memory fallback
-      const expiry = this.memoryExpiry.get(key);
-      if (expiry && expiry < Date.now()) {
-        this.memoryStore.delete(key);
-        this.memoryExpiry.delete(key);
-        return null;
-      }
-      value = this.memoryStore.get(key) || null;
-    }
-    
-    if (value && parseJson) {
-      try {
-        return JSON.parse(value);
-      } catch {
-        return value;
-      }
-    }
-    return value;
-  }
-
-  /**
-   * DELETE a key
-   */
-  async del(key) {
-    if (this.isConnected && this.client) {
-      try {
-        await this.client.del(key);
-        return true;
-      } catch (error) {
-        console.error('Redis DEL error:', error.message);
-      }
-    }
-    
-    this.memoryStore.delete(key);
-    this.memoryExpiry.delete(key);
-    return true;
-  }
-
-  /**
-   * Check if key EXISTS
-   */
-  async exists(key) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.exists(key) === 1;
-      } catch (error) {
-        console.error('Redis EXISTS error:', error.message);
-      }
-    }
-    
-    // Check expiry for memory fallback
-    const expiry = this.memoryExpiry.get(key);
-    if (expiry && expiry < Date.now()) {
-      this.memoryStore.delete(key);
-      this.memoryExpiry.delete(key);
-      return false;
-    }
-    return this.memoryStore.has(key);
-  }
-
-  /**
-   * Set expiry on existing key
-   */
-  async expire(key, seconds) {
-    if (this.isConnected && this.client) {
-      try {
-        await this.client.expire(key, seconds);
-        return true;
-      } catch (error) {
-        console.error('Redis EXPIRE error:', error.message);
-      }
-    }
-    
-    if (this.memoryStore.has(key)) {
-      this.memoryExpiry.set(key, Date.now() + (seconds * 1000));
-    }
-    return true;
-  }
-
-  /**
-   * INCREMENT a key
-   */
-  async incr(key) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.incr(key);
-      } catch (error) {
-        console.error('Redis INCR error:', error.message);
-      }
-    }
-    
-    const current = parseInt(this.memoryStore.get(key) || '0', 10);
-    const newValue = current + 1;
-    this.memoryStore.set(key, String(newValue));
-    return newValue;
-  }
-
-  /**
-   * HASH operations - HSET
-   */
-  async hset(key, field, value) {
-    const stringValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    
-    if (this.isConnected && this.client) {
-      try {
-        await this.client.hset(key, field, stringValue);
-        return true;
-      } catch (error) {
-        console.error('Redis HSET error:', error.message);
-      }
-    }
-    
-    // Memory fallback - use nested Map
-    if (!this.memoryStore.has(key)) {
-      this.memoryStore.set(key, new Map());
-    }
-    this.memoryStore.get(key).set(field, stringValue);
-    return true;
-  }
-
-  /**
-   * HASH operations - HGET
-   */
-  async hget(key, field, parseJson = false) {
-    let value = null;
-    
-    if (this.isConnected && this.client) {
-      try {
-        value = await this.client.hget(key, field);
-      } catch (error) {
-        console.error('Redis HGET error:', error.message);
-      }
-    } else {
-      const hash = this.memoryStore.get(key);
-      value = hash instanceof Map ? hash.get(field) : null;
-    }
-    
-    if (value && parseJson) {
-      try {
-        return JSON.parse(value);
-      } catch {
-        return value;
-      }
-    }
-    return value;
-  }
-
-  /**
-   * HASH operations - HGETALL
-   */
-  async hgetall(key) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.hgetall(key);
-      } catch (error) {
-        console.error('Redis HGETALL error:', error.message);
-      }
-    }
-    
-    const hash = this.memoryStore.get(key);
-    if (hash instanceof Map) {
-      return Object.fromEntries(hash);
-    }
-    return {};
-  }
-
-  /**
-   * HASH operations - HDEL
-   */
-  async hdel(key, field) {
-    if (this.isConnected && this.client) {
-      try {
-        await this.client.hdel(key, field);
-        return true;
-      } catch (error) {
-        console.error('Redis HDEL error:', error.message);
-      }
-    }
-    
-    const hash = this.memoryStore.get(key);
-    if (hash instanceof Map) {
-      hash.delete(field);
-    }
-    return true;
-  }
-
-  /**
-   * LIST operations - LPUSH (add to beginning)
-   */
-  async lpush(key, ...values) {
-    const stringValues = values.map(v => typeof v === 'object' ? JSON.stringify(v) : String(v));
-    
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.lpush(key, ...stringValues);
-      } catch (error) {
-        console.error('Redis LPUSH error:', error.message);
-      }
-    }
-    
-    if (!this.memoryStore.has(key)) {
-      this.memoryStore.set(key, []);
-    }
-    const list = this.memoryStore.get(key);
-    list.unshift(...stringValues.reverse());
-    return list.length;
-  }
-
-  /**
-   * LIST operations - LRANGE
-   */
-  async lrange(key, start, stop) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.lrange(key, start, stop);
-      } catch (error) {
-        console.error('Redis LRANGE error:', error.message);
-      }
-    }
-    
-    const list = this.memoryStore.get(key) || [];
-    const end = stop === -1 ? list.length : stop + 1;
-    return list.slice(start, end);
-  }
-
-  /**
-   * LIST operations - LTRIM (keep only specified range)
-   */
-  async ltrim(key, start, stop) {
-    if (this.isConnected && this.client) {
-      try {
-        await this.client.ltrim(key, start, stop);
-        return true;
-      } catch (error) {
-        console.error('Redis LTRIM error:', error.message);
-      }
-    }
-    
-    const list = this.memoryStore.get(key) || [];
-    const end = stop === -1 ? list.length : stop + 1;
-    this.memoryStore.set(key, list.slice(start, end));
-    return true;
-  }
-
-  /**
-   * SET operations - SADD
-   */
-  async sadd(key, ...members) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.sadd(key, ...members);
-      } catch (error) {
-        console.error('Redis SADD error:', error.message);
-      }
-    }
-    
-    if (!this.memoryStore.has(key)) {
-      this.memoryStore.set(key, new Set());
-    }
-    const set = this.memoryStore.get(key);
-    members.forEach(m => set.add(String(m)));
-    return members.length;
-  }
-
-  /**
-   * SET operations - SREM
-   */
-  async srem(key, ...members) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.srem(key, ...members);
-      } catch (error) {
-        console.error('Redis SREM error:', error.message);
-      }
-    }
-    
-    const set = this.memoryStore.get(key);
-    if (set instanceof Set) {
-      members.forEach(m => set.delete(String(m)));
-    }
-    return members.length;
-  }
-
-  /**
-   * SET operations - SMEMBERS
-   */
-  async smembers(key) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.smembers(key);
-      } catch (error) {
-        console.error('Redis SMEMBERS error:', error.message);
-      }
-    }
-    
-    const set = this.memoryStore.get(key);
-    return set instanceof Set ? Array.from(set) : [];
-  }
-
-  /**
-   * SET operations - SISMEMBER
-   */
-  async sismember(key, member) {
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.sismember(key, member) === 1;
-      } catch (error) {
-        console.error('Redis SISMEMBER error:', error.message);
-      }
-    }
-    
-    const set = this.memoryStore.get(key);
-    return set instanceof Set ? set.has(String(member)) : false;
-  }
-
-  /**
-   * Pub/Sub - PUBLISH
-   */
-  async publish(channel, message) {
-    const stringMessage = typeof message === 'object' ? JSON.stringify(message) : String(message);
-    
-    if (this.isConnected && this.client) {
-      try {
-        return await this.client.publish(channel, stringMessage);
-      } catch (error) {
-        console.error('Redis PUBLISH error:', error.message);
-      }
-    }
-    
-    // No fallback for pub/sub - single server doesn't need it
-    return 0;
-  }
-
-  /**
-   * Get Redis client for advanced operations (like Socket.IO adapter)
-   */
-  getClient() {
-    return this.client;
-  }
-
-  /**
-   * Check if Redis is connected
-   */
-  isRedisConnected() {
-    return this.isConnected;
-  }
-
-  /**
-   * Get status
-   */
-  getStatus() {
-    return {
-      connected: this.isConnected,
-      mode: this.isConnected ? 'redis' : 'memory',
-      memoryKeys: this.memoryStore.size,
-    };
-  }
-
-  /**
-   * Disconnect
-   */
-  async disconnect() {
-    if (this.client) {
-      await this.client.quit();
-      this.client = null;
-      this.isConnected = false;
-    }
-  }
+const encode = value => typeof value === 'object' ? JSON.stringify(value) : String(value);
+const parse = (value, json) => { if (value && json) { try { return JSON.parse(value); } catch {} } return value; };
+const expires = seconds => seconds == null ? null : new Date(Date.now() + seconds * 1000);
+function typed(entry, type, empty) {
+  if (entry && entry.type !== type) throw Object.assign(new Error('Cache value has the wrong type'), { code: 'WRONGTYPE' });
+  return entry?.value ?? empty;
+}
+function range(list, start, stop) {
+  const first = Math.max(0, start < 0 ? list.length + start : start);
+  const last = stop < 0 ? list.length + stop : stop;
+  return last < first ? [] : list.slice(first, last + 1);
 }
 
-// Export singleton instance
-const redisService = new RedisService();
-export default redisService;
+export class RedisService {
+  constructor({ store = new DatabaseCache(), clientFactory = (url, options) => new Redis(url, options) } = {}) {
+    this.store = store;
+    this.clientFactory = clientFactory;
+    this.client = null;
+    this.isConnected = false;
+  }
+  redisKey(key) { return `paymi:cache:v2:${cacheKey(key)}`; }
+  async connect(url = process.env.REDIS_URL || 'redis://127.0.0.1:6379') {
+    // Verify the fallback before reporting Redis/cache readiness.
+    await this.store.metadata('__readiness__');
+    if (this.client) this.client.disconnect();
+    this.client = this.clientFactory(url, {
+      maxRetriesPerRequest: 1, retryStrategy: null, enableOfflineQueue: false,
+      connectTimeout: 3000, commandTimeout: 3000, lazyConnect: true,
+    });
+    this.client.on('error', error => {
+      this.isConnected = false;
+      console.error('Redis connection error; PostgreSQL cache remains authoritative', serviceError(error));
+    });
+    this.client.on('close', () => { this.isConnected = false; });
+    try {
+      await this.client.connect();
+      await this.client.ping();
+      this.isConnected = true;
+      console.log('Redis ready; durable PostgreSQL fallback ready');
+    } catch (error) {
+      this.isConnected = false;
+      console.warn('Redis unavailable; using PostgreSQL cache', serviceError(error));
+      this.client.disconnect(); this.client = null;
+    }
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    this.cleanupTimer = setInterval(() => {
+      this.store.pruneExpired().catch(error => console.error('Database cache expiry cleanup failed', serviceError(error)));
+    }, 60000);
+    this.cleanupTimer.unref();
+    return this.isConnected;
+  }
+  async redis(command, ...args) {
+    if (!this.isConnected || !this.client) return null;
+    try { return await this.client[command](...args); }
+    catch (error) {
+      console.error(`Redis ${command.toUpperCase()} failed; using PostgreSQL cache`, serviceError(error));
+      this.isConnected = false; this.client.disconnect();
+      return null;
+    }
+  }
+  async mirror(key, entry) {
+    if (!entry) { await this.redis('del', this.redisKey(key)); return; }
+    // Revision comparison against PostgreSQL prevents stale data being read after
+    // outages, competing writes or restarts. Bound redundant Redis retention.
+    const ttl = Math.min(300000, entry.expiresAt ? entry.expiresAt.getTime() - Date.now() : 300000);
+    if (ttl > 0) await this.redis('set', this.redisKey(key), JSON.stringify(entry), 'PX', Math.ceil(ttl));
+  }
+  async read(key) {
+    if (!this.isConnected) return this.store.read(key);
+    const metadata = await this.store.metadata(key);
+    if (!metadata) return null; // Old Redis values cannot resurrect removed keys.
+    const cached = await this.redis('get', this.redisKey(key));
+    if (cached) {
+      try { const entry = JSON.parse(cached); if (entry.revision === metadata.revision) return entry; }
+      catch { console.error('Invalid Redis cache payload; reading PostgreSQL'); }
+    }
+    const entry = await this.store.read(key);
+    await this.mirror(key, entry);
+    return entry;
+  }
+  async change(key, fn) {
+    const { entry, result } = await this.store.mutate(key, fn);
+    await this.mirror(key, entry);
+    return result;
+  }
+  async set(key, value, seconds = null) {
+    await this.mirror(key, await this.store.setValue(key, encode(value), expires(seconds)));
+    return true;
+  }
+  async get(key, json = false) { return parse(typed(await this.read(key), 'string', null), json); }
+  async del(key) { await this.store.remove(key); await this.mirror(key, null); return true; }
+  async exists(key) { return !!await this.store.metadata(key); }
+  async expire(key, seconds) {
+    return this.change(key, entry => ({ entry: entry && seconds > 0 ? { ...entry, expiresAt: expires(seconds) } : null, result: !!entry }));
+  }
+  async incr(key, windowSeconds = null) {
+    const entry = await this.store.increment(key, expires(windowSeconds));
+    await this.mirror(key, entry);
+    return Number(entry.value);
+  }
+  async hset(key, field, value) {
+    return this.change(key, entry => ({ entry: { ...entry, type: 'hash', value: { ...typed(entry, 'hash', {}), [field]: encode(value) } }, result: true }));
+  }
+  async hget(key, field, json = false) {
+    const hash = typed(await this.read(key), 'hash', {});
+    return parse(Object.hasOwn(hash, field) ? hash[field] : null, json);
+  }
+  async hgetall(key) { return typed(await this.read(key), 'hash', {}); }
+  async hdel(key, field) {
+    return this.change(key, entry => {
+      const hash = { ...typed(entry, 'hash', {}) }; delete hash[field];
+      return { entry: Object.keys(hash).length ? { ...entry, type: 'hash', value: hash } : null, result: true };
+    });
+  }
+  async lpush(key, ...values) {
+    return this.change(key, entry => {
+      const list = [...values.map(encode).reverse(), ...typed(entry, 'list', [])];
+      return { entry: { ...entry, type: 'list', value: list }, result: list.length };
+    });
+  }
+  async lrange(key, start, stop) { return range(typed(await this.read(key), 'list', []), start, stop); }
+  async ltrim(key, start, stop) {
+    return this.change(key, entry => {
+      const list = range(typed(entry, 'list', []), start, stop);
+      return { entry: list.length ? { ...entry, type: 'list', value: list } : null, result: true };
+    });
+  }
+  async sadd(key, ...members) {
+    return this.change(key, entry => {
+      const old = typed(entry, 'set', []), value = [...new Set([...old, ...members.map(String)])];
+      return { entry: { ...entry, type: 'set', value }, result: value.length - old.length };
+    });
+  }
+  async srem(key, ...members) {
+    return this.change(key, entry => {
+      const old = typed(entry, 'set', []), remove = members.map(String), value = old.filter(member => !remove.includes(member));
+      return { entry: value.length ? { ...entry, type: 'set', value } : null, result: old.length - value.length };
+    });
+  }
+  async smembers(key) { return typed(await this.read(key), 'set', []); }
+  async sismember(key, member) { return (await this.smembers(key)).includes(String(member)); }
+  async publish(channel, message) {
+    // No callers currently use Pub/Sub. It cannot be emulated by a database cache.
+    const result = await this.redis('publish', channel, encode(message));
+    if (result === null) throw new Error('Redis Pub/Sub unavailable');
+    return result;
+  }
+  getClient() { return this.client; }
+  isRedisConnected() { return this.isConnected; }
+  getStatus() { return { connected: this.isConnected, mode: this.isConnected ? 'redis' : 'postgresql', persistence: 'postgresql' }; }
+  async disconnect() {
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    this.isConnected = false;
+    this.client?.disconnect(); this.client = null;
+  }
+}
+export default new RedisService();

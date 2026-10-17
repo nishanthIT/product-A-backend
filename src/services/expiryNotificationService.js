@@ -82,7 +82,7 @@ class ExpiryNotificationService {
         select: { id: true, email: true, name: true },
       }),
       prisma.customer.findMany({
-        where: { shopId },
+        where: { supermarketOwnerships: { some: { shopId } } },
         select: { id: true, email: true, name: true },
       }),
       prisma.empolyee.findMany({

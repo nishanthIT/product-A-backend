@@ -1,3 +1,8 @@
+import { lockAccountForWrite } from '../services/accountWriteBarrier.js';
+import { activeSuspension } from '../services/chatSafety.js';
+import { requireChatPosting } from '../services/chatSafety.js';
+import { PrismaClient } from '@prisma/client';
+const uploadDb = new PrismaClient();
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -71,13 +76,13 @@ router.get('/', getUserChats);
 router.get('/users', getAllUsers);
 
 // Create a new chat
-router.post('/', createChat);
+router.post('/', requireChatPosting, createChat);
 
 // Get specific chat with messages
 router.get('/:chatId', getChatById);
 
 // Send a message
-router.post('/message', sendMessage);
+router.post('/message', requireChatPosting, sendMessage);
 
 // Mark messages as read
 router.post('/read', markAsRead);
@@ -89,7 +94,7 @@ router.delete('/message/:messageId', deleteMessage);
 router.delete('/:chatId', deleteChat);
 
 // Upload file for chat
-router.post('/upload', upload.single('file'), (req, res) => {
+router.post('/upload', requireChatPosting, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ 
@@ -101,6 +106,12 @@ router.post('/upload', upload.single('file'), (req, res) => {
     const file = req.file;
     const fileUrl = `/uploads/chat/${file.filename}`;
     
+    await uploadDb.$transaction(async tx => {
+      await lockAccountForWrite(tx, req.user);
+      if (await activeSuspension(req.user, tx)) throw Object.assign(new Error('Chat posting is suspended'), { status: 403 });
+      await tx.chatUpload.create({ data: { filename: file.filename, uploaderId: req.user.id, uploaderType: req.user.userType } });
+    });
+
     // Determine file type
     const ext = path.extname(file.originalname).toLowerCase();
     const imageTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
@@ -117,11 +128,11 @@ router.post('/upload', upload.single('file'), (req, res) => {
       }
     });
   } catch (error) {
-    console.error('❌ File upload error:', error);
-    res.status(500).json({ 
+    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
+    console.error('Chat upload failed');
+    res.status(error.status || 500).json({
       success: false, 
-      message: 'Failed to upload file',
-      error: error.message 
+      message: error.status ? error.message : 'Failed to upload file'
     });
   }
 });

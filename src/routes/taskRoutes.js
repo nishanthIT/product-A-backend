@@ -21,22 +21,7 @@ const requireCustomer = (req, res, next) => {
 };
 
 // Helper to get user's shop ID
-const getUserShopId = async (userId, userType) => {
-  if (userType === 'CUSTOMER') {
-    const customer = await prisma.customer.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return customer?.shopId;
-  } else if (userType === 'EMPLOYEE') {
-    const employee = await prisma.empolyee.findUnique({
-      where: { id: userId },
-      select: { shopId: true }
-    });
-    return employee?.shopId;
-  }
-  return null;
-};
+const getUserShopId = async (user) => user.shopId ?? null;
 
 // ===== ADMIN ENDPOINTS =====
 
@@ -44,7 +29,7 @@ const getUserShopId = async (userId, userType) => {
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const { id: userId, userType } = req.user;
-    const shopId = await getUserShopId(userId, userType);
+    const shopId = await getUserShopId(req.user);
 
     if (!shopId) {
       return res.status(400).json({ error: 'User not assigned to a shop' });
@@ -137,7 +122,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       return res.status(400).json({ error: 'At least one valid employee must be assigned' });
     }
 
-    const shopId = await getUserShopId(customerId, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -200,6 +185,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
 
           req.io.to(userRoom('EMPLOYEE', employeeId)).emit('task_assigned', {
             type: 'task_assigned',
+            supermarketId: shopId,
             title: 'New Task Assigned',
             message: `You have been assigned a new task:\n\"${task.title}\"\nTap to view the task.`,
             taskId: task.id,
@@ -233,7 +219,7 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const taskId = req.params.id;
     const { title, description, dueDate, status, employeeIds } = req.body;
 
-    const shopId = await getUserShopId(customerId, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
@@ -317,7 +303,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
     const customerId = req.user.id;
     const taskId = req.params.id;
 
-    const shopId = await getUserShopId(customerId, req.user.userType);
+    const shopId = await getUserShopId(req.user);
     if (!shopId) {
       return res.status(400).json({ error: 'You are not assigned to a shop' });
     }
