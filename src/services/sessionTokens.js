@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
-import { jwtSecret } from './sessionSecurity.js';
+import { jwtSecret, validateSessionClaims } from './sessionSecurity.js';
 
 const prisma = new PrismaClient();
 const digest = (token) => crypto.createHash('sha256').update(token).digest('hex');
@@ -10,7 +10,7 @@ export const isInvalidSession = error => error instanceof InvalidSessionError ||
 
 export async function verifySessionToken(token, db = prisma) {
   const claims = jwt.verify(token, jwtSecret(), { algorithms: ['HS256'] });
-  if (!Number.isFinite(claims.exp)) throw new InvalidSessionError('Session expiry required');
+  if (!validateSessionClaims(claims)) throw new InvalidSessionError('Invalid session claims');
   const revoked = await db.revokedSession.findUnique({ where: { tokenHash: digest(token) } });
   if (revoked) throw new InvalidSessionError('Session revoked');
   return claims;

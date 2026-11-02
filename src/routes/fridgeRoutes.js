@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/fridgeRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -105,7 +107,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, fridges: formattedFridges });
   } catch (error) {
-    console.error('Error fetching fridges:', error);
+    securityLog.error('Error fetching fridges:', error);
     res.status(500).json({ error: 'Failed to fetch fridges' });
   }
 });
@@ -181,7 +183,7 @@ router.post('/', authenticateToken, requireCustomer, validateTemperatureFields, 
       fridge 
     });
   } catch (error) {
-    console.error('Error creating fridge:', error);
+    securityLog.error('Error creating fridge:', error);
     res.status(500).json({ error: 'Failed to create fridge' });
   }
 });
@@ -289,7 +291,7 @@ router.put('/:id', authenticateToken, requireCustomer, validateTemperatureFields
       fridge 
     });
   } catch (error) {
-    console.error('Error updating fridge:', error);
+    securityLog.error('Error updating fridge:', error);
     res.status(500).json({ error: 'Failed to update fridge' });
   }
 });
@@ -320,7 +322,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
 
     res.json({ success: true, message: 'Fridge deleted successfully' });
   } catch (error) {
-    console.error('Error deleting fridge:', error);
+    securityLog.error('Error deleting fridge:', error);
     res.status(500).json({ error: 'Failed to delete fridge' });
   }
 });
@@ -424,7 +426,7 @@ router.get('/:id/logs', authenticateToken, async (req, res) => {
       logs: logsWithUsers 
     });
   } catch (error) {
-    console.error('Error fetching temperature logs:', error);
+    securityLog.error('Error fetching temperature logs:', error);
     res.status(500).json({ error: 'Failed to fetch temperature logs' });
   }
 });
@@ -545,7 +547,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
           req.io.to(userRoom(type, recipientId)).emit('temperature_alert', payload);
         }
       } catch (notificationError) {
-        console.error('Temperature alert dispatch failed:', notificationError);
+        securityLog.error('Temperature alert dispatch failed:', notificationError);
       }
     }
 
@@ -560,7 +562,7 @@ router.post('/:id/logs', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error logging temperature:', error);
+    securityLog.error('Error logging temperature:', error);
     res.status(500).json({ error: 'Failed to log temperature' });
   }
 });
@@ -722,7 +724,7 @@ router.get('/all-logs', authenticateToken, async (req, res) => {
       logs: logsWithDetails 
     });
   } catch (error) {
-    console.error('Error fetching all temperature logs:', error);
+    securityLog.error('Error fetching all temperature logs:', error);
     res.status(500).json({ error: 'Failed to fetch temperature logs' });
   }
 });
@@ -800,7 +802,7 @@ router.get('/today-status', authenticateToken, async (req, res) => {
 
     res.json({ success: true, fridges: fridgesWithStatus });
   } catch (error) {
-    console.error('Error fetching today status:', error);
+    securityLog.error('Error fetching today status:', error);
     res.status(500).json({ error: 'Failed to fetch today status' });
   }
 });

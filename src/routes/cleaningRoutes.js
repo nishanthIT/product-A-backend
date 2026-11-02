@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/cleaningRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -46,7 +48,7 @@ router.get('/areas', authenticateToken, async (req, res) => {
 
     res.json({ success: true, areas });
   } catch (error) {
-    console.error('Error fetching cleaning areas:', error);
+    securityLog.error('Error fetching cleaning areas:', error);
     res.status(500).json({ error: 'Failed to fetch cleaning areas' });
   }
 });
@@ -80,7 +82,7 @@ router.post('/areas', authenticateToken, requireCustomer, async (req, res) => {
       area 
     });
   } catch (error) {
-    console.error('Error creating cleaning area:', error);
+    securityLog.error('Error creating cleaning area:', error);
     res.status(500).json({ error: 'Failed to create cleaning area' });
   }
 });
@@ -120,7 +122,7 @@ router.post('/areas/bulk', authenticateToken, requireCustomer, async (req, res) 
       areas: allAreas 
     });
   } catch (error) {
-    console.error('Error creating cleaning areas:', error);
+    securityLog.error('Error creating cleaning areas:', error);
     res.status(500).json({ error: 'Failed to create cleaning areas' });
   }
 });
@@ -162,7 +164,7 @@ router.put('/areas/:id', authenticateToken, requireCustomer, async (req, res) =>
       area 
     });
   } catch (error) {
-    console.error('Error updating cleaning area:', error);
+    securityLog.error('Error updating cleaning area:', error);
     res.status(500).json({ error: 'Failed to update cleaning area' });
   }
 });
@@ -193,7 +195,7 @@ router.delete('/areas/:id', authenticateToken, requireCustomer, async (req, res)
 
     res.json({ success: true, message: 'Cleaning area deleted successfully' });
   } catch (error) {
-    console.error('Error deleting cleaning area:', error);
+    securityLog.error('Error deleting cleaning area:', error);
     res.status(500).json({ error: 'Failed to delete cleaning area' });
   }
 });
@@ -273,7 +275,7 @@ router.get('/today', authenticateToken, async (req, res) => {
       areas: areasWithStatus 
     });
   } catch (error) {
-    console.error('Error fetching today cleaning status:', error);
+    securityLog.error('Error fetching today cleaning status:', error);
     res.status(500).json({ error: 'Failed to fetch cleaning status' });
   }
 });
@@ -354,7 +356,7 @@ router.post('/complete/:areaId', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error marking area as cleaned:', error);
+    securityLog.error('Error marking area as cleaned:', error);
     res.status(500).json({ error: 'Failed to update cleaning status' });
   }
 });
@@ -435,7 +437,7 @@ router.get('/history', authenticateToken, async (req, res) => {
       logs: logsWithDetails 
     });
   } catch (error) {
-    console.error('Error fetching cleaning history:', error);
+    securityLog.error('Error fetching cleaning history:', error);
     res.status(500).json({ error: 'Failed to fetch cleaning history' });
   }
 });
@@ -489,7 +491,7 @@ router.delete('/undo/:areaId', authenticateToken, async (req, res) => {
       message: `Cleaning record for ${area.name} has been removed` 
     });
   } catch (error) {
-    console.error('Error undoing cleaning:', error);
+    securityLog.error('Error undoing cleaning:', error);
     res.status(500).json({ error: 'Failed to undo cleaning status' });
   }
 });

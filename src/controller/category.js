@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/category.js');
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
@@ -32,7 +34,7 @@ const getAllCategories = async (req, res) => {
       data: categories
     });
   } catch (error) {
-    console.error("Error fetching categories:", error);
+    securityLog.error("Error fetching categories:", error);
     res.status(500).json({ error: "Failed to fetch categories" });
   }
 };
@@ -58,7 +60,7 @@ const searchCategories = async (req, res) => {
       data: categories
     });
   } catch (error) {
-    console.error("Error searching categories:", error);
+    securityLog.error("Error searching categories:", error);
     res.status(500).json({ error: "Failed to search categories" });
   }
 };
@@ -101,7 +103,7 @@ const addCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
-    console.error("Error adding category:", error);
+    securityLog.error("Error adding category:", error);
     res.status(500).json({ error: "Failed to add category" });
   }
 };
@@ -144,7 +146,7 @@ const updateCategory = async (req, res) => {
       data: category
     });
   } catch (error) {
-    console.error("Error updating category:", error);
+    securityLog.error("Error updating category:", error);
     if (error.code === 'P2025') {
       return res.status(404).json({ error: "Category not found" });
     }
@@ -166,7 +168,7 @@ const deleteCategory = async (req, res) => {
       message: "Category deleted successfully"
     });
   } catch (error) {
-    console.error("Error deleting category:", error);
+    securityLog.error("Error deleting category:", error);
     if (error.code === 'P2025') {
       return res.status(404).json({ error: "Category not found" });
     }
@@ -205,7 +207,7 @@ const seedCategories = async (req, res) => {
       message: `Categories seeded. Created: ${created}, Already existing: ${existing}`
     });
   } catch (error) {
-    console.error("Error seeding categories:", error);
+    securityLog.error("Error seeding categories:", error);
     res.status(500).json({ error: "Failed to seed categories" });
   }
 };
@@ -228,7 +230,7 @@ const getProductCategories = async (req, res) => {
       data: categories
     });
   } catch (error) {
-    console.error("Error fetching product categories:", error);
+    securityLog.error("Error fetching product categories:", error);
     res.status(500).json({ error: "Failed to fetch product categories" });
   }
 };

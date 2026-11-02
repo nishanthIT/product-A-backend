@@ -1,0 +1,72 @@
+{
+  "verifiedDate": "2026-10-29",
+  "node": "24.19.0",
+  "backendFullSuite": {
+    "total": 346,
+    "passed": 345,
+    "failed": 0,
+    "skipped": 1,
+    "skipReason": "optional TEST_DB_LATENCY_MS scenario",
+    "log": "backend-full-tests.txt"
+  },
+  "optionalLatencySuite": {
+    "passed": 1,
+    "failed": 0,
+    "latencyMsPerPacket": 10,
+    "log": "latency-tests.txt"
+  },
+  "postDependencyRegression": {
+    "passed": 11,
+    "failed": 0,
+    "log": "dependency-regression-tests.txt"
+  },
+  "mobileSuite": {
+    "passed": 143,
+    "failed": 0,
+    "log": "mobile-tests.txt"
+  },
+  "adminSuite": {
+    "passed": 10,
+    "failed": 0,
+    "build": "passed",
+    "typecheckErrors": 28,
+    "typecheckErrorsPreexisting": true
+  },
+  "dependencyAudit": {
+    "info": 0,
+    "low": 0,
+    "moderate": 1,
+    "high": 2,
+    "critical": 0,
+    "total": 3
+  },
+  "databases": "Only disposable localhost PostgreSQL18 and Redis; no production mutations",
+  "deployment": "Not deployed; rotation and operational verification required",
+  "finalRegression": {
+    "passed": 12,
+    "failed": 0,
+    "skipped": 0,
+    "coverage": "Auth/recovery, uploads and real Redis Socket.IO after final dependency and standalone-test import changes",
+    "log": "final-regression-tests.txt"
+  },
+  "startupSmoke": {
+    "passed": 4,
+    "failed": 0,
+    "log": "startup-smoke.json",
+    "environment": "production-mode process against disposable local services with fixture-only secrets"
+  },
+  "supplementalSecretScan": {
+    "coveredOversizedObjects": 4,
+    "findings": 0,
+    "log": "oversized-secret-scan.json",
+    "limitation": "Pattern-based detection cannot guarantee absence of secrets"
+  },
+  "approvedFollowup": {
+    "date": "2026-10-30",
+    "migration": "20261027130000_central_security_protection",
+    "appliedToConfiguredRemoteDatabase": true,
+    "localApiStarted": true,
+    "hostedApplicationDeployed": false,
+    "evidence": "security-migration-approved-apply-2026-10-30.json"
+  }
+}

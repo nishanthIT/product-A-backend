@@ -1,0 +1,18 @@
+{
+  "migration": "20261027130000_central_security_protection",
+  "checksum": "f3fffd9be0a5004aea3b364f85ecca0c5d997c33051e0cad979895bdb544c797",
+  "mode": "dry-run",
+  "committed": false,
+  "status": "already-applied",
+  "action": "none",
+  "schemaFingerprint": "0ad96d67894f0cc0b406261bc77a9e093cb83b051af5b3ae99eedec313b3afdb",
+  "missingTables": [],
+  "planned": {
+    "createTables": [],
+    "createAuditTriggers": [],
+    "recordMigration": null,
+    "existingBusinessRowsChanged": 0,
+    "existingRowsDeleted": 0
+  },
+  "unrelatedMigrationRecordsUntouched": 50
+}

@@ -1,0 +1,17 @@
+✔ default preview is read-only and identifies precisely the five missing tables (25.977736ms)
+✔ explicit apply is atomic, preserves business rows and unrelated ledger entries, and is idempotent (22.703903ms)
+✔ an exact previously created schema is recorded without executing DDL or changing its rows (16.077015ms)
+✔ partial schema and a disabled append-only trigger are rejected without guessing (15.633032ms)
+✔ unfinished records, checksum mismatch and missing ledger are refused (24.593278ms)
+✔ an injected DDL failure rolls back all five tables and the target ledger entry (13.948576ms)
+✔ concurrent applies serialize and produce one completed migration record (31.542128ms)
+✔ a lost COMMIT acknowledgement reports unknown until a fresh read-only check resolves it (19.72365ms)
+✔ connection failures and failures before COMMIT remain distinct from ambiguous commits (3.634412ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 224.792938

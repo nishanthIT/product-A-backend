@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/priceReports.js');
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
@@ -106,7 +108,7 @@ router.get('/', authenticateToken, async (req, res) => {
       earnings: user?.earnings || 0
     });
   } catch (error) {
-    console.error('Error fetching price reports:', error);
+    securityLog.error('Error fetching price reports:', error);
     res.status(500).json({ error: 'Failed to fetch reports' });
   }
 });
@@ -180,14 +182,14 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     });
 
-    console.log(`📋 New price report created by ${req.user.userType} ${userId} for product ${finalProductId} at shop ${finalShopId}`);
+    securityLog.log(`📋 New price report created by ${req.user.userType} ${userId} for product ${finalProductId} at shop ${finalShopId}`);
 
     res.status(201).json({
       message: 'Price report submitted successfully',
       report
     });
   } catch (error) {
-    console.error('Error creating price report:', error);
+    securityLog.error('Error creating price report:', error);
     res.status(500).json({ error: 'Failed to submit price report' });
   }
 });
@@ -198,7 +200,7 @@ router.get('/admin/pending', authenticateToken, requireReviewer, async (req, res
     const reports = await prisma.priceReport.findMany({ where: { status: 'PENDING' }, include: reportInclude, orderBy: { createdAt: 'asc' } });
     res.json(reports.map(presentReport));
   } catch (error) {
-    console.error('Error fetching pending reports:', error);
+    securityLog.error('Error fetching pending reports:', error);
     res.status(500).json({ error: 'Failed to fetch pending reports' });
   }
 });
@@ -241,7 +243,7 @@ function reviewReport(status) {
       });
     } catch (error) {
       if (error.status) return res.status(error.status).json({ error: error.message });
-      console.error('Error reviewing price report:', error);
+      securityLog.error('Error reviewing price report:', error);
       res.status(500).json({ error: 'Failed to review report' });
     }
   };
@@ -287,7 +289,7 @@ router.get('/product/:productId/shop/:shopId/price', authenticateToken, async (r
       lastUpdated: productAtShop.updatedAt
     });
   } catch (error) {
-    console.error('Error fetching product price:', error);
+    securityLog.error('Error fetching product price:', error);
     res.status(500).json({ error: 'Failed to fetch product price' });
   }
 });
@@ -317,7 +319,7 @@ router.get('/products/search', authenticateToken, async (req, res) => {
 
     res.json({ products: orderByRank(rows, rankedIds) });
   } catch (error) {
-    console.error('Error searching products:', error);
+    securityLog.error('Error searching products:', error);
     res.status(500).json({ error: 'Failed to search products' });
   }
 });
@@ -396,7 +398,7 @@ router.get('/products/:productId/shops/search', authenticateToken, async (req, r
     const shops = shopsWithProduct.slice(0, parseInt(limit)).map(item => item.shop);
     res.json({ shops });
   } catch (error) {
-    console.error('Error searching shops:', error);
+    securityLog.error('Error searching shops:', error);
     res.status(500).json({ error: 'Failed to search shops' });
   }
 });
@@ -429,7 +431,7 @@ router.get('/products/:productId/shops', authenticateToken, async (req, res) => 
     const shops = shopsWithProduct.map(item => item.shop);
     res.json({ shops });
   } catch (error) {
-    console.error('Error fetching shops for product:', error);
+    securityLog.error('Error fetching shops for product:', error);
     res.status(500).json({ error: 'Failed to fetch shops' });
   }
 });
@@ -451,7 +453,7 @@ router.get('/admin/all', authenticateToken, requireReviewer, async (req, res) =>
 
     res.json({ reports: reports.map(presentReport) });
   } catch (error) {
-    console.error('Error fetching all reports:', error);
+    securityLog.error('Error fetching all reports:', error);
     res.status(500).json({ error: 'Failed to fetch reports' });
   }
 });

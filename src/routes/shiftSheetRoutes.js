@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/shiftSheetRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -58,7 +60,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, records });
   } catch (error) {
-    console.error('Error fetching shift sheet records:', error);
+    securityLog.error('Error fetching shift sheet records:', error);
     res.status(500).json({ error: 'Failed to fetch shift sheet records' });
   }
 });
@@ -105,7 +107,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
     res.status(201).json({ success: true, record });
   } catch (error) {
-    console.error('Error creating shift sheet record:', error);
+    securityLog.error('Error creating shift sheet record:', error);
     res.status(500).json({ error: 'Failed to create shift sheet record' });
   }
 });
@@ -164,7 +166,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 
     res.json({ success: true, record });
   } catch (error) {
-    console.error('Error updating shift sheet record:', error);
+    securityLog.error('Error updating shift sheet record:', error);
     res.status(500).json({ error: 'Failed to update shift sheet record' });
   }
 });
@@ -190,7 +192,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting shift sheet record:', error);
+    securityLog.error('Error deleting shift sheet record:', error);
     res.status(500).json({ error: 'Failed to delete shift sheet record' });
   }
 });

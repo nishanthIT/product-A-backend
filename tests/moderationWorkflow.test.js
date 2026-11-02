@@ -4,13 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout } from 'node:timers/promises';
-import { getPrisma, resetDatabase, seedBase, startApp } from './helpers/harness.js';
+import { getPrisma, resetDatabase, seedBase, seedSharedChatShop, startApp } from './helpers/harness.js';
 import { activeSuspension } from '../src/services/chatSafety.js';
 let db, app, seed, owner, peer, admin, chat, report, evidenceDirectory;
 before(async () => {
-  await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); app = await startApp();
+  await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); chat = await seedSharedChatShop(db, seed); app = await startApp();
   owner = await app.login(seed.a.owner.email, seed.password); peer = await app.login(seed.b.owner.email, seed.password); admin = await app.login(seed.admin.email, seed.password);
-  chat = await db.chat.create({ data: { type: 'GROUP', name: 'ALL Chat' } });
+
   evidenceDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'paymi-report-evidence-')); process.env.MODERATION_EVIDENCE_DIR = evidenceDirectory;
 });
 after(async () => { await app?.close(); await db?.$disconnect(); if (evidenceDirectory) await fs.rm(evidenceDirectory, { recursive: true, force: true }); delete process.env.MODERATION_EVIDENCE_DIR; });

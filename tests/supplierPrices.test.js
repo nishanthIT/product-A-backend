@@ -32,8 +32,8 @@ before(async () => {
   await sql.query('CREATE TABLE _prisma_migrations (id varchar(36) PRIMARY KEY,checksum varchar(64) NOT NULL,finished_at timestamptz,migration_name varchar(255) NOT NULL,logs text,rolled_back_at timestamptz,started_at timestamptz NOT NULL DEFAULT now(),applied_steps_count integer NOT NULL DEFAULT 0)');
   dir=await fs.mkdtemp(path.join(os.tmpdir(),'paymi-supplier-test-'));source=path.join(dir,'sources');
   for (const folder of ['Dhamecha','bestway','ActiveHub_CostCutter']) await fs.mkdir(path.join(source,folder),{recursive:true});
-  await fs.writeFile(path.join(source,'Dhamecha/products.jsonl'),JSON.stringify({result:{status:'found',barcode:unit,product_id:'NOT-A-BARCODE',pricing:{original_price_1:'8.49',product_price:'4.79',original_price_2:'9.99',rrp:'1.15000',promo_price:null,promo_percentage:null},packaging:{pack_count:12,unit_size:'120g',pack_size:'12 x 120g'},web_metadata:{promotion:true}},evidence:{request:{barcode:unit,depot:4},response:{barcode:unit,captured_at:'2026-09-22T00:00:00Z'}}})+'\n');
-  const bw=(count,price) => ({barcode:unit,barcodes:[{label:'Retail EAN',value:unit}],product_code:'NOT-A-BARCODE',pack_size:'120g',pack_display:`120g × ${count}`,units_per_priced_pack:count,currency:'GBP',wholesale_price:price,observed_at_utc:'2026-09-22T00:00:00Z',import_ready:true});
+  await fs.writeFile(path.join(source,'Dhamecha/products.jsonl'),JSON.stringify({result:{status:'found',barcode:unit,product_id:'NOT-A-BARCODE',product_name:'Supplier fixture',pricing:{original_price_1:'8.49',product_price:'4.79',original_price_2:'9.99',rrp:'1.15000',promo_price:null,promo_percentage:null},packaging:{pack_count:12,unit_size:'120g',pack_size:'12 x 120g'},web_metadata:{promotion:true}},evidence:{request:{barcode:unit,depot:4},response:{barcode:unit,captured_at:'2026-09-22T00:00:00Z'}}})+'\n');
+  const bw=(count,price) => ({barcode:unit,barcodes:[{label:'Retail EAN',value:unit}],product_code:'123456',name:'Bestway fixture',pack_size:'120g',pack_display:`120g × ${count}`,units_per_priced_pack:count,currency:'GBP',wholesale_price:price,observed_at_utc:'2026-09-22T00:00:00Z',import_ready:true});
   const b=[bw(1,'0.60'),bw(12,'6.00'),bw(6,'3.30')];
   for (const [file,data] of Object.entries({'one.json':b.slice(0,2),'two.json':b.slice(2),'three.json':[],'checkpoint.json':{products:b,unresolved_products:[],status:'stopped'}})) await fs.writeFile(path.join(source,'bestway',file),JSON.stringify(data));
   await fs.writeFile(path.join(source,'ActiveHub_CostCutter/ignored.json'),JSON.stringify({products:[{barcode:unit,price:999}]}));
@@ -43,10 +43,21 @@ after(async () => {await app?.close();await sql?.end();await db?.$disconnect();}
 test('dry-run is read-only; reviewed apply migrates atomically, preserves existing IDs and stock, and reruns without writes',async () => {
   run(['--report',path.join(dir,'dry.json')]);const dry=await report('dry.json');
   assert.equal(dry.manifest.length,6);assert.equal(dry.migration.presentBefore,false);
-  assert.equal(dry.creates.length,1);assert.equal(dry.updates.length,1);assert.equal(dry.tierCreates.length,2);assert.equal(dry.rrpUpdates.length,1);
+  assert.equal(dry.supplier,'DHAMECHA');assert.equal(dry.creates.length,0);assert.equal(dry.updates.length,1);assert.equal(dry.tierCreates.length,0);assert.equal(dry.rrpUpdates.length,1);
+  assert.deepEqual(Object.keys(dry.summary.suppliers),['DHAMECHA']);
   assert.equal((await sql.query('SELECT count(*)::int n FROM _prisma_migrations')).rows[0].n,0);
   run(['--apply','--reviewed-report',path.join(dir,'dry.json'),'--report',path.join(dir,'apply.json')]);
   const applied=await report('apply.json');assert.equal(applied.committed,true);assert.equal(applied.verification.rerunWrites,0);
+  assert.equal(await db.productAtShop.count({where:{shopId:SUPPLIERS.BESTWAY.id}}),0);
+  run(['--supplier','BESTWAY','--report',path.join(dir,'bestway-dry.json')]);
+  const bestway=await report('bestway-dry.json');assert.equal(bestway.creates.length,1);assert.equal(bestway.updates.length,0);assert.equal(bestway.tierCreates.length,2);
+  run(['--supplier','BESTWAY','--apply','--reviewed-report',path.join(dir,'bestway-dry.json'),'--report',path.join(dir,'bestway-apply.json')]);
+  const bestwayBefore=await db.productAtShop.findMany({where:{shopId:SUPPLIERS.BESTWAY.id},include:{priceTiers:true}});
+  run(['--supplier','BESTWAY','--report',path.join(dir,'bestway-rerun.json')]);
+  const bestwayRerun=await report('bestway-rerun.json');
+  for(const k of ['creates','updates','tierCreates','rrpUpdates']) assert.equal(bestwayRerun[k].length,0,k);
+  run(['--supplier','BESTWAY','--apply','--reviewed-report',path.join(dir,'bestway-rerun.json'),'--report',path.join(dir,'bestway-rerun-apply.json')]);
+  assert.deepEqual(await db.productAtShop.findMany({where:{shopId:SUPPLIERS.BESTWAY.id},include:{priceTiers:true}}),bestwayBefore);
   const price=await db.productAtShop.findUnique({where:{id:dh.id}});
   assert.equal(price.price.toString(),'8.49');assert.equal(price.offerPrice.toString(),'4.79');assert.equal(price.offerExpiryDate,null);assert.equal(price.unitsPerPack,12);
   assert.equal(price.inHandStock,17);assert.equal(price.card_aiel_number,'A4');
@@ -89,7 +100,7 @@ test('legacy-alias repair withdraws only the unused newly imported row and refus
   const barcode=Array.from({length:10},(_,n)=>`999000000001${n}`).find(gtin);
   const target=await db.product.create({data:{title:'Ambiguous legacy alias',barcode,packetSize:'120g'}});
   await db.product.update({where:{id:seed.product.id},data:{caseBarcode:barcode}});
-  await fs.writeFile(path.join(source,'bestway/three.json'),JSON.stringify([{barcode,pack_size:'120g',pack_display:'120g × 1',currency:'GBP',wholesale_price:'1.25',observed_at_utc:'2026-09-22T00:00:00Z'}]));
+  await fs.writeFile(path.join(source,'bestway/three.json'),JSON.stringify([{barcode,product_code:'654321',product_name:'Legacy alias fixture',pack_size:'120g',pack_display:'120g × 1',currency:'GBP',wholesale_price:'1.25',observed_at_utc:'2026-09-22T00:00:00Z'}]));
   const state=await readSupplierState(sql),sources=await readSupplierSources(source);
   // Simulate the historical matcher which failed to inspect legacy case aliases.
   const oldPlan=buildSupplierPricePlan(sources,{...state,products:state.products.map(p=>p.id===seed.product.id?{...p,caseBarcode:null}:p)});

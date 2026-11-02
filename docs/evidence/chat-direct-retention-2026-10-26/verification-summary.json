@@ -1,0 +1,90 @@
+{
+  "reviewDate": "2026-10-27",
+  "checks": [
+    {
+      "name": "Full backend regression",
+      "sourceLog": "paymi-chat-backend-final.log",
+      "logSha256": "90d10f4cdccff266c30fb104233efbb2d83ac4eaf18b5955dc1882a52a62b628",
+      "tests": 293,
+      "pass": 292,
+      "fail": 0,
+      "skipped": 1
+    },
+    {
+      "name": "Full frontend regression",
+      "sourceLog": "paymi-chat-frontend-final.log",
+      "logSha256": "cc470f86e8adc7ebf784bc36a879774900eba1fa1ed1b66aa48dd7c183164c65",
+      "tests": 142,
+      "pass": 142,
+      "fail": 0,
+      "skipped": 0
+    },
+    {
+      "name": "Chromium desktop/mobile end-to-end",
+      "result": {
+        "passed": true,
+        "viewports": [
+          1440,
+          390
+        ],
+        "roles": [
+          "retail owner",
+          "retail employee"
+        ],
+        "checks": [
+          "four chat sections",
+          "global-to-personal navigation",
+          "unopened inbox unread",
+          "live bidirectional messages",
+          "read receipts",
+          "message search",
+          "camera X within viewport",
+          "camera draft preservation",
+          "camera capture preview upload delivery",
+          "network reconnect",
+          "New Chat room reuse"
+        ],
+        "browserErrors": []
+      },
+      "logSha256": "5055c2a29730b013aa1497a2d96ec952d3c48f63d63ad10452f8aaf7688376a7"
+    },
+    {
+      "name": "Production exports",
+      "platforms": [
+        "Android",
+        "iOS",
+        "web"
+      ],
+      "passed": true,
+      "logSha256": "f09f83181df36afe731d6d780446ced8c996660f537ac29dfccc1580ebb2f94b"
+    },
+    {
+      "name": "TypeScript and targeted ESLint",
+      "passed": true
+    }
+  ],
+  "note": "Counts are from the final full suites. Logs contain expected error-path fixtures. Only counts and artifact hashes are preserved here.",
+  "deployment": {
+    "target": "DigitalOcean vino Droplet",
+    "backendDirectory": "/var/www/product-A-backend",
+    "targetedMigrationAppliedToConfiguredDatabase": true,
+    "productionCodeDeployed": false,
+    "localRetentionEnabled": false,
+    "liveExpiryExecuted": false,
+    "physicalAndroidIosVerified": false,
+    "realCloudBucketVerified": false,
+    "supervisor": "PM2 (user confirmed); actual process name and startup integration not inspected",
+    "localApiHealth": "healthy; retention disabled; realtime single-instance"
+  },
+  "preservation": {
+    "chats": 37,
+    "messages": 68,
+    "participants": 83,
+    "trackedUploads": 0
+  },
+  "limitations": [
+    "S3 integration uses the official SDK against a local protocol test server, not a real bucket.",
+    "PM2 process name, boot persistence and deployed storage configuration remain to be checked.",
+    "Terminated-app APNs/FCM push delivery is not implemented."
+  ]
+}

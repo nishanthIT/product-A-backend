@@ -1,7 +1,9 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/news.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated } from '../middleware/authware.js';
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -70,22 +72,27 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+const publicListingAccess = (req, res, next) => req.query.all === 'true'
+  ? isAuthenticated(req, res, () => requireAdmin(req, res, next)) : next();
+
 // GET /api/news - Get all active news (public)
-router.get('/', async (req, res) => {
+router.get('/', publicListingAccess, async (req, res) => {
   try {
-    const { all, limit } = req.query;
+    const { all, limit, page = 1 } = req.query;
     
     const whereCondition = all === 'true' ? {} : { isActive: true };
 
     const news = await prisma.news.findMany({
       where: whereCondition,
-      orderBy: { publishedAt: 'desc' },
-      take: limit ? parseInt(limit) : undefined
+      orderBy: [{ publishedAt: 'desc' }, { id: 'asc' }],
+      take: Math.min(Number(limit) || 100, 100) + 1,
+      skip: (Number(page) - 1) * Math.min(Number(limit) || 100, 100)
     });
 
-    res.json({ news: news.map(normalizeNews) });
+    const pageSize = Math.min(Number(limit) || 100, 100);
+    res.json({ news: news.slice(0, pageSize).map(normalizeNews), page: Number(page), hasMore: news.length > pageSize });
   } catch (error) {
-    console.error('Error fetching news:', error);
+    securityLog.error('Error fetching news:', error);
     res.status(500).json({ error: 'Failed to fetch news' });
   }
 });
@@ -103,9 +110,13 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'News not found' });
     }
 
+    if (!news.isActive) {
+      if (!req.headers.authorization && !req.cookies?.auth_token) return res.status(404).json({ error: 'News not found' });
+      return isAuthenticated(req, res, () => requireAdmin(req, res, () => res.json({ news: normalizeNews(news) })));
+    }
     res.json({ news: normalizeNews(news) });
   } catch (error) {
-    console.error('Error fetching news:', error);
+    securityLog.error('Error fetching news:', error);
     res.status(500).json({ error: 'Failed to fetch news' });
   }
 });
@@ -137,7 +148,7 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
 
     res.status(201).json({ news: normalizeNews(news) });
   } catch (error) {
-    console.error('Error creating news:', error);
+    securityLog.error('Error creating news:', error);
     res.status(500).json({ error: 'Failed to create news' });
   }
 });
@@ -166,7 +177,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
 
     res.json({ news: normalizeNews(news) });
   } catch (error) {
-    console.error('Error updating news:', error);
+    securityLog.error('Error updating news:', error);
     res.status(500).json({ error: 'Failed to update news' });
   }
 });
@@ -182,7 +193,7 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
 
     res.json({ message: 'News deleted successfully' });
   } catch (error) {
-    console.error('Error deleting news:', error);
+    securityLog.error('Error deleting news:', error);
     res.status(500).json({ error: 'Failed to delete news' });
   }
 });

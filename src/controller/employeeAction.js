@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/employeeAction.js');
 import { PrismaClient } from "@prisma/client";
 import { DateTime } from "luxon"; // Ensure this package is installed: `npm install luxon`
 
@@ -21,7 +23,7 @@ const getHourlyProductAdds = async (req, res) => {
       },
     });
 
-    console.log("Fetched Actions:", actions); // Debug fetched data
+    securityLog.log("Fetched Actions:", actions); // Debug fetched data
 
     // Initialize hourly split for 24 hours
     const hourlySplits = new Array(24).fill(0);
@@ -60,7 +62,7 @@ const getHourlyProductAdds = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error fetching employee hourly product adds:", error);
+    securityLog.error("Error fetching employee hourly product adds:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };

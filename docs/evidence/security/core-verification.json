@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-28",
+  "suite": "tests/securityProtection.test.js",
+  "tests": 14,
+  "passed": 14,
+  "failed": 0,
+  "skipped": 0,
+  "postgresql": "disposable localhost PostgreSQL 18",
+  "redis": "disposable localhost Redis on port 55440; enabled for multi-instance outage test",
+  "command": "TEST_DATABASE_URL=<local disposable test database> TEST_REDIS_URL=redis://127.0.0.1:55440 node --test --test-concurrency=1 tests/securityProtection.test.js",
+  "coverage": [
+    "Admin-only authorization and session-bound reauthentication",
+    "Bounded policy changes and mandatory reasons",
+    "Concurrent budgets from independent Prisma clients",
+    "Redis disconnect with PostgreSQL-authoritative enforcement",
+    "Denied extraction retry and previously admitted rereads",
+    "Graduated catalogue throttles and four-hour restrictions",
+    "Independent account/IP controls and shared-IP safety",
+    "Multipart upload frequency limits",
+    "Distributed concurrency release/expiration",
+    "Manual block/unblock budget epochs and scoped expiring exceptions",
+    "Session revocation, investigation notes and event resolution",
+    "Canonical hash-chain verification and tamper detection",
+    "SQL UPDATE/DELETE/TRUNCATE rejection on administrative audit",
+    "Public API quotas/manual IP restrictions with one charge per request",
+    "Non-catalogue response-size enforcement"
+  ]
+}

@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/employeeRoutes.js');
 import { disconnectUser } from '../services/realtime.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
@@ -12,6 +14,7 @@ import {
   normalizeShopPermissions,
 } from '../services/accessControl.js';
 import { setShopMembershipStatus, createShopMembership } from '../services/membershipService.js';
+import { notifyShopTeamChanged } from '../services/chatMembershipSync.js';
 
 // Shop Employees: people who work in a customer's shop. Nothing here can create or
 // modify company staff membership.
@@ -47,7 +50,7 @@ const shopContextMiddleware = (options) => async (req, res, next) => {
     req.shopContext = ctx;
     next();
   } catch (error) {
-    console.error('Error resolving shop context:', error);
+    securityLog.error('Error resolving shop context:', error);
     res.status(500).json({ error: 'Failed to resolve shop' });
   }
 };
@@ -230,7 +233,7 @@ router.get('/', authenticateShopOwner, async (req, res) => {
 
     res.json({ success: true, employees: memberships.map(formatShopEmployee), counts });
   } catch (error) {
-    console.error('Error fetching employees:', error);
+    securityLog.error('Error fetching employees:', error);
     res.status(500).json({ error: 'Failed to fetch employees' });
   }
 });
@@ -265,6 +268,7 @@ router.post('/assign', authenticateShopOwner, async (req, res, next) => {
       }
       await createShopMembership(tx, { employeeId: id, shopId: req.shopContext.shopId, role: 'EMPLOYEE', permissions: role.permissions, createdByCustomerId: req.user.id, source: 'OWNER_EXPLICIT_ASSIGNMENT' });
     }, { timeout: 60000 });
+    await notifyShopTeamChanged(req.shopContext.shopId, id);
     res.json({ employee: await loadShopEmployee(req.shopContext.shopId, id) });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
@@ -286,8 +290,8 @@ router.post('/', authenticateShopCreator, async (req, res) => {
       return res.status(400).json({ error: 'Name, email, and password are required' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+      return res.status(400).json({ error: 'Password must contain at least 8 characters and at most 72 UTF-8 bytes' });
     }
 
     const roleAndPermissions = validateRoleAndPermissions(req.body, { partial: false });
@@ -335,13 +339,12 @@ router.post('/', authenticateShopCreator, async (req, res) => {
     const shop = await prisma.shop.findUnique({ where: { id: ctx.shopId }, select: { groupChatId: true } });
     if (shop?.groupChatId) {
       // Not fatal: the employee can still join their own shop's group chat on first message.
-      await prisma.chatParticipant.upsert({
-        where: { chatId_userId_userType: { chatId: shop.groupChatId, userId: employeeId, userType: 'EMPLOYEE' } },
-        create: { chatId: shop.groupChatId, userId: employeeId, userType: 'EMPLOYEE', isAdmin: false },
-        update: {},
-      }).catch((err) => console.error('Could not add employee to shop group chat:', err.message));
+      await prisma.chatParticipant.createMany({
+        data: [{ chatId: shop.groupChatId, userId: employeeId, userType: 'EMPLOYEE', isAdmin: false }], skipDuplicates: true,
+      }).catch((err) => securityLog.error('Could not add employee to shop group chat:', err.message));
     }
 
+    await notifyShopTeamChanged(ctx.shopId, employeeId);
     const employee = await loadShopEmployee(ctx.shopId, employeeId);
     res.status(201).json({
       success: true,
@@ -352,7 +355,7 @@ router.post('/', authenticateShopCreator, async (req, res) => {
     if (error.code === 'P2002') {
       return res.status(400).json({ error: 'An account with this email or phone number already exists' });
     }
-    console.error('Error creating employee:', error);
+    securityLog.error('Error creating employee:', error);
     res.status(500).json({ error: 'Failed to create employee' });
   }
 });
@@ -396,10 +399,13 @@ router.put('/:id', authenticateShopOwner, async (req, res) => {
       updateData.phoneNo = phoneNo;
     }
     if (password) {
-      if (password.length < 6) {
-        return res.status(400).json({ error: 'Password must be at least 6 characters' });
+      if (typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+        return res.status(400).json({ error: 'Password must contain at least 8 characters and at most 72 UTF-8 bytes' });
       }
       updateData.password = await bcrypt.hash(password, 12);
+      updateData.sessionVersion = { increment: 1 };
+      updateData.resetToken = null;
+      updateData.resetTokenExpiry = null;
     }
 
     await prisma.$transaction([
@@ -418,10 +424,11 @@ router.put('/:id', authenticateShopOwner, async (req, res) => {
     ]);
 
     disconnectUser('EMPLOYEE', employeeId);
+    await notifyShopTeamChanged(ctx.shopId, employeeId);
     const updated = await loadShopEmployee(ctx.shopId, employeeId);
     res.json({ success: true, message: 'Employee updated successfully', employee: updated });
   } catch (error) {
-    console.error('Error updating employee:', error);
+    securityLog.error('Error updating employee:', error);
     res.status(500).json({ error: 'Failed to update employee' });
   }
 });
@@ -452,7 +459,7 @@ router.patch('/:id/status', authenticateShopOwner, async (req, res) => {
     if (error.code === 'P2002') {
       return res.status(409).json({ error: 'This membership already exists. Refresh and try again.' });
     }
-    console.error('Error updating employee status:', error);
+    securityLog.error('Error updating employee status:', error);
     res.status(500).json({ error: 'Failed to update employee status' });
   }
 });
@@ -469,7 +476,7 @@ router.delete('/:id', authenticateShopOwner, async (req, res) => {
     await setShopMembershipStatus(membership.record.id, 'REMOVED');
     res.json({ success: true, message: 'Employee removed from this shop. Their lists are kept.' });
   } catch (error) {
-    console.error('Error removing employee:', error);
+    securityLog.error('Error removing employee:', error);
     res.status(500).json({ error: 'Failed to remove employee' });
   }
 });
@@ -519,7 +526,7 @@ router.get('/:id/lists', authenticateShopOwner, async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error('Error fetching employee lists:', error);
+    securityLog.error('Error fetching employee lists:', error);
     res.status(500).json({ error: 'Failed to fetch employee lists' });
   }
 });

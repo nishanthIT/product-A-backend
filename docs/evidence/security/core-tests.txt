@@ -1,0 +1,24 @@
+✔ all security administration requires a real Admin; mutations require session-bound reauthentication and reasons (1326.847281ms)
+Redis ready; durable PostgreSQL fallback ready
+✔ distributed quotas serialize across two application instances and survive Redis loss without resetting (194.313553ms)
+✔ failed distinct-record admissions remain denied on retry while previously admitted records remain usable (21.929929ms)
+✔ response budgets stop catalogue extraction before data leaves the server, then temporarily restrict sustained abuse (222.109063ms)
+✔ account and IP budgets remain independent; shared-IP overages never automatically suspend an account (178.559828ms)
+Request security verification failed
+✔ multipart uploads have their own quota before any handler runs and database outages fail closed (19.995581ms)
+✔ distributed concurrency leases expire and release without exceeding the configured capacity (47.741742ms)
+✔ manual block, immediate unblock, expiry, scope and expiring exceptions are enforced on real routes (356.909986ms)
+✔ admin review/notes, session revocation and audit integrity work without exposing event secrets (182.192138ms)
+✔ additive migration enforces append-only admin audit at the SQL boundary (39.008628ms)
+✔ production audit key cannot reuse JWT signing credentials (0.415776ms)
+✔ nested comparison and list responses enumerate actual product and supplier-price resources (0.318062ms)
+✔ public API requests enforce shared-IP budgets and restrictions without double charging authenticated requests (42.116427ms)
+✔ non-catalogue authenticated responses are size bounded before sending data (18.407971ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3642.357255

@@ -1,0 +1,477 @@
+✔ public deletion resource needs no app and does not embed credentials or permit framing (758.266325ms)
+✔ request reauthenticates current account, is idempotent, and status requires a private receipt (381.083123ms)
+✔ owner deletion preserves staff, co-owner, workspace, tasks and shared lists; files and stale sessions are removed (200.392026ms)
+✔ employee deletion cannot remove another role with the same ID; file errors remain retryable (80.368834ms)
+✔ admin deletion removes the account without deleting its managed shop (69.870142ms)
+✔ former employees can request deletion with credentials without regaining workspace access (59.36043ms)
+✔ admin customer creation hashes passwords and every customer response omits credentials (1464.997849ms)
+✔ ordinary customers cannot invoke administrative credential operations (120.697516ms)
+✔ admin customer password changes revoke sessions and clear recovery proofs atomically (715.034898ms)
+✔ company staff password updates revoke old sessions and never return hashes (969.992717ms)
+✔ shop employee password changes revoke old tokens and bcrypt truncation is rejected (971.371174ms)
+✔ registration/recovery responses and resend cooldown do not reveal whether an address exists (1379.803345ms)
+✔ account restrictions prevent new sessions, authenticated me and socket connections until expiry (166.556696ms)
+✔ cookie-only socket restoration authenticates the correct user; explicit bad tokens cannot fall back (126.550425ms)
+✔ durable OTP attempts and consumption remain atomic across independent application stores with Redis unavailable (207.392229ms)
+✔ reset-code races change the password once and revoke prior sessions (529.919351ms)
+✔ registration retries remain idempotent while a valid proof cannot create multiple accounts (1724.565504ms)
+Request failed {
+  name: 'Error',
+  code: 'INVALID_UPLOAD',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ authenticated image routes reject active content and traversal, and private incident images stay tenant scoped (165.831442ms)
+✔ one-time reset proof is consumed atomically across simultaneous verifiers (1.399325ms)
+✔ concurrent wrong OTP attempts cannot lose increments or revive a consumed proof (5.023422ms)
+✔ OTP expiry, flow separation and resend reservation are enforced (0.328823ms)
+✔ rotating IP addresses cannot bypass account auth quota and no email is stored (0.645249ms)
+✔ rotating email addresses cannot bypass IP quota; shared IP receives generous allowance (2.157785ms)
+✔ sustained blocked requests create temporary auth restriction, storage failures fail closed (0.340915ms)
+✔ account throttle backoff progresses while blocked-request logging is sampled (0.143807ms)
+✔ new JWT claims bind issuer/audience and legacy compatibility can be disabled (0.239828ms)
+▶ shop owner creates employees
+  ✔ creates only a shop membership in the owner's own shop, never company membership (362.763988ms)
+  ✔ a client-submitted shopId for another shop is rejected (39.981106ms)
+  ✔ a shop owner cannot assign company roles or permissions (516.050081ms)
+✔ shop owner creates employees (1827.329944ms)
+▶ shop employees and owners cannot reach company administration
+  ✔ shop employee gets 403 on every company endpoint (494.398608ms)
+  ✔ shop owner gets 403 on every company endpoint (498.236059ms)
+  ✔ previously unauthenticated company endpoints now require a token (38.599496ms)
+  ✔ a forged EMPLOYEE token for a shop employee still has no company access (62.7831ms)
+✔ shop employees and owners cannot reach company administration (1565.437648ms)
+▶ cross-shop isolation
+  ✔ owner B only sees Bravo employees (24.804089ms)
+  ✔ owner B cannot read or change an Alpha employee by id (95.74003ms)
+  ✔ owner B cannot track, read or claim Alpha lists or shop (126.424175ms)
+  ✔ Bravo employee cannot read Alpha lists (313.404168ms)
+  ✔ admin customer view cannot be pointed at another customer's shop (35.694935ms)
+✔ cross-shop isolation (1456.785994ms)
+▶ deactivation and stale sessions
+  ✔ inactive employee loses access on an existing token; lists are kept (1290.175221ms)
+  ✔ removing an employee keeps the account and lists but revokes access (507.388792ms)
+  ✔ bumping the session version invalidates old tokens (535.21818ms)
+✔ deactivation and stale sessions (2333.118155ms)
+▶ single shop role
+  ✔ the shop manager role no longer exists and only the owner manages employees (597.774449ms)
+  ✔ a regular shop employee cannot manage employees (478.878137ms)
+✔ single shop role (1076.85395ms)
+▶ company staff
+  ✔ staff keep exactly their granted company permissions (236.079729ms)
+  ✔ deactivated company membership revokes existing sessions (106.871037ms)
+  ✔ company staff list contains only company staff (32.889929ms)
+  ✔ staff managers cannot grant permissions they do not hold (314.670696ms)
+✔ company staff (690.94882ms)
+▶ dual membership
+  ✔ company and shop permissions are checked independently (1079.694813ms)
+  ✔ a shop owner cannot attach an existing company staff account to their shop (16.235457ms)
+✔ dual membership (1096.118074ms)
+▶ Customers → Customer details → Employees
+  ✔ shows the customer's shop employees, status counts and their lists (64.141484ms)
+  ✔ viewing customer employees grants them no company access (318.094775ms)
+✔ Customers → Customer details → Employees (382.443974ms)
+▶ realtime shop rooms
+  ✔ only members/owner of a shop may join its list room (7.331886ms)
+✔ realtime shop rooms (7.532817ms)
+✔ startup checks actual schema and supplies safe actionable diagnostics (40.095727ms)
+✔ startup rejects unapplied list migrations before accepting broken list requests (7.538323ms)
+✔ database fallback survives new instances and expires strings, hashes, lists and sets (50.782035ms)
+✔ concurrent rate limits have atomic increments and TTL, database failure stays fail closed (26.615417ms)
+Redis ready; durable PostgreSQL fallback ready
+Redis ready; durable PostgreSQL fallback ready
+✔ real Redis outage and reconnection cannot resurrect consumed or stale values (134.745729ms)
+✔ actual synthetic pg_dump/pg_restore stays closed until ledger replay removes erased identities (1041.184535ms)
+✔ every catalogue lookup variant and administrative export requires authentication (874.47802ms)
+✔ pack comparison and cheapest-price tiers exclude other customers retail prices (71.42249ms)
+Product found: Test Cola 330ml
+✔ catalogue responses omit import provenance while preserving product and supplier prices (88.362782ms)
+✔ tenant identifiers and company privileges are verified on the server (137.675402ms)
+✔ pagination and batch limits reject excessive work before executing business queries (45.537547ms)
+✔ bulk ID selection uses bounded stable cursor pages without losing legitimate results (200.763163ms)
+✔ SQL metacharacters remain ordinary search data and do not expose other records (75.31119ms)
+✔ public marketing endpoints do not disclose unpublished records through all flags or direct IDs (100.319797ms)
+✔ delivery/storage migration defaults to read-only and reports zero message deletions (610.946437ms)
+✔ targeted additive apply preserves every existing history/upload field and can be replayed (578.873152ms)
+✔ a preservation failure rolls back schema, message changes and the migration ledger together (565.036311ms)
+✔ application Prisma driver previews and applies the same guarded migration (789.906674ms)
+✔ an unrecorded partial schema is rejected without guessing or applying unrelated migrations (715.771995ms)
+✔ recorded checksum/schema drift and unfinished migration records fail closed (592.99317ms)
+✔ simultaneous opens from both participants reuse one direct room and return an initial page only when new (1078.250012ms)
+✔ unopened direct inbox receives one copy on every device, including correct ownership on sender devices (130.515725ms)
+✔ delivery acknowledgements and read receipts persist once, notify unopened sender devices, and survive reload (423.428557ms)
+✔ receipt APIs reject forged recipients, wrong room IDs, blocked messages and self delivery (301.486822ms)
+✔ revoked retail memberships cannot reopen, send, acknowledge or receive an existing private room (372.913708ms)
+✔ a committed send returns while cache work is still pending and retries preserve one message (102.389832ms)
+✔ all authorized existing groups, teams and direct histories are visible; listing is strictly read-only (1279.41201ms)
+✔ team rosters derive from active memberships without recreating participant records (264.438009ms)
+✔ missing shop links do not trigger replacement chat creation (57.794753ms)
+✔ owners and active employees see only the selected shop roster; company roles confer no chat access (1783.153915ms)
+✔ both employee devices receive background refresh without participant rows; unauthorized accounts receive nothing (351.097541ms)
+✔ concurrent first posts from two devices join once and preserve both messages (100.388753ms)
+✔ create, assign, deactivate, reactivate and remove refresh owners and active members without leaking to another shop (1066.791325ms)
+✔ shop diagnostics report legacy and inactive relationships without modifying data or exposing personal fields (98.039358ms)
+✔ camera JPEG multipart uploads send and download for owners and employees; outsiders and removed members cannot fetch them (943.071571ms)
+✔ photo retries after a lost response create one message and one event without changing newer chat activity (936.023515ms)
+✔ conversation search matches complete authorized history, attachment names, participant names and names (1366.567766ms)
+✔ message search includes older pages and filenames and keeps the existing chronological response (112.128365ms)
+✔ cursor pagination has no gaps or duplicate messages when new messages arrive or the boundary is deleted (166.437725ms)
+✔ search and cursors never bypass shop access, blocked authors or removed-message filtering (110.435245ms)
+✔ invalid query parameters return a client error, not a misleading unavailable error (87.729378ms)
+Chat directory unavailable {
+  name: 'PrismaClientKnownRequestError',
+  code: 'P2010',
+  databaseCode: '42703',
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: 'Apply pending Prisma migrations and regenerate the client before restarting.'
+}
+✔ schema failures are identified without exposing SQL, credentials or message content (27.826852ms)
+✔ text retries persist once, reject conflicting payloads and do not resurrect deleted messages (115.508737ms)
+Chat refresh deferred {
+  name: 'Error',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: 'cache',
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ a post-commit cache outage still acknowledges and broadcasts a saved message and safe retry (87.017126ms)
+✔ document retries reuse the original upload and require current conversation access (78.370176ms)
+✔ two Socket.IO instances share user-room events and authorized remote-socket operations through Redis (116.534294ms)
+✔ schedule uses a stable UTC cutoff, catches downtime, and validates worker settings (883.998573ms)
+✔ expires only strictly older messages and cascades receipts while preserving rooms, participants and newer history (71.438168ms)
+✔ shared newer files survive, legacy absolute/query URLs are resolved safely, and old abandoned/missing files are removed (122.968708ms)
+Chat attachment deletion will retry {
+  name: 'Error',
+  code: 'ETIMEDOUT',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ file failures leave durable retry jobs; missing files and crash-after-delete retries are successful (63.856466ms)
+✔ simultaneous workers create one daily run and never expire a message twice (83.069386ms)
+✔ attachment deletion outbox rolls back with message expiry and resumes after restart (43.105252ms)
+✔ queued files cannot be sent and references added before dispatch protect shared bytes (139.182611ms)
+✔ retention preserves moderation evidence before detaching an expired message (36.052128ms)
+✔ worker starts automatically, skips restore mode, and stops cleanly (48.959548ms)
+✔ raw expiry comparisons stay in UTC for positive and negative database timezone offsets (66.740342ms)
+✔ operations preview reports shared attachment preservation without changing history or queue state (24.283479ms)
+✔ a full batch across many chats and attachments uses bounded database calls and keeps latest activity (86.997252ms)
+✔ bulk file queue preserves exact shared references and existing provider descriptors (23.687095ms)
+✔ legacy reported attachments copy once per batch and stay until every report has independent evidence (97.625873ms)
+✔ posting requires no rules acceptance and rejects content larger than the server limit (1306.694679ms)
+✔ reports are limited to accessible content, deduplicated and available only to moderators (239.662554ms)
+✔ blocking hides group history and summary, rejects direct messages and forged new chats, and filters realtime bodies (602.247022ms)
+✔ moderation removes reported content from histories and summaries and records a decision (128.083097ms)
+✔ chat attachment sharing requires uploader ownership and private file requests require chat access (194.137943ms)
+✔ socket clients cannot relay a forged message or sender identity (153.547522ms)
+✔ deleting a legacy message cannot unlink arbitrary files or another message attachment (176.923896ms)
+✔ default migration run is read-only and reports only reviewed chat changes (969.591307ms)
+✔ targeted migration commits schema and ledger together, preserves history and is safe to rerun (674.327739ms)
+✔ preservation verification failure rolls back schema, message changes and migration ledger (636.624727ms)
+✔ application Prisma driver applies the same guarded transaction and defaults to read-only (1019.063922ms)
+✔ Prisma rolls back the complete repair when preservation checks fail (892.393907ms)
+✔ storage configuration is independent of cwd and rejects unsafe or incomplete locations (2.021007ms)
+✔ attachment identifiers normalize legacy URLs without accepting paths or URL-encoded traversal (0.307733ms)
+✔ local writes record ownership before bytes and keep private permissions and legacy URL contract (8.213014ms)
+✔ failed ownership reservation writes no file or object (0.886434ms)
+✔ legacy null-provider descriptors still use local storage when new uploads switch to S3 (1.628001ms)
+✔ local storage refuses traversal and symlink reads without touching the target (2.117054ms)
+✔ supported MIME types produce safe server filenames without trusting client suffixes (0.155107ms)
+✔ cloud uploads use official commands, conditional immutable keys and private descriptors (0.430754ms)
+✔ cloud reads and deletes target the recorded bucket and version after defaults change (0.691014ms)
+✔ provider endpoint drift and forged storage keys fail before any network request (0.284456ms)
+✔ unknown response versions are removed only for the exact generated key, including paginated delete markers (0.727682ms)
+✔ unknown version cleanup fails safely on listing errors or non-server filenames and remains retryable (0.522999ms)
+✔ explicit unversioned providers use idempotent deletion without unsupported version APIs (0.241936ms)
+✔ missing cloud files are harmless but provider failures are never silently treated as missing (0.379528ms)
+✔ bounded evidence reads destroy provider streams when content exceeds the limit (0.683278ms)
+✔ compatible providers can disable conditional PUT without changing generated private object keys (0.328377ms)
+Chat upload failed {
+  name: 'ServiceUnavailable',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ uncertain upload keeps its descriptor until delayed cleanup can remove a late object (1109.492687ms)
+Chat attachment deletion will retry {
+  name: 'AccessDenied',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ real S3 transport preserves private upload/send/download and shared-file retention, then retries provider deletion (489.250968ms)
+✔ additive SQL and pre-schema inspection preserve every existing table row (1032.071463ms)
+✔ single verified supermarket becomes default without changing IDs, names, employees or business data (22.738305ms)
+✔ rerunning is idempotent and stale reports are rejected (72.112143ms)
+✔ default FK rejects another owner and supplier ownership fails even through direct database writes (9.93887ms)
+✔ multiple verified shops retain legacy/default state; explicit selection does not mutate any pointer (20.496232ms)
+✔ ambiguous and incomplete ownership is reviewed without guessing, copying or creating shops (57.173098ms)
+✔ recovery restores defaults only, retaining ownerships and all existing records; it is repeatable (48.800702ms)
+✔ existing owner and employee login still work; employee default never grants owner rights or disabled features (344.30808ms)
+✔ registration commits one named first shop and default; lost response retry works after OTP consumption (546.006947ms)
+✔ concurrent registration commits one account, shop, chat and receipt (42.965689ms)
+✔ concurrent HTTP onboarding retries all return the same committed shop (1496.580362ms)
+✔ registration cannot recreate an existing employee as a customer, even with a verified code (220.41151ms)
+✔ provisioning failure after account creation rolls every write back and permits retry (17.830649ms)
+✔ supplier prices and original employees/operational data remain byte-equivalent throughout (37.192105ms)
+✔ pure classification never infers a second owner from operational records or missing defaults (0.263465ms)
+✔ CLI requires a target, binds reports to it, supports reviewed local apply/recovery and refuses unapproved remote writes (964.277595ms)
+✔ a failed provider purge leaves deletion retryable and revokes all old sessions before erasure (1002.030665ms)
+✔ verified ledger replay erases a restored account, preserves shared shops, rejects old tokens and advances ID sequences (80.109177ms)
+✔ Redis deletion failures propagate instead of silently falling back to local memory (0.844111ms)
+✔ journal storage failure prevents erasure; durable journal is integrity-protected and excludes account content (66.477657ms)
+▶ chats
+  ✔ shop employees use their own shop group chat but not another shop's (334.054575ms)
+  ✔ existing conversations still load and accept messages (128.290316ms)
+  ✔ chat selectors include retail users across shops and exclude company-only support staff (157.497671ms)
+  ✔ sockets: rooms are authorized and per-user events do not leak across account types (725.803029ms)
+✔ chats (3938.571209ms)
+▶ tasks
+  ✔ owner assigns only own active shop employees; employee works the task (233.249438ms)
+  ✔ editing a task keeps existing assignments and their progress, including deactivated employees (191.328374ms)
+✔ tasks (425.139929ms)
+▶ deactivation side effects
+  ✔ deactivated employee leaves the shop chat, notifications and selectors; history is kept; reactivation restores (643.848207ms)
+  ✔ status survives a refresh and failed actions report errors (84.105145ms)
+  ✔ lists stay with their shop and creator (218.358808ms)
+✔ deactivation side effects (946.963897ms)
+▶ per-tool shop access (read / write / edit)
+  ✔ owner switches tools and access levels for one employee; API and notifications follow (497.287952ms)
+  ✔ task progress needs write access, not edit (126.430375ms)
+✔ per-tool shop access (read / write / edit) (624.146188ms)
+▶ employee lists: owner views, copies and stays in sync
+  ✔ owner opens an employee list, copies it, and sees new items live (799.748546ms)
+✔ employee lists: owner views, copies and stays in sync (799.946206ms)
+▶ company views
+  ✔ company staff page never lists shop employees; customer details lists them per shop (311.923038ms)
+✔ company views (312.055355ms)
+✔ startup reuses and renames ALL Chat once without altering history or participants (1139.475849ms)
+✔ all retail owners and employees see the same global room, search its history, and keep shop teams private (814.55759ms)
+✔ cash-and-carry owners, wholesale staff, company-only staff and anonymous clients cannot join global chat (412.928431ms)
+✔ cross-shop members and multiple devices receive live global messages, and reconnect can fetch missed messages (353.861556ms)
+✔ cross-shop private messages reuse one conversation, appear in Direct data, and exclude third parties (639.775043ms)
+✔ joining global never grants access to shop lists, and membership removal revokes an already joined socket (165.603592ms)
+✔ existing valid personal history is reopened without replacing its thread or shop scope (93.100272ms)
+✔ global image attachments are available to retail members and denied to cash-and-carry accounts (118.951172ms)
+✔ a team named Global Chat stays private and extra legacy global rooms remain intact (91.221459ms)
+✔ a fresh installation provisions exactly one shared room under concurrent startup (57.588043ms)
+✔ proxy trust defaults closed and rejects numeric hop counts/wildcards (26.112079ms)
+✔ CORS reflects only explicit trusted origins and permits security reauthentication header (7.766482ms)
+✔ cookie mutations require trusted Origin; bearer native clients continue working (13.035213ms)
+✔ headers prevent content sniffing, framing and caching; server errors redact internals (2.535567ms)
+✔ query limits reject unbounded, duplicate, nested and malformed pagination parameters (18.448388ms)
+Request failed {
+  name: 'SyntaxError',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+Request failed {
+  name: 'PayloadTooLargeError',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ JSON body bounds reject oversized batches, pollution keys, malformed and huge bodies (17.129134ms)
+✔ application diagnostics omit request credentials, SQL values, pricing and error text (0.809078ms)
+﹣ create → deactivate → reactivate survives 0ms DB latency (800.026428ms) # set TEST_DB_LATENCY_MS
+▶ employee membership migration
+  ✔ dry run classifies by provenance and writes nothing (16.789467ms)
+  ✔ apply maps employees to the right shop, removes unverified company access and keeps history (83.762797ms)
+  ✔ migrated accounts get the right access and stale tokens stop working (477.621812ms)
+  ✔ rerunning is a no-op and does not duplicate memberships or re-invalidate sessions (26.728906ms)
+  ✔ resolving a review explicitly assigns a shop without touching lists (209.794995ms)
+  ✔ rollback removes only rows the run created (40.619064ms)
+✔ employee membership migration (1630.055033ms)
+✔ new and existing accounts send, receive and upload without any acceptance row (1587.516195ms)
+✔ report identity, explanation and exact snapshot persist; own and inaccessible reports fail; races dedupe (256.423347ms)
+✔ all admin operations reject customer and delegated staff, and never expose reporter details publicly (708.866394ms)
+✔ admin can filter, investigate context, record internal notes and transition status without restricting account (378.144319ms)
+✔ account suspension denies existing sessions, login and socket reconnect; expiry and early reactivation preserve data (539.756805ms)
+✔ chat and account restrictions are independent, custom durations expire and chat blocks direct API writes (217.940571ms)
+✔ individual deletion preserves evidence, other authors and report status; concurrent requests are idempotent (175.544042ms)
+✔ bulk deletion requires both confirmations, survives retry/restart and preserves newer messages and other authors (1077.706285ms)
+Moderation queue ready (PostgreSQL)
+✔ a failed bulk batch rolls back fully and the startup worker resumes the durable job (160.739731ms)
+✔ report snapshots preserve reported content and protected attachments after author deletion (1384.567449ms)
+✔ suspension applies to all sessions and uploads/typing while private workspace operations stay accessible (705.393323ms)
+✔ removal revokes reused attachment access and notifies active clients, while evidence remains admin-only (400.402479ms)
+Application operation { component: 'services/multiLayerCache.js' }
+Application operation { component: 'services/multiLayerCache.js' }
+✔ a persistent cache hit performs no writes and retains the remaining TTL (1.227273ms)
+✔ another cache instance observes group invalidation instead of returning local inventory (0.391548ms)
+✔ group invalidation prevents a pending old loader from repopulating inventory (0.366977ms)
+✔ key invalidation prevents a pending old loader from repopulating inventory (0.323374ms)
+✔ group invalidation waits for a publication already writing then removes it (0.255018ms)
+✔ new requests wait for invalidation to finish before consulting persistent cache (0.251505ms)
+✔ a failed loader is shared and subsequent requests can load again (0.429805ms)
+✔ cache errors fall through to the source loader without serving an in-memory copy (2.196307ms)
+✔ failed invalidation rejects and releases the lock for a later valid invalidation (0.191439ms)
+✔ second shop creation is transactional and concurrent/lost-response retries create exactly one shop (1149.148047ms)
+✔ directory, default, and explicit selection require verified CUSTOMER ownership (195.249493ms)
+✔ lists, Collect Mode and retail stock are isolated; supplier prices and stock remain unchanged (643.308993ms)
+✔ employee access is explicit per shop, feature-specific, and never grants creation or company access (850.456684ms)
+✔ operational records and history IDs never cross supermarkets (403.252672ms)
+✔ company supplier endpoints cannot mutate or transfer into customer shops (148.321937ms)
+✔ list backfill preserves data, reports ambiguity, and supports repeatable apply and recovery (64.696769ms)
+✔ company supermarket directory is separate, searchable, permission-controlled and auditable (253.116875ms)
+✔ waste, age records, payouts, shifts, certificates and private photos remain shop-scoped (526.742244ms)
+✔ concurrent unavailable items from different suppliers use one list and preserve row IDs and quantities (1104.459445ms)
+✔ consolidated read includes legacy and new supplier groups without rewriting history (153.755334ms)
+✔ collection preserves existing account, tracking, shop and read/edit permissions (833.504923ms)
+✔ original item IDs support editing, collecting and moving back to an ordinary list (288.088787ms)
+✔ Out of Stock provenance migration upgrades existing rows additively without inventing historical origins (126.474137ms)
+✔ normal list → Out of Stock → edit/collect/uncollect/change supplier → original list uses ordinary endpoints (2224.8445ms)
+✔ search/scanner additions to the virtual list never increment a moved item or its original list (388.622014ms)
+✔ supplier changes and exact removal preserve identical products from different original lists (443.941398ms)
+✔ legacy items have no invented origin and can still move to a selected ordinary list (173.933119ms)
+✔ alternate moves to real Out of Stock list IDs preserve original rows, origins and authorization (367.079151ms)
+✔ concurrent supplier changes merge the same origin atomically without losing quantities (300.593718ms)
+✔ overflow rejects supplier and original-list merges without modifying either item (232.064772ms)
+✔ virtual writes require the exact authorized row and preserve employee read/write/edit boundaries (603.170904ms)
+✔ tracked source lists can be edited and untracked without deleting the owner’s saved items (342.647662ms)
+✔ owner deletes a real Out of Stock list normally and a later add creates a valid new destination (223.214714ms)
+✔ additive migration preserves historical customer reports and earnings and enforces typed ownership (1530.670846ms)
+✔ colliding customer/employee/admin IDs submit attributable reports and read only their own history (169.929619ms)
+✔ only authorized reviewers see identities and responses never expose account credentials (187.697067ms)
+✔ both approval aliases preserve customer-only rewards and record the actual reviewer type (110.831378ms)
+✔ concurrent customer approvals award once and terminal reports cannot be re-rejected (116.326282ms)
+✔ reject aliases retain typed attribution, do not award earnings, and return not-found accurately (186.303175ms)
+✔ invalid prices do not create malformed reports and zero current prices are preserved (326.358406ms)
+✔ personal deletion cascades only typed authored reports and clears reviewer links without harming colliding accounts (167.273057ms)
+✔ GTINs retain zeroes; only valid lengths/check digits gain equivalent aliases (2.425798ms)
+✔ unit barcode alone matches; supplier codes, input barcode, titles and case-only products never do (2.752351ms)
+✔ equivalent barcode collisions quarantine all matches instead of preferring exact strings (1.621856ms)
+✔ duplicate source records collapse and a rerun has zero changes (0.929116ms)
+✔ distinct case configurations coexist without selecting an arbitrary legacy default (10.374552ms)
+✔ same case code with different quantities is wholly quarantined (0.438155ms)
+✔ shared source case barcode, existing case owner and unit-code collisions are blocked (0.473164ms)
+✔ missing barcodes and invalid checksums never create incomplete packaging (0.333464ms)
+✔ nested saleable packs preserve the inner expression and do not multiply unit counts (0.709838ms)
+✔ existing valid values and prior case configurations are never overwritten (0.566648ms)
+✔ different source unit sizes and known database size conflicts are quarantined (0.344072ms)
+✔ source prices are excluded from proposed database writes and provenance (0.393206ms)
+✔ dry-run performs no writes; apply migrates additively, preserves inventory/prices and reruns as a no-op (1358.766288ms)
+{"code":"PRODUCT_MASTER_FAILED","message":"Database or plan changed since dry-run; create a fresh dry-run report","committed":false,"reportPath":"/tmp/paymi-packaging-tests-IdJh9i/stale-apply.json"}
+✔ reviewed report becomes stale on catalog edits and application refuses before writing (202.163602ms)
+✔ database constraints reject duplicate canonical cases, invalid formats, empty sizes and zero quantities (19.317512ms)
+✔ unit, padded unit and each case scan return the same product plus the correct case configuration (543.423656ms)
+✔ legacy barcode collisions return 409 for scans, quick-add and expiry instead of selecting a product (122.742128ms)
+✔ quick-add recognizes existing cases and leaves products and stock unchanged (35.389871ms)
+✔ detail, catalog, shop inventory, expiry and pack options expose packaging without changing prices (359.23248ms)
+✔ ranked search includes every case and remains correct after legacy product refreshes (183.633219ms)
+✔ legacy writes cannot overwrite reviewed identity or cases; ordinary title edits remain available (187.384884ms)
+✔ scanning different cases adds to the existing product identity without multiplying inventory or quantity (249.464241ms)
+✔ anonymous promotions expose only current published wholesaler offers and cannot grant workspace access (895.372019ms)
+✔ release migrations upgrade the prior schema without replacing account IDs, passwords, ownership or tasks (169.278921ms)
+✔ logout durably revokes only that session and disconnects its socket; retries succeed (998.234931ms)
+✔ password recovery invalidates customer and admin tokens and prevents OTP reuse (1046.205426ms)
+✔ legacy version-zero tokens remain valid until revocation, and bearer wins over cookie (19.724194ms)
+✔ an expired legacy trial does not limit the free release or spend saved points (134.018104ms)
+✔ all security administration requires a real Admin; mutations require session-bound reauthentication and reasons (1320.769448ms)
+Redis ready; durable PostgreSQL fallback ready
+✔ distributed quotas serialize across two application instances and survive Redis loss without resetting (176.114175ms)
+✔ failed distinct-record admissions remain denied on retry while previously admitted records remain usable (19.813302ms)
+✔ response budgets stop catalogue extraction before data leaves the server, then temporarily restrict sustained abuse (197.18232ms)
+✔ account and IP budgets remain independent; shared-IP overages never automatically suspend an account (170.200291ms)
+Request security verification failed
+✔ multipart uploads have their own quota before any handler runs and database outages fail closed (20.444405ms)
+✔ distributed concurrency leases expire and release without exceeding the configured capacity (46.930553ms)
+✔ manual block, immediate unblock, expiry, scope and expiring exceptions are enforced on real routes (413.99892ms)
+✔ admin review/notes, session revocation and audit integrity work without exposing event secrets (219.309886ms)
+✔ additive migration enforces append-only admin audit at the SQL boundary (46.89338ms)
+✔ production audit key cannot reuse JWT signing credentials (0.407684ms)
+✔ nested comparison and list responses enumerate actual product and supplier-price resources (0.330021ms)
+✔ public API requests enforce shared-IP budgets and restrictions without double charging authenticated requests (37.469881ms)
+✔ non-catalogue authenticated responses are size bounded before sending data (19.023207ms)
+✔ explicit credentials cannot authenticate as the previous cookie account (1.118534ms)
+✔ missing and known fallback signing secrets fail closed (0.642373ms)
+✔ production cookies require TLS and resist cross-site requests (1.047825ms)
+✔ retail directory spans shops while private team participants stay within the selected shop (1899.402794ms)
+✔ simultaneous and reverse employee DMs reuse one conversation; messages and socket replies survive reopening (596.100333ms)
+✔ forged identities, supplier/company targets, other shops and malformed DMs cannot bypass eligibility (810.460697ms)
+✔ stale participants and joined sockets lose read, typing and send access after membership revocation (324.820418ms)
+✔ additive migration scopes only unambiguous histories and preserves every message and participant (204.552735ms)
+✔ chiller, freezer and legacy freezer limits survive create, edit and reload; alerts use saved range (2505.945762ms)
+✔ both age record APIs accept either, both or neither product details; current records can clear fields (949.300703ms)
+✔ payouts persist, list, filter and keep their automatic creation timestamp on edits (324.353526ms)
+✔ additive age migration preserves existing rows and allows independent null fields (16.998646ms)
+✔ write-only shop employee creates a list and adds three cases in one request (1803.775452ms)
+✔ concurrent additions preserve the sum and do not create duplicate logical products (239.708862ms)
+✔ lists and employees remain current without the retired list-cache dependency (299.604516ms)
+✔ product search, detail, barcode and list prices load for the employee (221.522412ms)
+✔ employee access changes apply immediately and management cannot cross shops (945.896223ms)
+✔ summary preserves legacy admin-owned lists and distinguishes typed IDs and shop scopes (109.151991ms)
+✔ Dhamecha source loading does not parse or require Bestway datasets (25.485781ms)
+✔ money rejects absent, zero, negative, fractional-penny and malformed values without guessing (0.619991ms)
+✔ Bestway reads actual retail barcodes and rejects conflicting fields, supplier IDs and invalid GTINs (1.005447ms)
+✔ Bestway validates source product IDs independently of master barcodes (0.698612ms)
+✔ all four Bestway exports reuse exact checkpoint identity and reject missing/conflicting identities and price bases (28.857877ms)
+✔ Dhamecha preserves original, current, null promo and alternate raw values; duplicate rows collapse (1.029188ms)
+✔ missing quantities never infer case size; verified retail RRP can independently fill a missing value (0.501803ms)
+✔ Dhamecha requires both a source product ID and a nonblank product name, including for RRP (0.563644ms)
+✔ a single-supplier plan cannot write another supplier even when given mixed audit input (1.400823ms)
+✔ unknown/mismatched cases, ambiguous identities and different duplicate prices are quarantined (0.713876ms)
+✔ a legacy case alias on another product blocks a unit match and any RRP write (0.31741ms)
+✔ verified case configuration wins over legacy scalar size; unit-size conflicts are rejected (0.351708ms)
+✔ Bestway retains unit and case wholesale prices without creating promotional pricing (0.36701ms)
+✔ Bestway updates a verified existing unit price while retaining its identity, offers and independent case tiers (0.862702ms)
+✔ newer prices and existing manual promotions survive older imports (0.515763ms)
+✔ a verified unit price cannot be overwritten by a Dhamecha case price (0.251154ms)
+✔ JSONB key order does not cause duplicate updates; rerun is a no-op (0.700948ms)
+✔ RRP conflicts do not overwrite the master and existing valid RRP is preserved (0.304911ms)
+✔ selector respects expiry and explicit current source without inventing a discount for null promotions (0.321423ms)
+✔ case scanning selects the linked case total and never substitutes a different case or unit price (0.438521ms)
+✔ dry-run is read-only; reviewed apply migrates atomically, preserves existing IDs and stock, and reruns without writes (1998.447416ms)
+{"code":"SUPPLIER_IMPORT_FAILED","message":"Database or plan changed since dry-run; generate a fresh report","committed":false,"reportPath":"/tmp/paymi-supplier-test-11xoqY/bad-apply.json"}
+✔ stale reviewed reports are rejected before any write (169.809997ms)
+✔ authenticated comparison exposes original/current Dhamecha and all Bestway case tiers (154.545512ms)
+✔ unit and case scanners resolve identity and select only the exact case price (178.216725ms)
+✔ manual supplier price edit clears imported-current selection and cannot be reverted by the older source (236.3661ms)
+{"code":"ERR_ASSERTION","message":"Guarded withdrawal failed; existing records preserved unless committed is true","committed":false}
+✔ legacy-alias repair withdraws only the unused newly imported row and refuses a stock change (417.07002ms)
+✔ employee saves -23 freezer and positive fridge readings; warm freezer alarms are saved, not rejected (2631.856503ms)
+✔ category suggestions combine existing catalog with shop-local saved names and never overwrite global taxonomy (263.276114ms)
+✔ product selector searches catalogue names/barcodes, filters categories, and excludes another shop private products (229.305514ms)
+✔ age-record lookups require current membership and feature permission; read-only users cannot save new categories (125.530342ms)
+✔ uploaded raster bytes are decoded and re-encoded; names and MIME cannot authorize active content (10.113641ms)
+✔ truncated images, decompression bombs, oversize files and documents in image fields are rejected (313.825031ms)
+✔ text documents require valid text and generated image paths reject traversal (0.650702ms)
+✔ multipart validation occurs before disk write and accepted filenames are random safe extensions (31.459051ms)
+ℹ tests 346
+ℹ suites 16
+ℹ pass 345
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 162151.555482

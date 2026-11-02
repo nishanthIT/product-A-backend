@@ -1,7 +1,9 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/certificateRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated } from '../middleware/authware.js';
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -38,7 +40,7 @@ const safeUnlink = (filePath) => {
       fs.unlinkSync(filePath);
     }
   } catch (error) {
-    console.error('Error deleting certificate file:', error.message);
+    securityLog.error('Error deleting certificate file:', error.message);
   }
 };
 
@@ -262,7 +264,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, certificates: items });
   } catch (error) {
-    console.error('Error fetching certificates:', error);
+    securityLog.error('Error fetching certificates:', error);
     res.status(500).json({ error: 'Failed to fetch certificates' });
   }
 });
@@ -288,7 +290,7 @@ router.get('/alerts', authenticateToken, async (req, res) => {
 
     res.json({ success: true, alerts: items, count: items.length });
   } catch (error) {
-    console.error('Error fetching certificate alerts:', error);
+    securityLog.error('Error fetching certificate alerts:', error);
     res.status(500).json({ error: 'Failed to fetch certificate alerts' });
   }
 });
@@ -319,7 +321,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching certificate:', error);
+    securityLog.error('Error fetching certificate:', error);
     res.status(500).json({ error: 'Failed to fetch certificate' });
   }
 });
@@ -351,11 +353,13 @@ router.get('/:id/image', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Image not found' });
     }
 
-    res.set('Cache-Control', 'private, max-age=0, must-revalidate');
+    res.set('Cache-Control', 'private, no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Security-Policy', "default-src 'none'; sandbox");
     res.set('Content-Disposition', `inline; filename="${certificateFileName(certificate)}"`);
     return res.sendFile(absolutePath);
   } catch (error) {
-    console.error('Error serving certificate image:', error);
+    securityLog.error('Error serving certificate image:', error);
     res.status(500).json({ error: 'Failed to load image' });
   }
 });
@@ -424,7 +428,7 @@ router.post('/', authenticateToken, requireCustomer, upload.single('image'), asy
     });
   } catch (error) {
     if (req.file?.path) safeUnlink(req.file.path);
-    console.error('Error creating certificate:', error);
+    securityLog.error('Error creating certificate:', error);
     res.status(500).json({ error: 'Failed to create certificate' });
   }
 });
@@ -502,7 +506,7 @@ router.put('/:id', authenticateToken, requireCustomer, upload.single('image'), a
     });
   } catch (error) {
     if (req.file?.path) safeUnlink(req.file.path);
-    console.error('Error updating certificate:', error);
+    securityLog.error('Error updating certificate:', error);
     res.status(500).json({ error: 'Failed to update certificate' });
   }
 });
@@ -529,7 +533,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
 
     res.json({ success: true, message: 'Certificate deleted successfully' });
   } catch (error) {
-    console.error('Error deleting certificate:', error);
+    securityLog.error('Error deleting certificate:', error);
     res.status(500).json({ error: 'Failed to delete certificate' });
   }
 });

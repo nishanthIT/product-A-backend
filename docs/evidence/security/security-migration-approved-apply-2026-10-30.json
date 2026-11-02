@@ -1,0 +1,27 @@
+{
+  "migration": "20261027130000_central_security_protection",
+  "checksum": "f3fffd9be0a5004aea3b364f85ecca0c5d997c33051e0cad979895bdb544c797",
+  "mode": "apply",
+  "committed": true,
+  "status": "applied",
+  "action": "create-security-schema-and-record",
+  "schemaFingerprint": "959de156b8064f404d478e50f9c919bf3c378a50e58dcb414c0d368cf4538ece",
+  "missingTables": [],
+  "planned": {
+    "createTables": [
+      "SecurityAdminAudit",
+      "SecurityEvent",
+      "SecurityException",
+      "SecurityPolicy",
+      "SecurityRestriction"
+    ],
+    "createAuditTriggers": [
+      "security_audit_append_only",
+      "security_audit_no_truncate"
+    ],
+    "recordMigration": "20261027130000_central_security_protection",
+    "existingBusinessRowsChanged": 0,
+    "existingRowsDeleted": 0
+  },
+  "unrelatedMigrationRecordsUntouched": 50
+}

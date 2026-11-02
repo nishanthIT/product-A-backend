@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/listRoutes.js');
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import { presentListProduct } from '../services/listPresentation.js';
 import { isOutOfStock, loadOutOfStock, moveToOutOfStock } from '../services/outOfStock.js';
@@ -21,7 +23,7 @@ const withRetry = async (operation, maxRetries = 3, delayMs = 1000) => {
         error.message?.includes('Connection refused');
       
       if (isConnectionError && attempt < maxRetries) {
-        console.log(`⏳ Database connection failed (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`);
+        securityLog.log(`⏳ Database connection failed (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`);
         await new Promise(resolve => setTimeout(resolve, delayMs));
         continue;
       }
@@ -114,7 +116,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json(lists);
   } catch (error) {
-    console.error('Error fetching lists:', error);
+    securityLog.error('Error fetching lists:', error);
     res.status(500).json({ error: 'Failed to fetch lists' });
   }
 });
@@ -163,7 +165,7 @@ router.get('/shop/all', authenticateToken, async (req, res) => {
     // Add shopId to response for frontend to join socket room
     res.json({ lists, shopId });
   } catch (error) {
-    console.error('Error fetching shop lists:', error);
+    securityLog.error('Error fetching shop lists:', error);
     res.status(500).json({ error: 'Failed to fetch shop lists' });
   }
 });
@@ -182,7 +184,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
     const userType = req.user.userType;
     
     // Skip cache check - always fetch fresh data to avoid race conditions with togglePurchased
-    console.log('📦 Fetching list from DATABASE (no cache):', listId);
+    securityLog.log('📦 Fetching list from DATABASE (no cache):', listId);
 
     const trackingSupported = !!prisma.trackedList?.findFirst;
 
@@ -263,7 +265,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
     // Transform products to frontend-friendly format
     const transformedProducts = list.products.map(lp => presentListProduct(lp, stockByProduct));
 
-    console.log('📦 Database isPurchased states:', transformedProducts.map(p => ({ id: p.id, name: p.productName, isPurchased: p.isPurchased })));
+    securityLog.log('📦 Database isPurchased states:', transformedProducts.map(p => ({ id: p.id, name: p.productName, isPurchased: p.isPurchased })));
 
     const { trackedBy, ...listFields } = list;
     const isMine = userType === 'EMPLOYEE'
@@ -282,7 +284,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
     res.json(responseData);
   } catch (error) {
-    console.error('Error fetching list:', error.message);
+    securityLog.error('Error fetching list:', error.message);
     res.status(500).json({ error: 'Failed to fetch list' });
   }
 });
@@ -346,12 +348,12 @@ router.post('/', authenticateToken, async (req, res) => {
         creatorType: userType,
         creatorId: userId
       });
-      console.log(`📡 Emitted list_created to shop_${newList.shopId}_lists`);
+      securityLog.log(`📡 Emitted list_created to shop_${newList.shopId}_lists`);
     }
 
     res.status(201).json(newList);
   } catch (error) {
-    console.error('Error creating list:', error);
+    securityLog.error('Error creating list:', error);
     res.status(500).json({ error: 'Failed to create list' });
   }
 });
@@ -430,7 +432,7 @@ router.post('/addProduct', authenticateToken, async (req, res) => {
           product: updatedProduct,
           action: 'quantity_increased'
         });
-        console.log(`📡 Emitted list_product_updated to shop_${list.shopId}_lists`);
+        securityLog.log(`📡 Emitted list_product_updated to shop_${list.shopId}_lists`);
       }
 
       res.json({ message: 'Product quantity updated', product: updatedProduct });
@@ -458,13 +460,13 @@ router.post('/addProduct', authenticateToken, async (req, res) => {
           listId,
           product: listProduct
         });
-        console.log(`📡 Emitted list_product_added to shop_${list.shopId}_lists`);
+        securityLog.log(`📡 Emitted list_product_added to shop_${list.shopId}_lists`);
       }
 
       res.status(201).json({ message: 'Product added to list', product: listProduct });
     }
   } catch (error) {
-    console.error('Error adding product to list:', error);
+    securityLog.error('Error adding product to list:', error);
     res.status(500).json({ error: 'Failed to add product to list' });
   }
 });
@@ -476,7 +478,7 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
     const userId = parseInt(req.user.id);
     const userType = req.user.userType;
 
-    console.log('📦 Update quantity request:', { listId, productAtShopId, listProductId, quantity, userId, userType });
+    securityLog.log('📦 Update quantity request:', { listId, productAtShopId, listProductId, quantity, userId, userType });
 
     if (!listId || (!productAtShopId && !listProductId) || quantity === undefined) {
       return res.status(400).json({ error: 'listId, productAtShopId (or listProductId), and quantity are required' });
@@ -514,7 +516,7 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
         });
         isTracking = !!tracked;
       } else {
-        console.warn('TrackedList model not available in Prisma client. Skipping tracking permission check.');
+        securityLog.warn('TrackedList model not available in Prisma client. Skipping tracking permission check.');
       }
     }
 
@@ -532,7 +534,7 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
     }
 
     if (!listProduct) {
-      console.log('❌ Product not found in list:', { listId, productAtShopId, listProductId });
+      securityLog.log('❌ Product not found in list:', { listId, productAtShopId, listProductId });
       return res.status(404).json({ error: 'Product not found in list' });
     }
 
@@ -547,7 +549,7 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
           listId,
           listProductId: listProduct.id,
         });
-        console.log(`📡 Emitted list_product_removed to shop_${originalList.shopId}_lists`);
+        securityLog.log(`📡 Emitted list_product_removed to shop_${originalList.shopId}_lists`);
       }
       return res.json({ message: 'Product removed from list' });
     }
@@ -570,13 +572,13 @@ router.put('/updateQuantity', authenticateToken, async (req, res) => {
         product: updatedProduct,
         action: 'quantity_changed'
       });
-      console.log(`📡 Emitted list_product_updated to shop_${originalList.shopId}_lists`);
+      securityLog.log(`📡 Emitted list_product_updated to shop_${originalList.shopId}_lists`);
     }
 
-    console.log('✅ Quantity updated:', { listProductId: listProduct.id, quantity });
+    securityLog.log('✅ Quantity updated:', { listProductId: listProduct.id, quantity });
     res.json({ message: 'Product quantity updated', product: updatedProduct });
   } catch (error) {
-    console.error('Error updating product quantity:', error);
+    securityLog.error('Error updating product quantity:', error);
     res.status(500).json({ error: 'Failed to update product quantity' });
   }
 });
@@ -588,7 +590,7 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
     const userId = parseInt(req.user.id);
     const userType = req.user.userType;
 
-    console.log('✅ Toggle purchased request:', { listId, listProductId, userId, userType });
+    securityLog.log('✅ Toggle purchased request:', { listId, listProductId, userId, userType });
 
     if (!listId || !listProductId) {
       return res.status(400).json({ error: 'listId and listProductId are required' });
@@ -658,11 +660,11 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
     }));
 
     if (!listProduct) {
-      console.log('❌ Product not found in list:', { listId, listProductId });
+      securityLog.log('❌ Product not found in list:', { listId, listProductId });
       return res.status(404).json({ error: 'Product not found in list' });
     }
 
-    console.log('🔄 Current isPurchased state:', listProduct.isPurchased);
+    securityLog.log('🔄 Current isPurchased state:', listProduct.isPurchased);
 
     // Toggle the purchased status (with retry)
     const updatedProduct = await withRetry(() => prisma.listProduct.update({
@@ -682,7 +684,7 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
       },
     }));
 
-    console.log('🔄 New isPurchased state:', updatedProduct.isPurchased);
+    securityLog.log('🔄 New isPurchased state:', updatedProduct.isPurchased);
 
     // Emit socket event for shop list sync
     if (list.shopId && req.io) {
@@ -692,10 +694,10 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
         action: 'purchased_toggled',
         isPurchased: updatedProduct.isPurchased
       });
-      console.log(`📡 Emitted list_product_updated to shop_${list.shopId}_lists`);
+      securityLog.log(`📡 Emitted list_product_updated to shop_${list.shopId}_lists`);
     }
 
-    console.log('✅ Purchased status toggled:', { 
+    securityLog.log('✅ Purchased status toggled:', {
       listProductId: listProduct.id, 
       isPurchased: updatedProduct.isPurchased 
     });
@@ -706,7 +708,7 @@ router.put('/togglePurchased', authenticateToken, async (req, res) => {
       isPurchased: updatedProduct.isPurchased
     });
   } catch (error) {
-    console.error('Error toggling purchased status:', error);
+    securityLog.error('Error toggling purchased status:', error);
     res.status(500).json({ error: 'Failed to toggle purchased status' });
   }
 });
@@ -780,7 +782,7 @@ router.put('/toggleUrgent', authenticateToken, async (req, res) => {
       isUrgent: updatedProduct.isUrgent
     });
   } catch (error) {
-    console.error('Error toggling urgent status:', error);
+    securityLog.error('Error toggling urgent status:', error);
     res.status(500).json({ error: 'Failed to toggle urgent status' });
   }
 });
@@ -909,7 +911,7 @@ router.put('/changeShop', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
-    console.error('Error changing product shop:', error);
+    securityLog.error('Error changing product shop:', error);
     res.status(500).json({ error: 'Failed to move product to another shop' });
   }
 });
@@ -1042,7 +1044,7 @@ router.put('/moveToList', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
-    console.error('Error moving product to another list:', error);
+    securityLog.error('Error moving product to another list:', error);
     res.status(500).json({ error: 'Failed to move product to another list' });
   }
 });
@@ -1113,12 +1115,12 @@ router.delete('/removeProduct', authenticateToken, async (req, res) => {
         productAtShopId,
         listProductId: listProduct.id
       });
-      console.log(`📡 Emitted list_product_removed to shop_${list.shopId}_lists`);
+      securityLog.log(`📡 Emitted list_product_removed to shop_${list.shopId}_lists`);
     }
 
     res.json({ message: 'Product removed from list' });
   } catch (error) {
-    console.error('Error removing product from list:', error);
+    securityLog.error('Error removing product from list:', error);
     res.status(500).json({ error: 'Failed to remove product from list' });
   }
 });
@@ -1154,12 +1156,12 @@ router.delete('/:id', authenticateToken, async (req, res) => {
         listId,
         shopId: list.shopId
       });
-      console.log(`📡 Emitted list_deleted to shop_${list.shopId}_lists`);
+      securityLog.log(`📡 Emitted list_deleted to shop_${list.shopId}_lists`);
     }
 
     res.json({ message: 'List deleted successfully' });
   } catch (error) {
-    console.error('Error deleting list:', error);
+    securityLog.error('Error deleting list:', error);
     res.status(500).json({ error: 'Failed to delete list' });
   }
 });
@@ -1223,7 +1225,7 @@ router.get('/:id/lowest-prices', authenticateToken, async (req, res) => {
 
     res.json({ lowestPrices });
   } catch (error) {
-    console.error('Error fetching lowest prices:', error);
+    securityLog.error('Error fetching lowest prices:', error);
     res.status(500).json({ error: 'Failed to fetch lowest prices' });
   }
 });
@@ -1233,7 +1235,7 @@ router.get('/:id/lowest-prices', authenticateToken, async (req, res) => {
 router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
   try {
     const { productId, listId } = req.body;
-    console.log('📦 Check bundle before add:', { productId, listId });
+    securityLog.log('📦 Check bundle before add:', { productId, listId });
 
     if (!productId) {
       return res.status(400).json({ error: 'productId is required', hasOffers: false });
@@ -1422,7 +1424,7 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       };
     });
 
-    console.log(`📦 Bundle check result for ${productId}: ${offers.length} offer(s), candidates=${candidateIds.length}, promos matched=${bundlePromotions.length}`);
+    securityLog.log(`📦 Bundle check result for ${productId}: ${offers.length} offer(s), candidates=${candidateIds.length}, promos matched=${bundlePromotions.length}`);
 
     res.json({ 
       productId,
@@ -1442,7 +1444,7 @@ router.post('/check-bundle-before-add', authenticateToken, async (req, res) => {
       currentQuantityInList
     });
   } catch (error) {
-    console.error('Error checking bundle before add:', error);
+    securityLog.error('Error checking bundle before add:', error);
     res.status(500).json({ error: 'Failed to check bundle offers', hasOffers: false });
   }
 });
@@ -1548,7 +1550,7 @@ router.get('/bundle-offers/:productAtShopId', authenticateToken, async (req, res
       hasOffers: offers.length > 0
     });
   } catch (error) {
-    console.error('Error checking bundle offers:', error);
+    securityLog.error('Error checking bundle offers:', error);
     res.status(500).json({ error: 'Failed to check bundle offers' });
   }
 });
@@ -1748,7 +1750,7 @@ router.post('/claim-bundle', authenticateToken, async (req, res) => {
         listId,
         action: 'bundle_claimed'
       });
-      console.log(`📡 Emitted list_product_added (bundle) to shop_${list.shopId}_lists`);
+      securityLog.log(`📡 Emitted list_product_added (bundle) to shop_${list.shopId}_lists`);
     }
 
     res.json({
@@ -1762,7 +1764,7 @@ router.post('/claim-bundle', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error claiming bundle offer:', error);
+    securityLog.error('Error claiming bundle offer:', error);
     res.status(500).json({ error: 'Failed to claim bundle offer' });
   }
 });

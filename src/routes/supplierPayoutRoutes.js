@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/supplierPayoutRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -110,7 +112,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, records: records.map((record) => withPermissions(record, req.user)) });
   } catch (error) {
-    console.error('Error fetching supplier payout records:', error);
+    securityLog.error('Error fetching supplier payout records:', error);
     res.status(500).json({ error: 'Failed to fetch supplier payout records' });
   }
 });
@@ -160,7 +162,7 @@ router.post('/', authenticateToken, rejectTimestampInput, async (req, res) => {
 
     res.status(201).json({ success: true, record: withPermissions(record, req.user) });
   } catch (error) {
-    console.error('Error creating supplier payout record:', error);
+    securityLog.error('Error creating supplier payout record:', error);
     res.status(500).json({ error: 'Failed to create supplier payout record' });
   }
 });
@@ -223,7 +225,7 @@ router.put('/:id', authenticateToken, rejectTimestampInput, async (req, res) => 
 
     res.json({ success: true, record: withPermissions(record, req.user) });
   } catch (error) {
-    console.error('Error updating supplier payout record:', error);
+    securityLog.error('Error updating supplier payout record:', error);
     res.status(500).json({ error: 'Failed to update supplier payout record' });
   }
 });
@@ -249,7 +251,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting supplier payout record:', error);
+    securityLog.error('Error deleting supplier payout record:', error);
     res.status(500).json({ error: 'Failed to delete supplier payout record' });
   }
 });

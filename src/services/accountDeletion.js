@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { disconnectUser } from './realtime.js';
 import { purgeAccountCaches } from './deletionCaches.js';
 import { persistRecoveryJournal } from './deletionRecoveryJournal.js';
+import { attachmentStorageDescriptor, attachmentFilename, attachmentReferenceFilter, createChatStorage, getChatStorage } from './chatStorage.js';
 
 export const receiptDigest = receipt => crypto.createHash('sha256').update(receipt).digest('hex');
 export const accountTable = type => ({ CUSTOMER: 'customer', EMPLOYEE: 'empolyee', ADMIN: 'admin' })[type];
@@ -23,7 +23,10 @@ export async function requestDeletion(db, user) {
 /** Removes direct account data; shared content and external processors require recorded review.
  * No workspace, another user's content, or staff account is deleted here.
  */
-export async function processDeletion(db, jobId, { uploadsRoot = path.resolve('uploads'), purgeCaches = purgeAccountCaches, persistJournal = persistRecoveryJournal } = {}) {
+export async function processDeletion(db, jobId, { uploadsRoot, storage, purgeCaches = purgeAccountCaches, persistJournal = persistRecoveryJournal } = {}) {
+  // uploadsRoot remains a test/legacy caller override; normal runtime always
+  // resolves both local and object storage through the central configuration.
+  const attachments = storage || (uploadsRoot ? createChatStorage({ env: { ...process.env, CHAT_STORAGE_ROOT: path.join(path.resolve(uploadsRoot), 'chat') } }) : getChatStorage());
   let job = await db.accountDeletionJob.findUniqueOrThrow({ where: { id: jobId } });
   if (['EXTERNAL_REVIEW', 'COMPLETE'].includes(job.status)) return deletionStatus(job);
   // Commit the access barrier before erasure. Failures remain retryable while sessions stay revoked.
@@ -45,7 +48,7 @@ export async function processDeletion(db, jobId, { uploadsRoot = path.resolve('u
     const uploads = await tx.chatUpload.findMany({ where: { uploaderId: id, uploaderType: type } });
     // Only uploader-owned files are safe to erase automatically. Legacy untracked URLs
     // and shared references require the mandatory external review, not a guessed owner.
-    const filePaths = new Set(uploads.map(u => `chat/${u.filename}`));
+    const filePaths = uploads.map(attachmentStorageDescriptor);
     await tx.userBlock.deleteMany({ where: { OR: [{ userId: id, userType: type }, { blockedId: id, blockedType: type }] } });
     await tx.communityAcceptance.deleteMany({ where: { userId: id, userType: type } });
     await tx.moderationDeletionJob.updateMany({ where: { userId: id, userType: type }, data: { userId: 0, status: 'COMPLETED', completedAt: new Date() } });
@@ -61,9 +64,12 @@ export async function processDeletion(db, jobId, { uploadsRoot = path.resolve('u
     }
     await tx.message.deleteMany({ where: authored });
     await tx.messageRead.deleteMany({ where: { userId: id, userType: type } });
+    await tx.messageDelivery.deleteMany({ where: { userId: id, userType: type } });
     await tx.chatParticipant.deleteMany({ where: { userId: id, userType: type } });
     await tx.trackedList.deleteMany({ where: { userId: id, userType: type } });
-    await tx.chatUpload.deleteMany({ where: { uploaderId: id, uploaderType: type } });
+    // Keep provider descriptors for attachments referenced by surviving shared
+    // content, while removing the deleted account's ownership identity.
+    await tx.chatUpload.updateMany({ where: { uploaderId: id, uploaderType: type }, data: { uploaderId: 0 } });
     const creatorField = { CUSTOMER: 'customerId', EMPLOYEE: 'employeeId', ADMIN: 'adminId' }[type];
     await tx.list.deleteMany({ where: { [creatorField]: id, shopId: null } });
     await tx.list.updateMany({ where: { [creatorField]: id }, data: { [creatorField]: null } });
@@ -92,15 +98,21 @@ export async function processDeletion(db, jobId, { uploadsRoot = path.resolve('u
     await tx.expiryProduct.updateMany({ where: { addedById: id, addedByType: type }, data: { addedById: 0 } });
     await tx.supermarketAdminAccessLog.updateMany({ where: { actorId: id, actorType: type }, data: { actorId: 0 } });
     await tx[table].delete({ where: { id } });
-    return tx.accountDeletionJob.update({ where: { id: jobId }, data: { status: 'FILES_PENDING', filePaths: [...filePaths], attempts: { increment: 1 } } });
+    return tx.accountDeletionJob.update({ where: { id: jobId }, data: { status: 'FILES_PENDING', filePaths, attempts: { increment: 1 } } });
   }, { timeout: 30000 });
   disconnectUser(job.userType, job.userId);
   if (job.status === 'FILES_PENDING') {
-    for (const relative of job.filePaths) {
-      if (!/^chat\/[a-zA-Z0-9._-]+$/.test(relative)) throw new Error('Unsafe deletion path');
+    for (const saved of job.filePaths) {
+      // Resume jobs written by previous releases as well as new provider-aware jobs.
+      const upload = typeof saved === 'string'
+        ? { filename: attachmentFilename(`/uploads/${saved}`) } : saved;
+      if (!upload?.filename) throw new Error('Unsafe deletion path');
       // Do not delete a file still referenced by someone else's message.
-      const references = await db.message.count({ where: { attachmentUrl: { endsWith: `/uploads/${relative}` } } });
-      if (!references) await fs.unlink(path.join(uploadsRoot, relative)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      const references = await db.message.count({ where: attachmentReferenceFilter(upload.filename) });
+      if (!references) {
+        await attachments.delete(upload);
+        await db.chatUpload.deleteMany({ where: { filename: upload.filename, uploaderId: 0 } });
+      }
     }
     job = await db.accountDeletionJob.update({ where: { id: jobId }, data: { status: 'EXTERNAL_REVIEW', filePaths: [] } });
   }

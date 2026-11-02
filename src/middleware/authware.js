@@ -1,3 +1,4 @@
+import { protectAuthenticatedRequest } from './securityProtection.js';
 import { serviceError } from '../services/serviceErrors.js';
 import { readSessionToken } from '../services/sessionSecurity.js';
 import { verifySessionToken, isInvalidSession } from '../services/sessionTokens.js';
@@ -27,7 +28,12 @@ const isAuthenticated = async (req, res, next) => {
       return res.status(result.status).json({ error: result.error, code: result.code });
     }
     req.user = result.user;
-    next();
+    const catalogueLookup = req.method === 'GET' && /^\/api\/(?:products(?:\/|$)|getProductBy(?:Id|Barcode)\/|filterProducts(?:\/|$)|productFilters(?:\/|$))/.test(String(req.originalUrl || '').split('?')[0]);
+    if (catalogueLookup && !req.user.shopId && req.user.userType !== 'ADMIN'
+        && !['catalog.read', 'catalog.write', 'shops.manage'].some(permission => hasCompanyPermission(req.user, permission))) {
+      return res.status(403).json({ error: 'Catalogue access requires an active shop or company permission' });
+    }
+    return protectAuthenticatedRequest(req, res, next);
   } catch (error) {
     console.error('Session account lookup failed', serviceError(error));
     return res.status(503).json({ error: 'Session verification is temporarily unavailable. Try again.' });

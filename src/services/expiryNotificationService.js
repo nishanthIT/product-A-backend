@@ -1,3 +1,5 @@
+import { safeLogger } from './safeLogger.js';
+const securityLog = safeLogger('services/expiryNotificationService.js');
 import { PrismaClient } from '@prisma/client';
 import cron from 'node-cron';
 import nodemailer from 'nodemailer';
@@ -40,7 +42,7 @@ class ExpiryNotificationService {
     const emailPass = (process.env.EMAIL_PASS || '').replace(/\s+/g, '');
 
     if (!emailUser || !emailPass) {
-      console.warn('[Expiry Notification] EMAIL_USER/EMAIL_PASS not configured. Email notifications are disabled.');
+      securityLog.warn('[Expiry Notification] EMAIL_USER/EMAIL_PASS not configured. Email notifications are disabled.');
       return null;
     }
 
@@ -111,7 +113,7 @@ class ExpiryNotificationService {
    */
   async sendRealtimeNotification(recipients, notification) {
     if (!this.io) {
-      console.warn('[Expiry Notification] Socket context not set. Real-time notifications skipped.');
+      securityLog.warn('[Expiry Notification] Socket context not set. Real-time notifications skipped.');
       return 0;
     }
 
@@ -179,7 +181,7 @@ class ExpiryNotificationService {
     const failedCount = results.length - successCount;
 
     if (failedCount > 0) {
-      console.warn(`[Expiry Notification] ${failedCount} expiry email(s) failed.`);
+      securityLog.warn(`[Expiry Notification] ${failedCount} expiry email(s) failed.`);
     }
 
     return successCount;
@@ -191,11 +193,11 @@ class ExpiryNotificationService {
   start() {
     // Run every day at 9:00 AM
     this.cronJob = cron.schedule('0 9 * * *', async () => {
-      console.log('[Expiry Notification] Running daily expiry check...');
+      securityLog.log('[Expiry Notification] Running daily expiry check...');
       await this.checkAndNotify();
     });
 
-    console.log('[Expiry Notification Service] Started - Running daily at 9:00 AM');
+    securityLog.log('[Expiry Notification Service] Started - Running daily at 9:00 AM');
   }
 
   /**
@@ -204,7 +206,7 @@ class ExpiryNotificationService {
   stop() {
     if (this.cronJob) {
       this.cronJob.stop();
-      console.log('[Expiry Notification Service] Stopped');
+      securityLog.log('[Expiry Notification Service] Stopped');
     }
   }
 
@@ -250,7 +252,7 @@ class ExpiryNotificationService {
         }
       });
 
-      console.log(`[Expiry Notification] Checking ${expiryProducts.length} products...`);
+      securityLog.log(`[Expiry Notification] Checking ${expiryProducts.length} products...`);
 
       let notificationsSent = 0;
 
@@ -292,7 +294,7 @@ class ExpiryNotificationService {
             });
 
             notificationsSent++;
-            console.log(
+            securityLog.log(
               `[Expiry Notification] Sent notification for "${expiryProduct.product.title}" ` +
               `(${daysUntilExpiry} days) in shop "${expiryProduct.shop.name}"`
             );
@@ -300,9 +302,9 @@ class ExpiryNotificationService {
         }
       }
 
-      console.log(`[Expiry Notification] Check complete. ${notificationsSent} notification(s) sent.`);
+      securityLog.log(`[Expiry Notification] Check complete. ${notificationsSent} notification(s) sent.`);
     } catch (error) {
-      console.error('[Expiry Notification] Error during check:', error);
+      securityLog.error('[Expiry Notification] Error during check:', error);
     }
   }
 
@@ -315,7 +317,7 @@ class ExpiryNotificationService {
   async sendNotification(expiryProduct, daysUntilExpiry) {
     const recipients = await this.getShopRecipients(expiryProduct.shopId);
     if (!recipients.length) {
-      console.warn(`[Expiry Notification] No recipients found for shop ${expiryProduct.shopId}.`);
+      securityLog.warn(`[Expiry Notification] No recipients found for shop ${expiryProduct.shopId}.`);
       return;
     }
 
@@ -344,7 +346,7 @@ class ExpiryNotificationService {
       this.sendEmailNotifications(recipients, notification),
     ]);
 
-    console.log(
+    securityLog.log(
       `[Expiry Notification] Delivered for "${expiryProduct.product.title}": ` +
       `${pushCount} realtime, ${emailCount} email`
     );
@@ -354,7 +356,7 @@ class ExpiryNotificationService {
    * Manual trigger for testing (can be called from an API endpoint)
    */
   async triggerManually() {
-    console.log('[Expiry Notification] Manual trigger initiated...');
+    securityLog.log('[Expiry Notification] Manual trigger initiated...');
     await this.checkAndNotify();
   }
 }

@@ -1,3 +1,5 @@
+import { safeLogger } from './safeLogger.js';
+const securityLog = safeLogger('services/multiLayerCache.js');
 import redisService from './redisService.js';
 
 const DEFAULT_TTL_SECONDS = 300;
@@ -17,7 +19,7 @@ class MultiLayerCache {
   async getLocal() { return null; }
   pruneExpired() {} // Persistent cache owns expiry, including during Redis outages.
 
-  _log(source, key) { console.log(`[CACHE] ${source} ${key}`); }
+  _log(source, key) { securityLog.log(`[CACHE] ${source} ${key}`); }
 
   _withLock(scope, action) {
     const previous = this.locks.get(scope) || Promise.resolve();
@@ -60,7 +62,7 @@ class MultiLayerCache {
         }
         if (!operation.invalidated) await this.persistentCache.set(key, value, ttlSeconds);
       } catch (error) {
-        console.warn(`Cache write failed for ${key}:`, error.message);
+        securityLog.warn(`Cache write failed for ${key}:`, error.message);
       }
     });
   }
@@ -75,7 +77,7 @@ class MultiLayerCache {
   async getRedis(key) {
     try { return await this.persistentCache.get(key, true); }
     catch (error) {
-      console.warn(`Cache read failed for ${key}:`, error.message);
+      securityLog.warn(`Cache read failed for ${key}:`, error.message);
       return null;
     }
   }

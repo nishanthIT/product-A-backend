@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/compareRoutes.js');
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
@@ -117,13 +119,13 @@ export async function getProductComparison(req, res) {
       })),
     }));
 
-    console.log(
+    securityLog.log(
       `🔎 /products/${productId}/compare → ${shops.length} shops, ${bundles.length} bundles (${Date.now() - started}ms)`,
     );
 
     res.json({ success: true, product, shops, bundles });
   } catch (error) {
-    console.error('Error building compare payload:', error);
+    securityLog.error('Error building compare payload:', error);
     res.status(500).json({ error: 'Failed to load comparison data' });
   }
 }

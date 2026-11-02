@@ -1,7 +1,7 @@
 import cacheService from '../services/cacheService.js';
 
 /**
- * Rate Limiting Middleware using Redis/Memory cache
+ * Legacy limiter using the distributed PostgreSQL-authoritative cache.
  * Limits requests per IP address or user ID
  */
 
@@ -22,14 +22,14 @@ export const rateLimiter = (options = {}) => {
     message = 'Too many requests, please try again later.'
   } = options;
 
-  const windowSeconds = Math.floor(windowMs / 1000);
+  const windowSeconds = Math.max(1, Math.ceil(windowMs / 1000));
 
   return async (req, res, next) => {
     try {
       // Determine the identifier (user ID or IP)
       let identifier;
       if (useUserId && req.user?.id) {
-        identifier = `${keyPrefix}:user:${req.user.id}`;
+        identifier = `${keyPrefix}:user:${req.user.userType}:${req.user.id}`;
       } else {
         // Use IP address
         const ip = req.ip || req.connection.remoteAddress || 'unknown';
@@ -39,14 +39,8 @@ export const rateLimiter = (options = {}) => {
       // Check rate limit
       const result = await cacheService.checkRateLimit(identifier, max, windowSeconds);
 
-      // Set rate limit headers
-      res.set({
-        'X-RateLimit-Limit': max,
-        'X-RateLimit-Remaining': result.remaining,
-        'X-RateLimit-Reset': new Date(Date.now() + windowMs).toISOString()
-      });
-
       if (!result.allowed) {
+        res.set('Retry-After', String(windowSeconds));
         return res.status(429).json({
           success: false,
           message,
@@ -56,9 +50,8 @@ export const rateLimiter = (options = {}) => {
 
       next();
     } catch (error) {
-      // If rate limiting fails, allow the request but log the error
-      console.error('Rate limiter error:', error.message);
-      next();
+      console.error('Rate limiter unavailable');
+      res.status(503).json({ error: 'Service temporarily unavailable. Please retry.' });
     }
   };
 };

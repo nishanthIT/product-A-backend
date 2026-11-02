@@ -1,184 +1,107 @@
-import { listUserChats, chatParticipantView, hydrateChatPeople } from '../services/chatDirectory.js';
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/chat.js');
+import { broadcastChat, deferChatWork, settleChatWork } from '../services/chatBroadcast.js';
+import { recordChatReceipts } from '../services/chatReceipts.js';
+import { listUserChats, chatParticipantRows, chatParticipantView, hydrateChatPeople } from '../services/chatDirectory.js';
 import { serviceError } from '../services/serviceErrors.js';
 import { lockAccountForWrite } from '../services/accountWriteBarrier.js';
 import { activeSuspension } from '../services/chatSafety.js';
 import { blockedPeers, hiddenAuthors } from '../services/chatSafety.js';
 import { hasShopFeatureAccess, SHOP_FEATURES } from '../services/accessControl.js';
 import { PrismaClient } from '@prisma/client';
-import fs from 'fs';
-import path from 'path';
+import { createHash } from 'node:crypto';
+import { attachmentFilename } from '../services/chatStorage.js';
+import { queueUnusedAttachment, queueUnusedAttachments, deleteQueuedAttachment } from '../services/chatRetention.js';
 import cacheService from '../services/cacheService.js';
 import { getChatAccess } from '../services/chatAccess.js';
+import { selectedChatShop, chatIdentity, visibleShopChat } from '../services/shopChatScope.js';
+import { retailChatRoster, visibleCommunityDirect } from '../services/globalChat.js';
 import { userKey, userRoom } from '../services/realtime.js';
+import { chatSearchTerm, messagePageQuery, messageSearchWhere, messageCursorBoundary, encodeMessageCursor, chatUnavailableResponse } from '../services/chatQuery.js';
 
 const prisma = new PrismaClient();
+const IMAGE_RETRY_PREFIX = 'retry_image_';
+const MESSAGE_RETRY_PREFIX = 'retry_message_';
 
 // List existing authorized conversations without changing any chat records.
 export const getUserChats = async (req, res) => {
-  try { res.status(200).json({ success: true, chats: await listUserChats(req.user, prisma) }); }
+  try { res.status(200).json({ success: true, chats: await listUserChats(req.user, prisma, { search: chatSearchTerm(req.query.search) }) }); }
   catch (error) {
-    console.error('Chat directory unavailable', serviceError(error));
-    res.status(503).json({ success: false, message: 'Chat conversations are temporarily unavailable.' });
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
+    securityLog.error('Chat directory unavailable', serviceError(error));
+    res.status(503).json(chatUnavailableResponse(error));
   }
 };
 
-// Create a new chat (personal or group)
+// Create or reopen a private conversation between eligible retail app users.
 export const createChat = async (req, res) => {
   try {
-    const userId = req.user.id;
-    const userType = req.user.userType;
-    const { type, name, participantIds } = req.body; // participantIds: [{ userId, userType }]
-
-    // Validation
-    if (!type || !participantIds || participantIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'Chat type and participants are required' });
+    const { type, participantIds } = req.body;
+    if (type !== 'PERSONAL' || !Array.isArray(participantIds) || participantIds.length !== 1) {
+      return res.status(400).json({ error: 'Choose one person for a direct conversation. Use Global Chat or Team Chat for group messages.' });
     }
-
-    if (type === 'GROUP' && !name) {
-      return res.status(400).json({ success: false, message: 'Group chat requires a name' });
+    const input = participantIds[0];
+    const peer = { userId: Number(input?.userId), userType: input?.userType };
+    if (!Number.isSafeInteger(peer.userId) || peer.userId <= 0 || !['CUSTOMER', 'EMPLOYEE'].includes(peer.userType) || chatIdentity(peer) === chatIdentity(req.user)) {
+      return res.status(400).json({ error: 'Choose another eligible shop teammate.' });
     }
-
-    // RESTRICTION: Employees cannot start direct chats with other employees
-    // They can only chat with Admin or in group chats
-    if (type === 'PERSONAL' && userType === 'EMPLOYEE') {
-      const otherParticipant = participantIds[0];
-      if (otherParticipant.userType === 'EMPLOYEE') {
-        return res.status(403).json({
-          success: false,
-          message: 'Employees cannot start private chats with other employees. Please use the shop group chat.'
-        });
-      }
-    }
-
-    const blocked = await blockedPeers(req.user);
-    if (participantIds.some(p => blocked.some(b => b.id === Number(p.userId) && b.userType === p.userType))) return res.status(403).json({ error: 'This conversation is blocked.' });
-
-    // For personal chat, check if chat already exists
-    if (type === 'PERSONAL' && participantIds.length === 1) {
-      const otherUserId = typeof participantIds[0].userId === 'number'
-        ? participantIds[0].userId
-        : parseInt(participantIds[0].userId);
-
-      const existingChat = await prisma.chat.findFirst({
-        where: {
-          type: 'PERSONAL',
-          AND: [
-            {
-              participants: {
-                some: {
-                  userId: userId,
-                  userType: userType
-                }
-              }
-            },
-            {
-              participants: {
-                some: {
-                  userId: otherUserId,
-                  userType: participantIds[0].userType
-                }
-              }
-            }
-          ]
-        },
-        include: {
-          participants: true
-        }
+    const pair = [chatIdentity(req.user), chatIdentity(peer)].sort();
+    const result = await prisma.$transaction(async tx => {
+      await lockAccountForWrite(tx, req.user);
+      // The pair lock covers lookup AND creation across requests/server instances.
+      // Membership is checked after acquiring it, so a queued opener revalidates.
+      const key = JSON.stringify(['retail-direct', ...pair]);
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+      const [shop, roster, blocked] = await Promise.all([
+        selectedChatShop(req.user, tx), retailChatRoster(tx, [peer]), blockedPeers(req.user, tx),
+      ]);
+      if (!shop || !roster.some(p => chatIdentity(p) === chatIdentity(peer))) throw Object.assign(new Error('This person is not an eligible retail shop user.'), { status: 403 });
+      if (blocked.some(p => p.id === peer.userId && p.userType === peer.userType)) throw Object.assign(new Error('This conversation is blocked.'), { status: 403 });
+      const identities = pair.map(identity => {
+        const [userType, userId] = identity.split(':');
+        return { userType, userId: Number(userId) };
       });
-
-      // Only return existing chat if it has participants (not deleted)
-      if (existingChat && existingChat.participants.length > 0) {
-        return res.status(200).json({ success: true, chat: { id: existingChat.id }, message: 'Chat already exists' });
-      }
-    }
-
-    // Create the chat with participants
-    const chat = await prisma.chat.create({
-      data: {
-        type,
-        name: type === 'GROUP' ? name : null,
-        participants: {
-          create: [
-            {
-              userId: userId,
-              userType: userType,
-              isAdmin: type === 'GROUP' // Creator is admin for group chats
-            },
-            ...participantIds.map(p => ({
-              userId: typeof p.userId === 'number' ? p.userId : parseInt(p.userId),
-              userType: p.userType,
-              isAdmin: false
-            }))
-          ]
-        }
-      },
-      include: {
-        participants: true
-      }
-    });
-
-    // Get participant details (names, emails) for the response
-    const participantsWithDetails = await Promise.all(
-      chat.participants.map(async (p) => {
-        let userDetails = null;
-        if (p.userType === 'CUSTOMER') {
-          userDetails = await prisma.customer.findUnique({
-            where: { id: p.userId },
-            select: { id: true, name: true }
-          });
-        } else if (p.userType === 'EMPLOYEE') {
-          userDetails = await prisma.empolyee.findUnique({
-            where: { id: p.userId },
-            select: { id: true, name: true }
-          });
-        } else if (p.userType === 'ADMIN') {
-          userDetails = await prisma.admin.findUnique({
-            where: { id: p.userId },
-            select: { id: true, name: true }
-          });
-        }
-        return {
-          id: p.userId.toString(),
-          name: userDetails?.name || 'Unknown',
-
-          userType: p.userType,
-          isAdmin: p.isAdmin
-        };
-      })
-    );
-
-    // Get other participants (excluding current user)
-    const otherParticipants = participantsWithDetails.filter(
-      p => !(Number(p.id) === Number(userId) && p.userType === userType)
-    );
-
-    // Invalidate chat list cache for ALL participants so they get fresh data
-    for (const participant of chat.participants) {
-      await cacheService.invalidateUserChats(userKey(participant.userType, participant.userId));
-    }
-
-    // Notify all participants via Socket.IO
-    chat.participants.forEach(participant => {
-      req.io.to(userRoom(participant.userType, participant.userId)).emit('new_chat_created', {
-        chatId: chat.id,
-        chatType: chat.type,
-        chatName: chat.name,
-        participants: participantsWithDetails
+      const existing = await tx.chat.findMany({
+        where: { type: 'PERSONAL', OR: [{ shopId: null }, { shopId: shop.id }],
+          participants: { every: { OR: identities } },
+          AND: identities.map(identity => ({ participants: { some: identity } })),
+        }, include: { participants: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       });
+      const reusable = existing.find(chat => visibleCommunityDirect(req.user, chat, [req.user, peer])) ??
+        existing.find(chat => visibleShopChat(req.user, chat, shop));
+      if (reusable) return { chat: reusable, created: false };
+      const chat = await tx.chat.create({ data: { type: 'PERSONAL', participants: { create: identities } }, include: { participants: true } });
+      return { chat, created: true };
+    }, { maxWait: 15000, timeout: 60000 });
+    // Membership was validated inside the pair lock; only hydrate these two names.
+    const [users, latest, unreadCount] = await Promise.all([
+      hydrateChatPeople(result.chat.participants, prisma),
+      result.created ? null : prisma.message.findFirst({ where: { chatId: result.chat.id, deletedAt: null }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
+      result.created ? 0 : prisma.message.count({ where: { chatId: result.chat.id, deletedAt: null,
+        NOT: { senderId: req.user.id, senderType: req.user.userType }, readReceipts: { none: { userId: req.user.id, userType: req.user.userType } } } }),
+    ]);
+    const people = result.chat.participants.map(p => ({ ...users.get(chatIdentity(p)), isAdmin: !!p.isAdmin }));
+    const otherParticipants = people.filter(p => chatIdentity(p) !== chatIdentity(req.user));
+    const name = otherParticipants.map(p => p.name).join(', ');
+    if (result.created) deferChatWork(async () => {
+      await settleChatWork(result.chat.participants.map(async p => {
+        req.io?.to(userRoom(p.userType, p.userId)).emit('new_chat_created', { chatId: result.chat.id });
+        await cacheService.invalidateUserChats(userKey(p.userType, p.userId));
+      }));
     });
-
-    // Return chat with full participant details
-    res.status(201).json({
-      success: true,
-      chat: {
-        ...chat,
-        participants: participantsWithDetails,
-        otherParticipants: otherParticipants
-      }
-    });
+    return res.status(result.created ? 201 : 200).json({ success: true, chat: {
+      ...result.chat, name, participants: people, otherParticipants, participantCount: people.length,
+      unreadCount, lastMessage: latest?.content, lastMessageTime: latest?.createdAt,
+      lastActivityAt: latest?.createdAt ?? result.chat.createdAt, isTeamChat: false,
+      isGlobalChat: false, isCommunityChat: !result.chat.shopId,
+      ...(result.created && { initialPage: { id: result.chat.id, name, type: 'PERSONAL', shopId: null,
+        isGlobalChat: false, participants: people, participantCount: people.length, messages: [],
+        pagination: { hasMore: false, nextCursor: null, limit: 30 } } }),
+    } });
   } catch (error) {
-    console.error('Error creating chat:', error);
-    res.status(500).json({ success: false, message: 'Failed to create chat', error: error.message });
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    securityLog.error('Direct chat creation failed', serviceError(error));
+    return res.status(500).json({ error: 'Could not start this conversation.' });
   }
 };
 
@@ -188,7 +111,7 @@ export const getChatById = async (req, res) => {
     const userId = req.user.id;
     const userType = req.user.userType;
     const { chatId } = req.params;
-    const { page = 1, limit = 50 } = req.query;
+    const { page, limit, before, search } = messagePageQuery(req.query);
 
     // Check current ownership or active membership for the requested team.
     const access = await getChatAccess(req.user, chatId);
@@ -200,31 +123,31 @@ export const getChatById = async (req, res) => {
     }
 
 
-    // Get chat details
-    const chat = await prisma.chat.findUnique({
-      where: { id: chatId },
-      include: {
-        participants: true
-      }
-    });
+    const chat = access.chat;
 
-    // Get messages with pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    const messages = await prisma.message.findMany({
+    // Stable boundaries prevent concurrent new messages from shifting older
+    // pages. The opaque cursor also survives deletion of its boundary message.
+    const boundary = await messageCursorBoundary(before, chatId, prisma);
+    const messageRows = await prisma.message.findMany({
       where: {
         chatId,
         deletedAt: null,
-        NOT: await hiddenAuthors(req.user)
+        NOT: await hiddenAuthors(req.user),
+        ...messageSearchWhere(search),
+        ...(boundary && { AND: [{ OR: [
+          { createdAt: { lt: boundary.createdAt } },
+          { createdAt: boundary.createdAt, id: { lt: boundary.id } },
+        ] }] }),
       },
-      orderBy: {
-        createdAt: 'desc'
-      },
-      skip,
-      take: parseInt(limit),
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: before ? 0 : (page - 1) * limit,
+      take: limit + 1,
       include: {
-        readReceipts: true
+        readReceipts: true, deliveryReceipts: true
       }
     });
+    const hasMore = messageRows.length > limit;
+    const messages = messageRows.slice(0, limit);
 
     const senders = await hydrateChatPeople(messages.map(msg => ({ userId: msg.senderId, userType: msg.senderType })), prisma);
     const messagesWithSender = await Promise.all(
@@ -271,7 +194,8 @@ export const getChatById = async (req, res) => {
           sharedList: sharedListData,
           timestamp: msg.createdAt,
           isOwnMessage: msg.senderId === userId && msg.senderType === userType,
-          readBy: msg.readReceipts.map(r => ({ userId: r.userId, userType: r.userType, readAt: r.readAt }))
+          readBy: msg.readReceipts.map(r => ({ userId: r.userId, userType: r.userType, readAt: r.readAt })),
+          deliveredTo: msg.deliveryReceipts.map(r => ({ userId: r.userId, userType: r.userType, deliveredAt: r.deliveredAt }))
         };
       })
     );
@@ -280,11 +204,14 @@ export const getChatById = async (req, res) => {
 
     const chatData = {
       id: chat.id,
-      name: chat.name,
+      name: access.isGlobalChat ? 'Global Chat' : chat.name || validParticipants.filter(p => chatIdentity(p) !== chatIdentity(req.user)).map(p => p.name).join(', '),
       type: chat.type,
+      isGlobalChat: access.isGlobalChat,
+      shopId: access.shopId,
       participants: validParticipants,
       participantCount: validParticipants.length,
-      messages: messagesWithSender.reverse() // Oldest first
+      messages: messagesWithSender.reverse(), // Oldest first
+      pagination: { hasMore, nextCursor: hasMore ? encodeMessageCursor(messages.at(-1)) : null, limit },
     };
 
 
@@ -293,8 +220,9 @@ export const getChatById = async (req, res) => {
       chat: chatData
     });
   } catch (error) {
-    console.error('Error fetching chat:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch chat', error: error.message });
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
+    securityLog.error('Chat history unavailable', serviceError(error));
+    res.status(503).json(chatUnavailableResponse(error));
   }
 };
 
@@ -303,13 +231,19 @@ export const sendMessage = async (req, res) => {
   try {
     const userId = req.user.id;
     const userType = req.user.userType;
-    const { chatId, content, messageType = 'TEXT', attachmentUrl, attachmentName, attachmentSize, sharedListId } = req.body;
+    const { chatId, content, messageType = 'TEXT', attachmentUrl, attachmentName, attachmentSize, sharedListId, clientMessageId } = req.body;
 
     // Validation
     if (typeof content !== 'string' || content.length > 10000) return res.status(400).json({ error: 'Messages must be 1–10,000 characters.' });
     if (!chatId || !content) {
       return res.status(400).json({ success: false, message: 'Chat ID and content are required' });
     }
+    if (clientMessageId !== undefined && (typeof clientMessageId !== 'string' || !clientMessageId.trim() || clientMessageId.length > 512 || !['TEXT', 'IMAGE', 'DOCUMENT', 'LIST_SHARE'].includes(messageType)
+      || (['IMAGE', 'DOCUMENT'].includes(messageType) && (typeof attachmentUrl !== 'string' || !attachmentUrl)))) {
+      return res.status(400).json({ error: 'A message retry identifier must be nonempty text of at most 512 characters. Attachment messages require an uploaded file.' });
+    }
+    const retryMessageId = clientMessageId === undefined ? null : (messageType === 'IMAGE' ? IMAGE_RETRY_PREFIX : MESSAGE_RETRY_PREFIX) + createHash('sha256')
+      .update(JSON.stringify([userType, userId, chatId, clientMessageId])).digest('hex');
 
     // If sharing a list, verify the user owns the list
     let sharedListData = null;
@@ -361,51 +295,42 @@ export const sendMessage = async (req, res) => {
       };
     }
 
-    // Check if user is participant
-    let participant = await prisma.chatParticipant.findFirst({
-      where: {
-        chatId,
-        userId: userId,
-        userType: userType
-      }
-    });
-
-    // If not a participant, only the global chat or the caller's own shop group chat may be joined
-    if (!participant) {
-      const access = await getChatAccess(req.user, chatId);
-      if (access?.canJoin) {
-        participant = await prisma.chatParticipant.create({
-          data: {
-            chatId,
-            userId: userId,
-            userType: userType
-          }
-        });
-      } else {
-        return res.status(403).json({ success: false, message: 'You are not a participant of this chat' });
-      }
-    } else {
-      // A leftover participant row (e.g. after deactivation) must not reopen a shop group chat.
-      const access = await getChatAccess(req.user, chatId);
-      if (!access?.canRead) {
-        return res.status(403).json({ success: false, message: 'You do not have access to this chat' });
-      }
-    }
-
-    const message = await prisma.$transaction(async tx => {
+    const { message, replayed } = await prisma.$transaction(async tx => {
       await lockAccountForWrite(tx, req.user);
+      const access = await getChatAccess(req.user, chatId, tx);
+      if (!access?.canRead) throw Object.assign(new Error('You no longer have access to this chat.'), { status: 403 });
+      if (access.canJoin && !access.chat.participants.some(p => p.userId === userId && p.userType === userType)) {
+        // createMany uses ON CONFLICT DO NOTHING. An empty-update Prisma upsert
+        // can fall back to read-then-create and race on two first-time devices.
+        await tx.chatParticipant.createMany({ data: [{ chatId, userId, userType }], skipDuplicates: true });
+      }
       if (await activeSuspension(req.user, tx)) throw Object.assign(new Error('Chat posting is suspended. See Chat safety for details.'), { status: 403 });
+      if (retryMessageId) {
+        // Serialize a first send with any retry before there is a Message row to
+        // lock. The identity includes the account type, account and conversation.
+        await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${retryMessageId}, 0))`;
+        await tx.$queryRaw`SELECT id FROM "Message" WHERE id = ${retryMessageId} FOR UPDATE`;
+        const existing = await tx.message.findUnique({ where: { id: retryMessageId } });
+        if (existing) {
+          if (existing.deletedAt) throw Object.assign(new Error('This message was removed and cannot be resent with the same retry identifier.'), { status: 409 });
+          if (existing.chatId !== chatId || existing.senderId !== userId || existing.senderType !== userType || existing.content !== content || existing.messageType !== messageType || existing.attachmentUrl !== (attachmentUrl ?? null) || existing.attachmentName !== (attachmentName ?? null) || existing.attachmentSize !== (attachmentSize ?? null) || existing.sharedListId !== (messageType === 'LIST_SHARE' ? sharedListId ?? null : null)) {
+            throw Object.assign(new Error('This retry identifier was already used for a different message.'), { status: 409 });
+          }
+          return { message: existing, replayed: true };
+        }
+      }
       if (attachmentUrl) {
         const match = typeof attachmentUrl === 'string' && /^\/uploads\/chat\/([a-zA-Z0-9._-]+)$/.exec(attachmentUrl);
         if (match) await tx.$queryRaw`SELECT "filename" FROM "ChatUpload" WHERE "filename" = ${match[1]} FOR UPDATE`;
         const upload = match && await tx.chatUpload.findUnique({ where: { filename: match[1] } });
-        if (!upload || upload.uploaderId !== userId || upload.uploaderType !== userType) {
+        if (!upload || upload.pendingDeletion || upload.uploaderId !== userId || upload.uploaderType !== userType) {
           throw Object.assign(new Error('Upload your own attachment before sharing it.'), { status: 403 });
         }
       }
-    // Create message while holding the attachment ownership lock
-    return tx.message.create({
+    // Create message and chat activity atomically while holding upload ownership.
+    const created = await tx.message.create({
       data: {
+        ...(retryMessageId && { id: retryMessageId }),
         chatId,
         senderId: userId,
         senderType: userType,
@@ -417,31 +342,12 @@ export const sendMessage = async (req, res) => {
         sharedListId: messageType === 'LIST_SHARE' ? sharedListId : null
       }
     });
+    await tx.chat.update({ where: { id: chatId }, data: { lastMessageAt: created.createdAt } });
+    return { message: created, replayed: false };
+    }, { maxWait: 15000, timeout: 60000 });
 
-    });
-
-    // Update chat's lastMessageAt
-    await prisma.chat.update({
-      where: { id: chatId },
-      data: { lastMessageAt: new Date() }
-    });
-
-    // Invalidate cache for this chat's messages
-    await cacheService.invalidateMessages(chatId);
-
-    // Get sender info based on userType
-    let sender = null;
-    if (userType === 'CUSTOMER') {
-      sender = await prisma.customer.findUnique({
-        where: { id: userId },
-        select: { id: true, name: true }
-      });
-    } else if (userType === 'EMPLOYEE') {
-      sender = await prisma.empolyee.findUnique({
-        where: { id: userId },
-        select: { id: true, name: true }
-      });
-    }
+    // Authentication already loaded the current name for every account role.
+    const sender = req.user;
 
     const formattedMessage = {
       id: message.id,
@@ -457,50 +363,30 @@ export const sendMessage = async (req, res) => {
       sharedListId: message.sharedListId,
       sharedList: sharedListData,
       timestamp: message.createdAt,
-      isOwnMessage: true
+      isOwnMessage: true,
+      ...(clientMessageId !== undefined && { clientMessageId }),
     };
 
-    // Broadcast message to all users in the chat room via Socket.IO (except sender)
-    if (req.io) {
-      const senderSocketId = req.userSockets?.get(userKey(userType, userId));
-
-      // Invalidate user chats cache for all participants
-      const chatParticipants = await prisma.chatParticipant.findMany({
-        where: { chatId },
-        select: { userId: true, userType: true }
-      });
-      for (const p of chatParticipants) {
-        await cacheService.invalidateUserChats(userKey(p.userType, p.userId));
-      }
-
-      const excludedPeers = await blockedPeers(req.user);
-      const excludedRooms = excludedPeers.map(p => userRoom(p.userType, p.id));
-      const messagePayload = {
-        ...formattedMessage,
-        isOwnMessage: false
-      };
-
-      // Broadcast to chat room (for users actively viewing this chat)
-      if (senderSocketId) {
-        // Broadcast to room but exclude the sender
-        req.io.to(`chat_${chatId}`).except([...excludedRooms, senderSocketId]).emit('message_received', messagePayload);
-      } else {
-        // Fallback: broadcast to all in room (frontend will filter)
-        req.io.to(`chat_${chatId}`).except(excludedRooms).emit('message_received', messagePayload);
-      }
-
-      // Background clients receive only an invalidation hint, never private message bodies.
-      // They fetch through current REST authorization (including shop scope and blocks).
-      for (const participant of chatParticipants) {
-        if (excludedPeers.some(p => p.id === participant.userId && p.userType === participant.userType)) continue;
-        req.io.to(userRoom(participant.userType, participant.userId)).emit('chats_changed');
-      }
-    }
+    // A lost HTTP response can be retried without another visible message, event,
+    // unread count increment, or change to the conversation's activity time.
+    if (replayed) return res.status(200).json({ success: true, message: formattedMessage, replayed: true });
+    // Socket fan-out and durable-cache invalidation never delay a committed send.
+    // Clients reconcile from REST after reconnect or a missed best-effort event.
+    deferChatWork(async () => {
+      const chat = await prisma.chat.findUnique({ where: { id: chatId }, include: { participants: true } });
+      if (!chat) return;
+      const participants = await chatParticipantRows(chat, prisma);
+      await settleChatWork([
+        cacheService.invalidateMessages(chatId),
+        ...participants.map(p => cacheService.invalidateUserChats(userKey(p.userType, p.userId))),
+        broadcastChat(req.io, chatId, 'message_received', formattedMessage, { sender: req.user, includeUserRooms: true, participants }),
+      ]);
+    });
 
     res.status(201).json({ success: true, message: formattedMessage });
   } catch (error) {
-    if ([401, 403].includes(error.status)) return res.status(error.status).json({ error: error.message });
-    console.error('Message send failed');
+    if ([401, 403, 409].includes(error.status)) return res.status(error.status).json({ error: error.message });
+    securityLog.error('Message send failed', serviceError(error));
     res.status(500).json({ success: false, message: 'Failed to send message', error: error.message });
   }
 };
@@ -508,38 +394,12 @@ export const sendMessage = async (req, res) => {
 // Mark messages as read
 export const markAsRead = async (req, res) => {
   try {
-    const userId = req.user.id;
-    const userType = req.user.userType;
-    const { messageIds } = req.body;
-
-    if (!messageIds || !Array.isArray(messageIds)) {
-      return res.status(400).json({ success: false, message: 'Message IDs array is required' });
-    }
-
-    // Create read receipts for all messages
-    await Promise.all(
-      messageIds.map(messageId =>
-        prisma.messageRead.upsert({
-          where: {
-            messageId_userId_userType: {
-              messageId,
-              userId: userId,
-              userType: userType
-            }
-          },
-          create: {
-            messageId,
-            userId: userId,
-            userType: userType
-          },
-          update: {}
-        })
-      )
-    );
+    await recordChatReceipts({ user: req.user, messageIds: req.body.messageIds, kind: 'read', io: req.io, db: prisma });
 
     res.status(200).json({ success: true, message: 'Messages marked as read' });
   } catch (error) {
-    console.error('Error marking messages as read:', error);
+    if ([400, 401, 403, 404].includes(error.status)) return res.status(error.status).json({ success: false, message: error.message });
+    securityLog.error('Error marking messages as read:', error);
     res.status(500).json({ success: false, message: 'Failed to mark messages as read', error: error.message });
   }
 };
@@ -563,6 +423,8 @@ export const deleteChat = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Chat not found' });
     }
 
+    if (!(await getChatAccess(req.user, chatId))?.canRead) return res.sendStatus(403);
+
     // Check if user is a participant
     const isParticipant = chat.participants.some(
       p => p.userId === userId && p.userType === userType
@@ -577,221 +439,41 @@ export const deleteChat = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Only personal chats can be deleted' });
     }
 
-    // Delete in correct order to respect foreign key constraints
-    // 1. Delete message reads
-    await prisma.messageRead.deleteMany({
-      where: {
-        message: {
-          chatId: chatId
-        }
-      }
+    const files = await prisma.$transaction(async tx => {
+      const attachments = await tx.message.findMany({ where: { chatId }, select: { attachmentUrl: true } });
+      const filenames = [...new Set(attachments.map(m => attachmentFilename(m.attachmentUrl)).filter(Boolean))].sort();
+      await tx.chat.delete({ where: { id: chatId } }); // messages, receipts and participants cascade atomically
+      return queueUnusedAttachments(tx, filenames);
+    }, { maxWait: 15000, timeout: 60000 });
+    deferChatWork(async () => {
+      req.io?.to(chat.participants.map(p => userRoom(p.userType, p.userId))).emit('chat_deleted', { chatId });
+      await settleChatWork(files.map(filename => deleteQueuedAttachment(filename)));
     });
-
-    // 2. Delete messages
-    await prisma.message.deleteMany({
-      where: { chatId: chatId }
-    });
-
-    // 3. Delete participants
-    await prisma.chatParticipant.deleteMany({
-      where: { chatId: chatId }
-    });
-
-    // 4. Delete the chat
-    await prisma.chat.delete({
-      where: { id: chatId }
-    });
-
-    // Notify other participants via Socket.IO
-    req.io.to(`chat_${chatId}`).emit('chat_deleted', { chatId });
 
     res.status(200).json({ success: true, message: 'Chat deleted successfully' });
   } catch (error) {
-    console.error('Error deleting chat:', error);
+    securityLog.error('Error deleting chat:', error);
     res.status(500).json({ success: false, message: 'Failed to delete chat', error: error.message });
   }
 };
 
-// Get all users for starting new chats (with optional search by name or email)
+// Search verified retail owners and active retail employees across shops.
 export const getAllUsers = async (req, res) => {
   try {
-    const currentUserId = req.user.id;
-    const currentUserType = req.user.userType;
-    const { search } = req.query; // Get search query parameter
-
-    // Build search filter for name and email
-    const searchFilter = search ? {
-      OR: [
-        { name: { contains: search, mode: 'insensitive' } }
-      ]
-    } : {};
-
-    let allUsers = [];
-
-    // EMPLOYEE: shop employees see the owner of the shop they are ACTIVE in;
-    // company staff additionally see customers for support chats.
-    if (currentUserType === 'EMPLOYEE') {
-      const shopId = req.user.shopId;
-      const customerFilter = req.user.company
-        ? searchFilter
-        : shopId ? { supermarketOwnerships: { some: { shopId } }, ...searchFilter } : null;
-
-      const customers = customerFilter ? await prisma.customer.findMany({
-        where: customerFilter,
-        select: {
-          id: true,
-          name: true,
-
-          userType: true
-        }
-      }) : [];
-
-      allUsers = customers.map(user => ({
-        id: user.id.toString(),
-        name: user.name || 'Shop Owner',
-        phone: '',
-        userType: 'CUSTOMER',
-        isOnline: false
-      }));
-
-    } else if (currentUserType === 'ADMIN') {
-      // Admin can see employees in their shop
-      const admin = await prisma.admin.findUnique({
-        where: { id: currentUserId },
-        select: { shopId: true }
-      });
-
-      // Get employees in the same shop
-      const employees = await prisma.empolyee.findMany({
-        where: {
-          shopId: admin?.shopId,
-          ...searchFilter
-        },
-        select: {
-          id: true,
-          name: true,
-
-          userType: true
-        }
-      });
-
-      // Get other admins in the same shop
-      const admins = await prisma.admin.findMany({
-        where: {
-          shopId: admin?.shopId,
-          NOT: { id: currentUserId },
-          ...searchFilter
-        },
-        select: {
-          id: true,
-          name: true,
-
-          userType: true
-        }
-      });
-
-      allUsers = [
-        ...employees.map(user => ({
-          id: user.id.toString(),
-          name: user.name,
-          phone: '',
-          userType: 'EMPLOYEE',
-          isOnline: false
-        })),
-        ...admins.map(user => ({
-          id: user.id.toString(),
-          name: user.name || 'Admin',
-          phone: '',
-          userType: 'ADMIN',
-          isOnline: false
-        }))
-      ];
-
-    } else {
-      // CUSTOMER - only see employees from their own shop + other customers
-
-      // First get the customer's shop
-      const customer = { shopId: req.user.shopId };
-
-      const customerShopId = customer?.shopId;
-
-      // Other customers (for common chat)
-      const customers = await prisma.customer.findMany({
-        where: {
-          NOT: { id: currentUserId },
-          ...searchFilter
-        },
-        select: {
-          id: true,
-          name: true,
-
-          userType: true
-        }
-      });
-
-      // Employees ONLY from the customer's shop
-      const employees = customerShopId ? await prisma.empolyee.findMany({
-        where: {
-          shopMemberships: { some: { shopId: customerShopId, status: 'ACTIVE' } },
-          ...searchFilter
-        },
-        select: {
-          id: true,
-          name: true,
-
-          userType: true
-        }
-      }) : [];
-
-      const admins = await prisma.admin.findMany({
-        where: searchFilter,
-        select: {
-          id: true,
-          name: true,
-
-          userType: true
-        }
-      });
-
-      allUsers = [
-        ...customers.map(user => ({
-          id: user.id.toString(),
-          name: user.name,
-          phone: '',
-          userType: 'CUSTOMER',
-          isOnline: false
-        })),
-        ...employees.map(user => ({
-          id: user.id.toString(),
-          name: user.name,
-          phone: '',
-          userType: 'EMPLOYEE',
-          isOnline: false
-        })),
-        ...admins.map(user => ({
-          id: user.id.toString(),
-          name: user.name || 'Admin',
-          phone: '',
-          userType: 'ADMIN',
-          isOnline: false
-        }))
-      ];
-    }
-
+    const shop = await selectedChatShop(req.user, prisma);
+    if (!shop) return res.status(403).json({ error: 'Select a shop you are authorized to use.' });
     const peers = await blockedPeers(req.user);
-    allUsers = allUsers.filter(u => !peers.some(p => p.id === Number(u.id) && p.userType === u.userType));
-    res.status(200).json({
-      success: true,
-      users: allUsers
-    });
-
+    const rows = (await retailChatRoster(prisma)).filter(p => chatIdentity(p) !== chatIdentity(req.user) && !peers.some(b => b.id === p.userId && b.userType === p.userType));
+    const people = [...(await hydrateChatPeople(rows, prisma)).values()];
+    const term = chatSearchTerm(req.query.search).toLocaleLowerCase();
+    const users = people.filter(p => !term || (p.name || '').toLocaleLowerCase().includes(term))
+      .sort((a,b) => (a.name || '').localeCompare(b.name || '') || chatIdentity(a).localeCompare(chatIdentity(b)))
+      .map(p => ({ id: String(p.id), name: p.name || 'Teammate', userType: p.userType, phone: '' }));
+    res.json({ success: true, users });
   } catch (error) {
-    console.error('❌ getAllUsers error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get users',
-      error: error.message
-    });
+    if (error.status === 400) return res.status(400).json({ error: error.message });
+    securityLog.error('Shop contact lookup failed', serviceError(error));
+    res.status(503).json({ error: 'Could not load retail shop contacts.' });
   }
 };
 // Delete a message
@@ -811,42 +493,48 @@ export const deleteMessage = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Message not found' });
     }
 
+    if (!(await getChatAccess(req.user, message.chatId))?.canRead) return res.sendStatus(403);
+
     // Check if user is the sender of the message
     if (message.senderId !== userId || message.senderType !== userType) {
       return res.status(403).json({ success: false, message: 'You can only delete your own messages' });
     }
 
     // Legacy URLs are not trusted paths or proof of upload ownership.
-    await prisma.$transaction(async tx => {
-      await tx.message.delete({ where: { id: messageId } });
-      const match = typeof message.attachmentUrl === 'string' && /^\/uploads\/chat\/([a-zA-Z0-9._-]+)$/.exec(message.attachmentUrl);
-      if (!match) return;
-      await tx.$queryRaw`SELECT "filename" FROM "ChatUpload" WHERE "filename" = ${match[1]} FOR UPDATE`;
-      const upload = await tx.chatUpload.findUnique({ where: { filename: match[1] } });
-      if (!upload || upload.uploaderId !== userId || upload.uploaderType !== userType) return;
-      if (await tx.message.count({ where: { attachmentUrl: message.attachmentUrl } })) return;
-      try {
-        await fs.promises.unlink(path.resolve('uploads/chat', match[1])).catch(error => { if (error.code !== 'ENOENT') throw error; });
-        // Future sends cannot attach a file deleted during cleanup.
-        await tx.chatUpload.delete({ where: { filename: match[1] } });
-      } catch {
-        // Keep the ownership row for orphan-maintenance retry, without rolling back the user's message deletion.
-        console.warn('Chat attachment cleanup deferred');
+    const cleanupFilename = await prisma.$transaction(async tx => {
+      if (messageId.startsWith(IMAGE_RETRY_PREFIX) || messageId.startsWith(MESSAGE_RETRY_PREFIX)) {
+        // Keep only the retry identity after author deletion. Without this
+        // tombstone, a delayed retry could recreate a photo using a shared upload.
+        await tx.$queryRaw`SELECT id FROM "Message" WHERE id = ${messageId} FOR UPDATE`;
+        await tx.message.update({ where: { id: messageId }, data: {
+          deletedAt: message.deletedAt ?? new Date(), content: '', attachmentUrl: null,
+          attachmentName: null, attachmentSize: null, sharedListId: null,
+        } });
+        await tx.messageRead.deleteMany({ where: { messageId } });
+        await tx.messageDelivery.deleteMany({ where: { messageId } });
+      } else {
+        await tx.message.delete({ where: { id: messageId } });
       }
-    });
+      const filename = attachmentFilename(message.attachmentUrl);
+      if (!filename) return;
+      await tx.$queryRaw`SELECT "filename" FROM "ChatUpload" WHERE "filename" = ${filename} FOR UPDATE`;
+      const upload = await tx.chatUpload.findUnique({ where: { filename } });
+      if (!upload || upload.uploaderId !== userId || upload.uploaderType !== userType) return;
+      return await queueUnusedAttachment(tx, filename) ? filename : undefined;
+    }, { maxWait: 15000, timeout: 60000 });
+    if (cleanupFilename) deferChatWork(() => deleteQueuedAttachment(cleanupFilename));
 
-    // Broadcast deletion to chat room via Socket.IO
-    if (req.io) {
-      req.io.to(`chat_${message.chatId}`).emit('message_deleted', {
+    // Notify inboxes and open threads after commit without making a successfully
+    // deleted message appear to fail when the realtime transport is unavailable.
+    if (req.io) deferChatWork(() => broadcastChat(req.io, message.chatId, 'message_deleted', {
         messageId,
         chatId: message.chatId
-      });
-    }
+      }, { sender: req.user, includeUserRooms: true }));
 
     res.status(200).json({ success: true, message: 'Message deleted successfully' });
 
   } catch (error) {
-    console.error('❌ deleteMessage error:', error);
+    securityLog.error('❌ deleteMessage error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to delete message',

@@ -1,0 +1,104 @@
+name: Security verification
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan working tree and reachable history without printing secrets
+        run: python3 scripts/security_scan.py --history > secret-scan.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: redacted-secret-scan
+          path: secret-scan.json
+          retention-days: 14
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm audit --audit-level=high --json > dependency-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-audit
+          path: dependency-audit.json
+          retention-days: 14
+  codeql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: paymi_test
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: paymi_security_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U paymi_test -d paymi_security_test'
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd 'redis-cli ping'
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      NODE_ENV: test
+      TEST_DATABASE_URL: postgresql://paymi_test:test-only@127.0.0.1:5432/paymi_security_test
+      DATABASE_URL: postgresql://paymi_test:test-only@127.0.0.1:5432/paymi_security_test
+      REDIS_URL: redis://127.0.0.1:6379
+      TEST_REDIS_URL: redis://127.0.0.1:6379
+      JWT_SECRET: fixture-only-ci-signing-secret-not-for-production
+      SECURITY_AUDIT_KEY: fixture-only-ci-audit-key-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Discard deployment credentials from this disposable checkout
+        run: find . -maxdepth 1 -type f \( -name '.env' -o -name '.env.*' -o -name 'env' \) ! -name '.env.example' -delete
+      - run: npm ci --ignore-scripts
+      - run: npx prisma generate
+      - run: npm test

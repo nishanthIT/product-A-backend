@@ -38,7 +38,7 @@ router.post('/report', authRateLimit('content-report', { limit: 20 }), async (re
         if (existing) return existing;
         const current = await tx.message.findUnique({ where: { id: messageId } });
         if (!current || current.deletedAt) return null;
-        captured = await captureEvidence(current);
+        captured = await captureEvidence(current, { db: tx });
         return tx.contentReport.create({ data: { messageId, reporterId: req.user.id, reporterType: req.user.userType, reason, explanation: explanation?.trim() || null, reportedUserId: current.senderId, reportedUserType: current.senderType, chatId: current.chatId, ...captured } });
       }, { timeout: 30000 });
     } catch (error) {

@@ -1,6 +1,9 @@
+import { safeLogger } from './safeLogger.js';
+const securityLog = safeLogger('services/membershipService.js');
 import { PrismaClient } from '@prisma/client';
 import cacheService from './cacheService.js';
 import { disconnectUser, userKey } from './realtime.js';
+import { notifyShopTeamChanged } from './chatMembershipSync.js';
 
 const prisma = new PrismaClient();
 
@@ -13,7 +16,7 @@ export async function invalidateEmployeeCaches(employeeId) {
   await Promise.all([
     cacheService.invalidateUserChats(userKey('EMPLOYEE', employeeId)),
     cacheService.invalidateUserContacts(userKey('EMPLOYEE', employeeId)),
-  ]).catch((err) => console.warn('Cache invalidation failed:', err.message));
+  ]).catch((err) => securityLog.warn('Cache invalidation failed:', err.message));
 }
 
 /** Mirrors the ACTIVE shop membership into the legacy Empolyee.shopId column. */
@@ -36,7 +39,7 @@ function groupChatOps(db, groupChatId, employeeId, join) {
   if (!groupChatId) return [];
   const key = { chatId: groupChatId, userId: employeeId, userType: 'EMPLOYEE' };
   return join
-    ? [db.chatParticipant.upsert({ where: { chatId_userId_userType: key }, create: { ...key, isAdmin: false }, update: {} })]
+    ? [db.chatParticipant.createMany({ data: [{ ...key, isAdmin: false }], skipDuplicates: true })]
     : [db.chatParticipant.deleteMany({ where: key })];
 }
 
@@ -73,6 +76,7 @@ export async function setShopMembershipStatus(membershipId, status, db = prisma)
 
   await invalidateEmployeeCaches(updated.employeeId);
   if (status !== 'ACTIVE') disconnectUser('EMPLOYEE', updated.employeeId);
+  await notifyShopTeamChanged(updated.shopId, updated.employeeId, db);
   return updated;
 }
 

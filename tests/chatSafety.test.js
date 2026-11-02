@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { setTimeout } from 'node:timers/promises';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
-import { getPrisma, resetDatabase, seedBase, startApp } from './helpers/harness.js';
+import { getPrisma, resetDatabase, seedBase, seedSharedChatShop, startApp } from './helpers/harness.js';
 let db, app, seed, a, b, admin, group, direct, message;
 before(async () => {
-  await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); app = await startApp();
+  await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); group = await seedSharedChatShop(db, seed); app = await startApp();
   a = await app.login(seed.a.owner.email, seed.password); b = await app.login(seed.b.owner.email, seed.password); admin = await app.login(seed.admin.email, seed.password);
-  group = await db.chat.create({ data: { type: 'GROUP', name: 'ALL Chat' } });
-  direct = await db.chat.create({ data: { type: 'PERSONAL', participants: { create: [{ userId: seed.a.owner.id, userType: 'CUSTOMER' }, { userId: seed.b.owner.id, userType: 'CUSTOMER' }] } } });
+
+  direct = await db.chat.create({ data: { type: 'PERSONAL', shopId: group.shopId, participants: { create: [{ userId: seed.a.owner.id, userType: 'CUSTOMER' }, { userId: seed.b.owner.id, userType: 'CUSTOMER' }] } } });
 });
 after(async () => { await app?.close(); await db?.$disconnect(); });
 const send = (token, chatId, content, extra = {}) => app.request('POST', '/chat/message', { token, body: { chatId, content, ...extra } });
@@ -71,7 +71,7 @@ test('chat attachment sharing requires uploader ownership and private file reque
   assert.equal((await send(a.token, group.id, 'stolen', { attachmentUrl: '/uploads/chat/fixture.jpg' })).status, 403);
   assert.equal((await send(a.token, group.id, 'remote', { attachmentUrl: 'https://unrelated.test/x.jpg' })).status, 403);
   assert.equal((await app.request('GET', '/uploads/chat/fixture.jpg')).status, 401);
-  await send(b.token, seed.b.shop.groupChatId, 'private attachment', { attachmentUrl: '/uploads/chat/fixture.jpg' });
+  assert.equal((await app.request('POST', '/chat/message', { token: b.token, shopId: seed.b.shop.id, body: { chatId: seed.b.shop.groupChatId, content: 'private attachment', attachmentUrl: '/uploads/chat/fixture.jpg' } })).status, 201);
   assert.equal((await app.request('GET', '/uploads/chat/fixture.jpg', { token: a.token })).status, 404);
 });
 
@@ -101,6 +101,7 @@ test('deleting a legacy message cannot unlink arbitrary files or another message
     await app.request('DELETE', `/chat/message/${first.id}`, { token: a.token });
     assert.equal(await fs.readFile(attachment, 'utf8'), 'shared');
     await app.request('DELETE', `/chat/message/${second.id}`, { token: a.token });
+    await (await import('../src/services/chatBroadcast.js')).drainChatWork();
     await assert.rejects(fs.stat(attachment), { code: 'ENOENT' });
   } finally {
     await fs.unlink(protectedFile).catch(() => {});

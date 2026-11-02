@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/addShop.js');
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 
@@ -15,7 +17,7 @@
 //     });
 //     res.status(201).json(newShop);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Something went wrong" });
 //   }
 // };
@@ -30,7 +32,7 @@
 //       mobile,
 //     };
 
-//     console.log(name, address, mobile);
+//     securityLog.log(name, address, mobile);
 
 //     const updatedShop = await prisma.shop.update({
 //       where: {
@@ -38,11 +40,11 @@
 //       },
 //       data: shop,
 //     });
-//     console.log(name, address, mobile);
+//     securityLog.log(name, address, mobile);
 
 //     res.status(200).json(updatedShop);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Something went wrong" });
 //   }
 // };
@@ -72,7 +74,7 @@ const addShop = async (req, res) => {
     });
     res.status(201).json(newShop);
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Something went wrong" });
   }
 };
@@ -87,7 +89,7 @@ const addShop = async (req, res) => {
 //       mobile,
 //     };
 
-//     console.log(name, address, mobile);
+//     securityLog.log(name, address, mobile);
 
 //     const updatedShop = await prisma.shop.update({
 //       where: {
@@ -95,11 +97,11 @@ const addShop = async (req, res) => {
 //       },
 //       data: shop,
 //     });
-//     console.log(name, address, mobile);
+//     securityLog.log(name, address, mobile);
 
 //     res.status(200).json(updatedShop);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Something went wrong" });
 //   }
 // };
@@ -117,7 +119,7 @@ const editShop = async (req, res) => {
 
     res.status(200).json(updatedShop);
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Something went wrong" });
   }
 };
@@ -141,7 +143,7 @@ const getShopById = async (req, res) => {
 
     res.status(200).json(shop);
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Something went wrong" });
   }
 };
@@ -172,7 +174,7 @@ const getAllShops = async (req, res) => {
 
     res.status(200).json(shopsWithProductCount);
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Something went wrong" });
   }
 };
@@ -194,7 +196,7 @@ const deleteShop = async (req, res) => {
 
     res.status(200).json(deletedShop);
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Something went wrong" });
   }
 };

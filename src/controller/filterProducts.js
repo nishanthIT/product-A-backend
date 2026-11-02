@@ -1,3 +1,6 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/filterProducts.js');
+import { boundedPage } from '../services/cataloguePresentation.js';
 
 
 
@@ -48,7 +51,7 @@
 
 //     res.status(200).json(serializedProducts);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Something went wrong" });
 //   }
 // };
@@ -104,7 +107,7 @@ const getProductFilters = async (req, res) => {
       aisles
     });
   } catch (error) {
-    console.error("Error getting product filters:", error);
+    securityLog.error("Error getting product filters:", error);
     res.status(500).json({ error: "Failed to get product filters" });
   }
 };
@@ -112,7 +115,6 @@ const getProductFilters = async (req, res) => {
 // Controller for filtering products with pagination
 const filterProducts = async (req, res) => {
   try {
-    console.log("Filter Products Controller - Request Query:", req.query);
     
     const { 
       search, 
@@ -121,17 +123,17 @@ const filterProducts = async (req, res) => {
       withoutRrp, 
       withoutImage,
       category,
-      page = "10",
+      page = "1",
      // limit = "100"
     } = req.query;
 const limit = 100
 
     // Convert page and limit to numbers
-    const pageNum = parseInt(page);
+    const pageNum = boundedPage(page);
+    if (pageNum === null) return res.status(400).json({ error: 'Invalid page' });
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
-    console.log("Pagination:", { pageNum, limitNum, skip });
 
     // Build the where clause based on filters
     const whereClause = {};
@@ -180,7 +182,7 @@ const limit = 100
           equals: null,
         };
       } catch (error) {
-        console.error("Error with isEmpty condition, trying alternative:", error);
+        securityLog.error("Error with isEmpty condition, trying alternative:", error);
         // Option 2: If images is a string field or URL
         whereClause.images = {
           equals: null,
@@ -188,7 +190,6 @@ const limit = 100
       }
     }
 
-    // console.log("Where Clause:", JSON.stringify(whereClause));
 
     // Search results are paginated in relevance order; other listings stay alphabetical.
     let rankedPageIds = null;
@@ -208,9 +209,8 @@ const limit = 100
       totalCount = rankedTotal ?? await prisma.product.count({
         where: whereClause
       });
-      console.log("Total count:", totalCount);
     } catch (countError) {
-      console.error("Error counting products:", countError);
+      securityLog.error("Error counting products:", countError);
       totalCount = 0;
     }
 
@@ -236,24 +236,10 @@ const limit = 100
           }
         });
       }
-      console.log(`Found ${products.length} products from DB`);
     } catch (findError) {
-      console.error("Error finding products:", findError);
+      securityLog.error("Error finding products:", findError);
       
-      // Try a simpler query if the complex one fails
-      try {
-        console.log("Attempting simpler query...");
-        products = await prisma.product.findMany({
-          take: limitNum,
-          include: { packagingConfigurations: true }
-        });
-      } catch (fallbackError) {
-        console.error("Even simple query failed:", fallbackError);
-        return res.status(500).json({ 
-          error: "Database query failed", 
-          details: findError.message 
-        });
-      }
+      return res.status(503).json({ error: 'Product lookup is temporarily unavailable' });
     }
 
     // Serialize BigInt fields
@@ -270,10 +256,10 @@ const limit = 100
       }
     });
   } catch (error) {
-    console.error("Uncaught error in filterProducts:", error);
+    securityLog.error("Uncaught error in filterProducts:", error);
     res.status(500).json({ 
       error: "Something went wrong",
-      message: error.message
+      message: "Please retry later"
     });
   }
 };

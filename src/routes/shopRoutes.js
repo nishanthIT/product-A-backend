@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/shopRoutes.js');
 import supermarketRoutes from './supermarketRoutes.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
@@ -49,7 +51,7 @@ router.get('/my-shop', authenticateToken, async (req, res) => {
 
     res.json({ success: true, shop });
   } catch (error) {
-    console.error('Error fetching shop:', error);
+    securityLog.error('Error fetching shop:', error);
     res.status(500).json({ error: 'Failed to fetch shop info' });
   }
 });
@@ -121,7 +123,7 @@ router.get('/group-chat', authenticateToken, async (req, res) => {
     });
     res.json({ success: true, chat, shopName: shop.name });
   } catch (error) {
-    console.error('Error fetching group chat:', error);
+    securityLog.error('Error fetching group chat:', error);
     res.status(500).json({ error: 'Failed to fetch group chat' });
   }
 });
@@ -166,7 +168,7 @@ router.get('/employees', authenticateToken, requireCustomer, async (req, res) =>
 
     res.json({ success: true, employees });
   } catch (error) {
-    console.error('Error fetching shop employees:', error);
+    securityLog.error('Error fetching shop employees:', error);
     res.status(500).json({ error: 'Failed to fetch employees' });
   }
 });
@@ -221,7 +223,7 @@ router.get('/all-lists', authenticateToken, requireCustomer, async (req, res) =>
       }
     });
   } catch (error) {
-    console.error('Error fetching shop lists:', error);
+    securityLog.error('Error fetching shop lists:', error);
     res.status(500).json({ error: 'Failed to fetch lists' });
   }
 });
@@ -300,7 +302,7 @@ router.post('/copy-list/:listId', authenticateToken, requireCustomer, async (req
       alreadyTracked: !!existingTrack,
     });
   } catch (error) {
-    console.error('Error copying list:', error);
+    securityLog.error('Error copying list:', error);
     res.status(500).json({ error: 'Failed to copy list' });
   }
 });
@@ -381,7 +383,7 @@ router.post('/employee-copy-list/:listId', authenticateToken, requireEmployee, r
       alreadyTracked: !!existingTrack,
     });
   } catch (error) {
-    console.error('Error copying list for employee:', error);
+    securityLog.error('Error copying list for employee:', error);
     res.status(500).json({ error: 'Failed to copy list' });
   }
 });
@@ -402,7 +404,7 @@ router.get('/available', authenticateToken, requireCustomer, async (req, res) =>
 
     res.json({ success: true, shops });
   } catch (error) {
-    console.error('Error fetching shops:', error);
+    securityLog.error('Error fetching shops:', error);
     res.status(500).json({ error: 'Failed to fetch shops' });
   }
 });

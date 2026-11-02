@@ -1,7 +1,9 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/promotions.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated } from '../middleware/authware.js';
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -53,6 +55,7 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({
+  allowedTypes: file => file.fieldname === 'pdf' ? ['pdf'] : ['image'],
   storage,
   limits: {
     fileSize: 20 * 1024 * 1024, // 20MB limit for PDFs
@@ -200,7 +203,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     // Debug: Log first promotion to verify fields
     if (enrichedPromotions.length > 0) {
-      console.log('First promotion fields:', {
+      securityLog.log('First promotion fields:', {
         id: enrichedPromotions[0].id,
         title: enrichedPromotions[0].title,
         imageUrl: enrichedPromotions[0].imageUrl,
@@ -211,7 +214,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ promotions: enrichedPromotions });
   } catch (error) {
-    console.error('Error fetching promotions:', error);
+    securityLog.error('Error fetching promotions:', error);
     res.status(500).json({ error: 'Failed to fetch promotions' });
   }
 });
@@ -252,7 +255,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
     if (req.user.userType !== 'ADMIN' && (!promotion.isActive || +promotion.startDate > Date.now() || (promotion.endDate && +promotion.endDate <= Date.now()) || !await prisma.shop.findFirst({ where: { id: promotion.shopId, shopType: 'WHOLESALE' } }))) return res.sendStatus(404);
     res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
-    console.error('Error fetching promotion:', error);
+    securityLog.error('Error fetching promotion:', error);
     res.status(500).json({ error: 'Failed to fetch promotion' });
   }
 });
@@ -261,7 +264,7 @@ router.get('/:id', authenticateToken, async (req, res) => {
 const handleUpload = (req, res, next) => {
   uploadFields(req, res, (err) => {
     if (err) {
-      console.error('Multer error:', err);
+      securityLog.error('Multer error:', err);
       return res.status(400).json({ error: err.message || 'File upload error' });
     }
     next();
@@ -271,8 +274,7 @@ const handleUpload = (req, res, next) => {
 // POST /api/promotions - Create new promotion
 router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res) => {
   try {
-    console.log('Creating promotion - Body:', req.body);
-    console.log('Creating promotion - Files:', req.files);
+
     
     const { title, description, shopId, productIds } = req.body;
     const files = req.files;
@@ -378,9 +380,9 @@ router.post('/', authenticateToken, requireAdmin, handleUpload, async (req, res)
 
     res.status(201).json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
-    console.error('Error creating promotion:', error);
-    console.error('Error details:', error.message);
-    console.error('Error stack:', error.stack);
+    securityLog.error('Error creating promotion:', error);
+    securityLog.error('Error details:', error.message);
+    securityLog.error('Error stack:', error.stack);
     res.status(500).json({ 
       error: 'Failed to create promotion',
       details: error.message 
@@ -421,7 +423,7 @@ router.put('/:id/toggle', authenticateToken, requireAdmin, async (req, res) => {
 
     res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
-    console.error('Error toggling promotion:', error);
+    securityLog.error('Error toggling promotion:', error);
     res.status(500).json({ error: 'Failed to update promotion' });
   }
 });
@@ -485,7 +487,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
 
     res.json({ promotion: normalizePromotionAssets(promotion) });
   } catch (error) {
-    console.error('Error updating promotion:', error);
+    securityLog.error('Error updating promotion:', error);
     res.status(500).json({ error: 'Failed to update promotion' });
   }
 });
@@ -520,7 +522,7 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
 
     res.json({ message: 'Promotion deleted successfully' });
   } catch (error) {
-    console.error('Error deleting promotion:', error);
+    securityLog.error('Error deleting promotion:', error);
     res.status(500).json({ error: 'Failed to delete promotion' });
   }
 });

@@ -1,0 +1,73 @@
+✔ registration/recovery responses and resend cooldown do not reveal whether an address exists (1129.905929ms)
+✔ account restrictions prevent new sessions, authenticated me and socket connections until expiry (70.200473ms)
+✔ cookie-only socket restoration authenticates the correct user; explicit bad tokens cannot fall back (52.495277ms)
+✔ durable OTP attempts and consumption remain atomic across independent application stores with Redis unavailable (196.861894ms)
+✔ reset-code races change the password once and revoke prior sessions (523.00868ms)
+✔ registration retries remain idempotent while a valid proof cannot create multiple accounts (1781.575061ms)
+Request failed {
+  name: 'Error',
+  code: 'INVALID_UPLOAD',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ authenticated image routes reject active content and traversal, and private incident images stay tenant scoped (113.620021ms)
+✔ one-time reset proof is consumed atomically across simultaneous verifiers (1.347528ms)
+✔ concurrent wrong OTP attempts cannot lose increments or revive a consumed proof (1.691075ms)
+✔ OTP expiry, flow separation and resend reservation are enforced (0.344404ms)
+✔ rotating IP addresses cannot bypass account auth quota and no email is stored (0.639358ms)
+✔ rotating email addresses cannot bypass IP quota; shared IP receives generous allowance (2.245486ms)
+✔ sustained blocked requests create temporary auth restriction, storage failures fail closed (0.335995ms)
+✔ account throttle backoff progresses while blocked-request logging is sampled (0.143062ms)
+✔ new JWT claims bind issuer/audience and legacy compatibility can be disabled (0.231656ms)
+✔ owners and active employees see only the selected shop roster; company roles confer no chat access (1310.525414ms)
+✔ both employee devices receive background refresh without participant rows; unauthorized accounts receive nothing (391.159454ms)
+✔ concurrent first posts from two devices join once and preserve both messages (144.607572ms)
+✔ create, assign, deactivate, reactivate and remove refresh owners and active members without leaking to another shop (1077.312731ms)
+✔ shop diagnostics report legacy and inactive relationships without modifying data or exposing personal fields (50.960364ms)
+✔ camera JPEG multipart uploads send and download for owners and employees; outsiders and removed members cannot fetch them (651.725628ms)
+✔ photo retries after a lost response create one message and one event without changing newer chat activity (467.366278ms)
+Chat upload failed {
+  name: 'ServiceUnavailable',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ uncertain upload keeps its descriptor until delayed cleanup can remove a late object (1093.423399ms)
+Chat attachment deletion will retry {
+  name: 'AccessDenied',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ real S3 transport preserves private upload/send/download and shared-file retention, then retries provider deletion (277.036798ms)
+✔ logout durably revokes only that session and disconnects its socket; retries succeed (923.38041ms)
+✔ password recovery invalidates customer and admin tokens and prevents OTP reuse (1082.496374ms)
+✔ legacy version-zero tokens remain valid until revocation, and bearer wins over cookie (14.744838ms)
+✔ an expired legacy trial does not limit the free release or spend saved points (80.667655ms)
+✔ explicit credentials cannot authenticate as the previous cookie account (1.020256ms)
+✔ missing and known fallback signing secrets fail closed (0.526726ms)
+✔ production cookies require TLS and resist cross-site requests (0.848347ms)
+✔ uploaded raster bytes are decoded and re-encoded; names and MIME cannot authorize active content (21.520566ms)
+✔ truncated images, decompression bombs, oversize files and documents in image fields are rejected (250.740701ms)
+✔ text documents require valid text and generated image paths reject traversal (0.667846ms)
+✔ multipart validation occurs before disk write and accepted filenames are random safe extensions (30.218192ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15705.197153

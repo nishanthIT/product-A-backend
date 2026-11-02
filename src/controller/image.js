@@ -1,43 +1,5 @@
-// import path from 'path';
-// import fs from 'fs';
-// import { fileURLToPath } from 'url';
-
-// // Get the directory name in ESM
-// const __filename = fileURLToPath(import.meta.url);
-// const __dirname = path.dirname(__filename);
-
-// const IMAGE_DIRECTORY = process.env.IMAGE_DIRECTORY || path.join(__dirname, 'images');
-
-// const image = async (req, res) => {
-//   const { barcode } = req.params;
-  
-//   // Validate barcode to prevent directory traversal attacks
-//   if (!barcode || /[\/\\]/.test(barcode)) {
-//     return res.status(400).send('Invalid barcode format');
-//   }
-  
-//   const extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-//   let imagePath = null;
-  
-//   for (const ext of extensions) {
-//     const testPath = path.join(IMAGE_DIRECTORY, `${barcode}${ext}`);
-//     if (fs.existsSync(testPath)) {
-//       imagePath = testPath;
-//       break;
-//     }
-//   }
-//   console.log(`Image ${imagePath} found for barcode: ${barcode}`);
-//   if (!imagePath) {
-//     console.log(`Image not found for barcode: ${barcode}`);
-//     return res.status(404).send('Image not found');
-//   }
-  
-//   res.sendFile(imagePath);
-// };
-
-// export { image };
-
-
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/image.js');
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -50,66 +12,20 @@ const PROJECT_ROOT = path.resolve(__dirname, '../..'); // Adjust based on where 
 // Set image directory to the 'images' folder at project root
 const IMAGE_DIRECTORY = path.join(PROJECT_ROOT, 'images');
 
-console.log(`Image controller initialized`);
-console.log(`Using image directory: ${IMAGE_DIRECTORY}`);
+securityLog.log(`Image controller initialized`);
+securityLog.log(`Using image directory: ${IMAGE_DIRECTORY}`);
 
-const image = async (req, res) => {
+const image = async (req, res, next) => {
   const { barcode } = req.params;
-  
-  console.log(`Received image request for barcode: ${barcode}`);
-  
-  // Validate barcode to prevent directory traversal attacks
-  if (!barcode || /[\/\\]/.test(barcode)) {
-    console.log(`Invalid barcode format: ${barcode}`);
-    return res.status(400).send('Invalid barcode format');
-  }
-  
-  const extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-  let imagePath = null;
-  
-  // List first few files in the directory for debugging
+  if (typeof barcode !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(barcode)) return res.status(400).send('Invalid barcode format');
   try {
-    const files = fs.readdirSync(IMAGE_DIRECTORY);
-    console.log(`Images directory contains ${files.length} files. First few: ${files.slice(0, 5).join(', ')}`);
-  } catch (err) {
-    console.error(`Error reading images directory: ${err.message}`);
-    return res.status(500).send('Server configuration error');
-  }
-  
-  // Try each extension
-  for (const ext of extensions) {
-    const testPath = path.join(IMAGE_DIRECTORY, `${barcode}${ext}`);
-    console.log(`Looking for: ${testPath}`);
-    
-    if (fs.existsSync(testPath)) {
-      imagePath = testPath;
-      console.log(`Found image at: ${imagePath}`);
-      break;
+    for (const extension of ['.jpg', '.jpeg', '.png', '.gif', '.webp']) {
+      const candidate = path.join(IMAGE_DIRECTORY, `${barcode}${extension}`);
+      try { await fs.promises.access(candidate); } catch { continue; }
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      return res.sendFile(candidate, error => { if (error) next(error); });
     }
-  }
-  
-  if (!imagePath) {
-    console.log(`No image found for barcode: ${barcode}`);
-    return res.status(404).send('Image not found');
-  }
-  
-  // Set cache-control headers to prevent caching (so updated images are shown immediately)
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-  
-  // Send the file with error handling
-  res.sendFile(imagePath, (err) => {
-    if (err) {
-      console.error(`Error sending file: ${err.message}`);
-      // Don't attempt to send another response if headers already sent
-      if (!res.headersSent) {
-        res.status(500).send('Error serving image');
-      }
-    } else {
-      console.log(`Successfully served image for barcode: ${barcode}`);
-    }
-  });
+    return res.sendStatus(404);
+  } catch (error) { next(error); }
 };
-
 export { image };

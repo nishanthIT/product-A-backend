@@ -1,0 +1,27 @@
+{
+  "migration": "20261026090000_chat_delivery_retention_storage",
+  "checksum": "b89d718f21c09d4787b67e0b58d840950beea7190391d16f35d547ae941665ce",
+  "mode": "dry-run",
+  "committed": false,
+  "pendingMigrations": [
+    "20261017210000_packaging_without_outer_barcode",
+    "20261026090000_chat_delivery_retention_storage"
+  ],
+  "before": {
+    "Chat": 37,
+    "Message": 68,
+    "ChatParticipant": 83,
+    "ChatUpload": 0
+  },
+  "planned": {
+    "nullableUploadMetadataColumns": 6,
+    "uploadDeletionBarrier": true,
+    "newTables": [
+      "MessageDelivery",
+      "ChatRetentionRun",
+      "ChatAttachmentDeletionJob"
+    ],
+    "messagesToDelete": 0
+  },
+  "status": "ready"
+}

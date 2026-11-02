@@ -1,8 +1,10 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/incidentRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
 import { SHOP_FEATURES } from '../services/accessControl.js';
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -51,6 +53,7 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({
+  allowedTypes: ['image', 'video'],
   storage,
   limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
@@ -151,7 +154,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, logs: logsWithUsers });
   } catch (error) {
-    console.error('Error fetching incident logs:', error);
+    securityLog.error('Error fetching incident logs:', error);
     res.status(500).json({ error: 'Failed to fetch incident logs' });
   }
 });
@@ -211,7 +214,7 @@ router.post('/', authenticateToken, upload.single('image'), async (req, res) => 
       },
     });
   } catch (error) {
-    console.error('Error creating incident log:', error);
+    securityLog.error('Error creating incident log:', error);
     res.status(500).json({ error: 'Failed to create incident log' });
   }
 });
@@ -293,7 +296,7 @@ router.put('/:id', authenticateToken, requireCustomer, upload.single('image'), a
       },
     });
   } catch (error) {
-    console.error('Error updating incident log:', error);
+    securityLog.error('Error updating incident log:', error);
     res.status(500).json({ error: 'Failed to update incident log' });
   }
 });
@@ -322,7 +325,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
 
     res.json({ success: true, message: 'Incident log deleted successfully' });
   } catch (error) {
-    console.error('Error deleting incident log:', error);
+    securityLog.error('Error deleting incident log:', error);
     res.status(500).json({ error: 'Failed to delete incident log' });
   }
 });

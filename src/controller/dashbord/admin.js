@@ -1,3 +1,5 @@
+import { safeLogger } from '../../services/safeLogger.js';
+const securityLog = safeLogger('controller/dashbord/admin.js');
 import { assertProductMasterWrite } from '../../services/productBarcodes.js';
 import { PrismaClient } from '@prisma/client';
 import { indexProduct, refreshIndexedProduct } from '../../services/productSearchService.js';
@@ -84,7 +86,7 @@ const getDashboardOverview = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching dashboard data:', error);
+    securityLog.error('Error fetching dashboard data:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -213,7 +215,7 @@ const getAllCustomers = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching customers:', error);
+    securityLog.error('Error fetching customers:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -240,7 +242,7 @@ const updateCustomerSubscription = async (req, res) => {
       data: updatedCustomer
     });
   } catch (error) {
-    console.error('Error updating subscription:', error);
+    securityLog.error('Error updating subscription:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -329,7 +331,7 @@ const deleteCustomerWithRelatedData = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error deleting customer:', error);
+    securityLog.error('Error deleting customer:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -370,7 +372,7 @@ const processExpiredTrials = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error processing expired trials:', error);
+    securityLog.error('Error processing expired trials:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -430,7 +432,7 @@ const getSubscriptionStats = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching subscription stats:', error);
+    securityLog.error('Error fetching subscription stats:', error);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
@@ -792,7 +794,7 @@ const getListItemsSummary = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching deduplicated user-list items:', error);
+    securityLog.error('Error fetching deduplicated user-list items:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch list items summary' });
   }
 };
@@ -862,7 +864,7 @@ const updateGlobalCaseBarcode = async (req, res) => {
           }
         }
       } catch (logError) {
-        console.error('Failed to log list item update:', logError);
+        securityLog.error('Failed to log list item update:', logError);
       }
     }
 
@@ -873,7 +875,7 @@ const updateGlobalCaseBarcode = async (req, res) => {
     });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
-    console.error('Error updating global case barcode:', error);
+    securityLog.error('Error updating global case barcode:', error);
     if (error.code === 'P2025') {
       return res.status(404).json({ success: false, error: 'Item not found' });
     }
@@ -1064,7 +1066,7 @@ const updateListItemDetails = async (req, res) => {
               }
             });
           } else {
-            console.warn('Skipping list item update log: no shopId found', {
+            securityLog.warn('Skipping list item update log: no shopId found', {
               employeeId,
               itemId,
               normalizedShopId
@@ -1072,7 +1074,7 @@ const updateListItemDetails = async (req, res) => {
           }
         }
       } catch (logError) {
-        console.error('Failed to log list item update:', logError);
+        securityLog.error('Failed to log list item update:', logError);
       }
     }
 
@@ -1094,7 +1096,7 @@ const updateListItemDetails = async (req, res) => {
       return res.status(400).json({ success: false, error: error.message });
     }
 
-    console.error('Error updating list item:', error);
+    securityLog.error('Error updating list item:', error);
     res.status(500).json({ success: false, error: 'Failed to update list item' });
   }
 };
@@ -1176,7 +1178,7 @@ const getEmployeeListItemUpdates = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching list item updates for employee:', error);
+    securityLog.error('Error fetching list item updates for employee:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch list item updates' });
   }
 };

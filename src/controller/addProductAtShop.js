@@ -1,9 +1,13 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/addProductAtShop.js');
+import sharp from 'sharp';
+import { safeImageBarcode } from '../services/uploadValidation.js';
+import { boundedPage } from '../services/cataloguePresentation.js';
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import { assertProductMasterWrite } from '../services/productBarcodes.js';
 import { PrismaClient } from "@prisma/client";
 import fs from 'fs';
 import path from 'path';
-import { Jimp } from 'jimp';
 import { removeBackground } from "@imgly/background-removal-node";
 import multiLayerCache from '../services/multiLayerCache.js';
 import {
@@ -97,14 +101,13 @@ const invalidateShopInventoryCache = async (shopId) => {
       multiLayerCache.invalidateGroup(getShopFiltersCacheGroupKey(shopId)),
     ]);
   } catch (error) {
-    console.warn(`Cache invalidation failed for shop ${shopId}:`, error.message);
+    securityLog.warn(`Cache invalidation failed for shop ${shopId}:`, error.message);
   }
 };
 
 // Add a product at a shop
 const addProductAtShop = async (req, res) => {
-  console.log("addProductAtShop called with body:", req.body);
-  console.log("addProductAtShop file:", req.file);
+  securityLog.log("addProductAtShop file:", req.file);
   
   const {
     shopId,
@@ -126,7 +129,7 @@ const addProductAtShop = async (req, res) => {
   if (!shopId || !title || !employeeId) {
     // Clean up uploaded file if validation fails
     if (req.file) {
-      try { fs.unlinkSync(req.file.path); } catch (e) { console.error("Failed to cleanup file:", e); }
+      try { fs.unlinkSync(req.file.path); } catch (e) { securityLog.error("Failed to cleanup file:", e); }
     }
     return res.status(400).json({ 
       error: "Missing required fields: shopId, title, and employeeId are required." 
@@ -139,7 +142,7 @@ const addProductAtShop = async (req, res) => {
   
   if (isNaN(parsedEmployeeId)) {
     if (req.file) {
-      try { fs.unlinkSync(req.file.path); } catch (e) { console.error("Failed to cleanup file:", e); }
+      try { fs.unlinkSync(req.file.path); } catch (e) { securityLog.error("Failed to cleanup file:", e); }
     }
     return res.status(400).json({ error: "Invalid employeeId" });
   }
@@ -185,6 +188,10 @@ const addProductAtShop = async (req, res) => {
     // Handle image upload with background removal
     let imgPath = null;
     if (req.file && barcode) {
+      if (!safeImageBarcode(String(barcode))) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(400).json({ error: 'Invalid barcode for product image.' });
+      }
       const outputFilename = `${barcode}.png`;
       const outputPath = path.join('./images', outputFilename);
 
@@ -194,19 +201,19 @@ const addProductAtShop = async (req, res) => {
       }
 
       try {
-        console.log("Processing image for barcode:", barcode);
-        console.log("Source file:", req.file.path);
-        console.log("Destination:", outputPath);
+        securityLog.log("Processing image for barcode:", barcode);
+        securityLog.log("Source file:", req.file.path);
+        securityLog.log("Destination:", outputPath);
         
         // Check if source file exists
         if (!fs.existsSync(req.file.path)) {
-          console.error("Source file not found:", req.file.path);
+          securityLog.error("Source file not found:", req.file.path);
           throw new Error("Uploaded file not found");
         }
 
         // Try background removal first
         try {
-          console.log("Attempting background removal...");
+          securityLog.log("Attempting background removal...");
           const blob = await removeBackground(req.file.path, {
             publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
             debug: false,
@@ -219,22 +226,22 @@ const addProductAtShop = async (req, res) => {
 
           // Save processed image
           fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
-          console.log("Background removal successful for:", barcode);
+          securityLog.log("Background removal successful for:", barcode);
         } catch (bgError) {
-          console.error("Background removal failed, saving original:", bgError.message);
+          securityLog.error("Background removal failed, saving original:", bgError.message);
           // Fallback: just copy the file as-is
-          fs.copyFileSync(req.file.path, outputPath);
-          console.log("Saved original image for:", barcode);
+          await sharp(req.file.path, { limitInputPixels: 40000000 }).png().toFile(outputPath);
+          securityLog.log("Saved original image for:", barcode);
         }
 
         imgPath = `/api/image/${barcode}`;
         
         // Clean up temp file
         try { fs.unlinkSync(req.file.path); } catch (e) { 
-          console.log("Could not delete temp file:", e.message); 
+          securityLog.log("Could not delete temp file:", e.message);
         }
       } catch (imgError) {
-        console.error("Image processing failed:", imgError.message);
+        securityLog.error("Image processing failed:", imgError.message);
         // Clean up on error
         if (req.file && fs.existsSync(req.file.path)) {
           try { fs.unlinkSync(req.file.path); } catch (e) {}
@@ -244,7 +251,7 @@ const addProductAtShop = async (req, res) => {
       }
     } else if (req.file) {
       // No barcode provided but image uploaded - clean up
-      console.log("No barcode provided, cleaning up image");
+      securityLog.log("No barcode provided, cleaning up image");
       try { fs.unlinkSync(req.file.path); } catch (e) {}
     }
 
@@ -299,7 +306,7 @@ const addProductAtShop = async (req, res) => {
       if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       return res.status(409).json({ error: error.message, code: error.code });
     }
-    console.error("Error adding product at shop:", error);
+    securityLog.error("Error adding product at shop:", error);
     // Clean up uploaded file on error
     if (req.file && fs.existsSync(req.file.path)) {
       try { fs.unlinkSync(req.file.path); } catch (e) {}
@@ -321,7 +328,7 @@ const updateProductPriceAtShop = async (req, res) => {
   const { shopId } = req.params;
   const { productId, price, employeeId, offerPrice, offerExpiryDate, aisle, locationCode } = req.body;
 
-  console.log('updateProductPriceAtShop received:', {
+  securityLog.log('updateProductPriceAtShop received:', {
     shopId,
     productId,
     price,
@@ -359,7 +366,7 @@ const updateProductPriceAtShop = async (req, res) => {
     const parsedOfferPrice = offerPrice && offerPrice !== '' && offerPrice !== 'null' ? parseFloat(offerPrice) : null;
     const parsedOfferExpiryDate = offerExpiryDate && offerExpiryDate !== '' && offerExpiryDate !== 'null' ? new Date(offerExpiryDate) : null;
 
-    console.log('Parsed values:', {
+    securityLog.log('Parsed values:', {
       originalPrice: price,
       parsedPrice: parseFloat(price),
       originalOfferPrice: offerPrice,
@@ -387,7 +394,7 @@ const updateProductPriceAtShop = async (req, res) => {
       updateData.card_aiel_number = aisle || null;
     }
 
-    console.log('Update data:', updateData);
+    securityLog.log('Update data:', updateData);
 
     // Update product price and offer details
     const updatedProductAtShop = await prisma.productAtShop.update({
@@ -401,7 +408,7 @@ const updateProductPriceAtShop = async (req, res) => {
       await prisma.$executeRaw`UPDATE "ProductAtShop" SET "locationCode" = ${locationCode || null} WHERE "shopId" = ${shopId} AND "productId" = ${productId}`;
     }
 
-    console.log('Database update result:', {
+    securityLog.log('Database update result:', {
       id: updatedProductAtShop.id,
       price: updatedProductAtShop.price,
       offerPrice: updatedProductAtShop.offerPrice,
@@ -427,23 +434,22 @@ const updateProductPriceAtShop = async (req, res) => {
       data: updatedProductAtShop,
     });
   } catch (error) {
-    console.error("Error updating product price at shop:", error);
+    securityLog.error("Error updating product price at shop:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
 
 // Add an existing product to a shop
 const addProductAtShopifExistAtProduct = async (req, res) => {
-  console.log("Request body:", req.body);
-  console.log("Request file:", req.file);
+  securityLog.log("Request file:", req.file);
   
   const { shopId, id, price, employeeId, casebarcode, aiel, locationCode, rrp, packetSize, caseSize, offerPrice, offerExpiryDate, category } = req.body;
  
-  console.log("Extracted values - shopId:", shopId, "id:", id);
+  securityLog.log("Extracted values - shopId:", shopId, "id:", id);
   
   // Validate required fields - only shopId and id are truly required
   if (!shopId || !id) {
-    console.log("Validation failed - shopId:", shopId, "id:", id);
+    securityLog.log("Validation failed - shopId:", shopId, "id:", id);
     return res.status(400).json({
       error: "Missing required fields: shopId and id are required.",
       received: { shopId, id }
@@ -474,6 +480,10 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
     // Handle image upload with background removal
     let imgPath = null;
     if (req.file) {
+      if (!safeImageBarcode(String(product.barcode || ''))) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(400).json({ error: 'Invalid barcode for product image.' });
+      }
       const outputFilename = `${product.barcode}.png`;
       const outputPath = path.join('./images', outputFilename);
 
@@ -486,7 +496,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         // Use @imgly/background-removal-node
         const blob = await removeBackground(req.file.path, {
           publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
-          debug: true,
+          debug: false,
           output: {
             format: 'image/png',
             quality: 0.8,
@@ -498,19 +508,18 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
         fs.writeFileSync(outputPath, Buffer.from(await blob.arrayBuffer()));
         fs.unlinkSync(req.file.path);
         imgPath = `/api/image/${product.barcode}`;
-        console.log("Background removal successful for:", product.barcode);
+        securityLog.log("Background removal successful for:", product.barcode);
 
       } catch (bgError) {
-        console.error("Background removal failed:", bgError);
+        securityLog.error("Background removal failed:", bgError);
         
-        // Jimp fallback
+        // Decode/re-encode fallback
         try {
-          const image = await Jimp.read(req.file.path);
-          await image.writeAsync(outputPath);
+          await sharp(req.file.path, { limitInputPixels: 40000000 }).png().toFile(outputPath);
           fs.unlinkSync(req.file.path);
           imgPath = `/api/image/${product.barcode}`;
         } catch (jimpError) {
-          console.error("Fallback failed:", jimpError);
+          securityLog.error("Fallback failed:", jimpError);
           // Continue without image if both fail
         }
       }
@@ -634,7 +643,7 @@ const addProductAtShopifExistAtProduct = async (req, res) => {
       if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       return res.status(409).json({ error: error.message, code: error.code });
     }
-    console.error("Error:", error);
+    securityLog.error("Error:", error);
     res.status(500).json({
       error: "An error occurred while processing the product.",
       details: error.message
@@ -652,7 +661,8 @@ const getProductsAtShop = async (req, res) => {
     return res.status(400).json({ error: "Shop ID is required" });
   }
 
-  const pageNumber = parseInt(page);
+  const pageNumber = boundedPage(page);
+  if (pageNumber === null) return res.status(400).json({ error: 'Invalid page' });
   const limitNumber = parseInt(limit);
   const offset = (pageNumber - 1) * limitNumber;
   const cacheKey = getProductsCacheKey({
@@ -802,14 +812,16 @@ const getProductsAtShop = async (req, res) => {
       return res.status(404).json({ error: error.message });
     }
 
-    console.error("Error fetching products at shop:", error);
+    securityLog.error("Error fetching products at shop:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
 
 // Search for products not in a shop
 const searchProductsNotInShop = async (req, res) => {
-  const { query, shopId } = req.query;
+  const { query } = req.query;
+  const { shopId } = req.params;
+  if (req.query.shopId && req.query.shopId !== shopId) return res.status(400).json({ error: 'Conflicting supplier identifiers' });
   
   if (!query || !shopId) {
     return res.status(400).json({ error: "Query and shopId parameters are required" });
@@ -836,7 +848,7 @@ const searchProductsNotInShop = async (req, res) => {
 
     res.status(200).json(products);
   } catch (error) {
-    console.error("Error searching products:", error);
+    securityLog.error("Error searching products:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -874,7 +886,7 @@ const toggleOutOfStock = async (req, res) => {
       message: newOutOfStock ? "Product marked as out of stock" : "Product marked as in stock"
     });
   } catch (error) {
-    console.error("Error toggling out of stock:", error);
+    securityLog.error("Error toggling out of stock:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -940,7 +952,7 @@ const removeProductFromShop = async (req, res) => {
       message: "Product removed from shop successfully."
     });
   } catch (error) {
-    console.error("Error removing product from shop:", error);
+    securityLog.error("Error removing product from shop:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -980,7 +992,7 @@ const getShopFilters = async (req, res) => {
           allCategories = categoryRecords.map(c => c.name);
         } catch (e) {
           // If Category table doesn't exist, fall back to shop categories
-          console.log("Category table not available, using shop categories only");
+          securityLog.log("Category table not available, using shop categories only");
         }
 
         return {
@@ -993,7 +1005,7 @@ const getShopFilters = async (req, res) => {
 
     res.json(responseData);
   } catch (error) {
-    console.error('Error getting shop filters:', error);
+    securityLog.error('Error getting shop filters:', error);
     res.status(500).json({ error: 'Failed to get shop filters' });
   }
 };
@@ -1015,20 +1027,19 @@ const getAllProductIdsAtShop = async (req, res) => {
       return res.status(404).json({ error: "Shop not found" });
     }
 
-    const records = await prisma.productAtShop.findMany({
-      where: { shopId },
-      select: { productId: true }
-    });
-
-    const productIds = records.map((record) => record.productId);
-
-    res.status(200).json({
-      shopId,
-      total: productIds.length,
-      productIds,
-    });
+    const cursor = req.query.cursor;
+    if (cursor !== undefined && (typeof cursor !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(cursor))) return res.status(400).json({ error: 'Invalid cursor' });
+    const [records, total] = await Promise.all([
+      prisma.productAtShop.findMany({
+        where: { shopId, ...(cursor && { id: { gt: cursor } }) },
+        select: { id: true, productId: true }, orderBy: { id: 'asc' }, take: 501,
+      }),
+      prisma.productAtShop.count({ where: { shopId } }),
+    ]);
+    const page = records.slice(0, 500);
+    res.status(200).json({ shopId, total, productIds: page.map(record => record.productId), nextCursor: records.length > 500 ? page.at(-1).id : null });
   } catch (error) {
-    console.error("Error getting all product IDs at shop:", error);
+    securityLog.error("Error getting all product IDs at shop:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -1044,8 +1055,8 @@ const transferProductsBetweenShops = async (req, res) => {
     return res.status(400).json({ error: "Source and destination shops must be different" });
   }
 
-  if (!Array.isArray(productIds) || productIds.length === 0) {
-    return res.status(400).json({ error: "productIds must be a non-empty array" });
+  if (!Array.isArray(productIds) || productIds.length === 0 || productIds.length > 500) {
+    return res.status(400).json({ error: "productIds must contain between 1 and 500 items" });
   }
 
   const strategy = duplicateStrategy === "replace" ? "replace" : "skip";
@@ -1234,7 +1245,7 @@ const transferProductsBetweenShops = async (req, res) => {
       return res.status(error.statusCode).json({ error: error.message });
     }
 
-    console.error("Error transferring products between shops:", error);
+    securityLog.error("Error transferring products between shops:", error);
     res.status(500).json({ error: "Failed to transfer products" });
   }
 };

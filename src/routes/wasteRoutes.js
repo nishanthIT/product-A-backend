@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/wasteRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
@@ -37,7 +39,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, records, summary: { totalLoss: totals._sum.totalLoss || 0 } });
   } catch (error) {
-    console.error('Error fetching waste records:', error);
+    securityLog.error('Error fetching waste records:', error);
     res.status(500).json({ error: 'Failed to fetch waste records' });
   }
 });
@@ -95,7 +97,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
     res.status(201).json({ success: true, record });
   } catch (error) {
-    console.error('Error creating waste record:', error);
+    securityLog.error('Error creating waste record:', error);
     res.status(500).json({ error: 'Failed to create waste record' });
   }
 });

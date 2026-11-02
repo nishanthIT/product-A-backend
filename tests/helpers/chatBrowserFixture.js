@@ -1,0 +1,24 @@
+// Explicit opt-in plus the harness's local-*test* DB guard. Never start in production.
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { resetDatabase, getPrisma, seedBase, createCompanyStaff, startApp } from './harness.js';
+if (process.env.PAYMI_BROWSER_FIXTURE !== '1') throw new Error('PAYMI_BROWSER_FIXTURE=1 is required');
+await resetDatabase();
+const db = await getPrisma(), seed = await seedBase(db);
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'paymi-browser-uploads-'));
+process.env.CHAT_STORAGE_ROOT = root;
+process.env.CHAT_STORAGE_PROVIDER = 'local';
+process.env.CHAT_RETENTION_ENABLED = 'false';
+const employee = await createCompanyStaff(db, { email: 'riley@browser.test', passwordHash: seed.passwordHash, permissions: [] });
+await db.empolyee.update({ where: { id: employee.id }, data: { name: 'Riley Employee' } });
+await db.companyStaffMembership.delete({ where: { employeeId: employee.id } });
+await db.shopEmployeeMembership.create({ data: { employeeId: employee.id, shopId: seed.b.shop.id, status: 'ACTIVE' } });
+const supplier = await db.customer.create({ data: { name: 'Wholesale Fixture', email: 'supplier@browser.test', mobile: 'wholesale-browser', password: seed.passwordHash, shopId: seed.wholesale.id } });
+const { ensureGlobalChat } = await import('../../src/services/globalChat.js');
+const global = await ensureGlobalChat(db);
+await db.message.create({ data: { chatId: global.id, senderId: employee.id, senderType: 'EMPLOYEE', content: 'Browser fixture global message' } });
+const app = await startApp();
+console.log(JSON.stringify({ fixture: true, origin: app.origin, ownerEmail: seed.a.owner.email, employeeEmail: employee.email, password: seed.password, globalId: global.id, supplierId: supplier.id }));
+const close = async () => { await app.close(); await db.$disconnect(); await fs.rm(root, { recursive: true, force: true }); process.exit(0); };
+process.once('SIGTERM', close); process.once('SIGINT', close);

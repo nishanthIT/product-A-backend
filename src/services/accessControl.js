@@ -1,3 +1,5 @@
+import { safeLogger } from './safeLogger.js';
+const securityLog = safeLogger('services/accessControl.js');
 import { activeSuspension } from './chatSafety.js';
 import { PrismaClient } from '@prisma/client';
 
@@ -249,7 +251,7 @@ function touchLastActive(access, db) {
     access.shop
       ? db.shopEmployeeMembership.update({ where: { id: access.shop.membershipId }, data: { lastActiveAt: at } })
       : null,
-  ]).catch((err) => console.warn('lastActiveAt update failed:', err.message));
+  ]).catch((err) => securityLog.warn('lastActiveAt update failed:', err.message));
 }
 
 export function hasCompanyPermission(user, permission) {

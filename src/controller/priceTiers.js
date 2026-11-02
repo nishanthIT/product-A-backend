@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/priceTiers.js');
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import { PrismaClient } from "@prisma/client";
 
@@ -29,7 +31,7 @@ export const getShopProductPriceTiers = async (req, res) => {
       })),
     });
   } catch (error) {
-    console.error("Error fetching price tiers:", error);
+    securityLog.error("Error fetching price tiers:", error);
     res.status(500).json({ error: "Failed to fetch price tiers." });
   }
 };
@@ -91,7 +93,7 @@ export const setShopProductPriceTiers = async (req, res) => {
       tiers: saved.map((t) => ({ id: t.id, quantity: t.quantity, price: toMoney(t.price) })),
     });
   } catch (error) {
-    console.error("Error saving price tiers:", error);
+    securityLog.error("Error saving price tiers:", error);
     res.status(500).json({ error: "Failed to save price tiers." });
   }
 };
@@ -103,7 +105,7 @@ export const getProductPriceTiers = async (req, res) => {
   const { id: productId } = req.params;
   try {
     const productAtShops = await prisma.productAtShop.findMany({
-      where: { productId, outOfStock: false },
+      where: { productId, outOfStock: false, shop: { shopType: 'WHOLESALE' } },
       include: {
         shop: { select: { name: true } },
         priceTiers: { orderBy: { quantity: "asc" } },
@@ -145,7 +147,7 @@ export const getProductPriceTiers = async (req, res) => {
       hasTiers: tiers.length > 0,
     });
   } catch (error) {
-    console.error("Error fetching product price tiers:", error);
+    securityLog.error("Error fetching product price tiers:", error);
     res.status(500).json({ error: "Failed to fetch price tiers." });
   }
 };

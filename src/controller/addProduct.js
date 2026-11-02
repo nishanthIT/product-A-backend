@@ -1,3 +1,7 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/addProduct.js');
+import { presentCatalogueProduct } from '../services/cataloguePresentation.js';
+import { safeImageBarcode } from '../services/uploadValidation.js';
 import { getEffectivePrice, presentSupplierPrice } from '../services/supplierPricing.js';
 import { assertProductMasterWrite, resolveProductBarcode } from '../services/productBarcodes.js';
 import { PrismaClient } from "@prisma/client";
@@ -36,10 +40,10 @@ const getOrCreateUnknownShop = async () => {
 
 // Helper function to get effective price (considering active offers)
 
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import fs from 'fs';
 import path from 'path';
-import {Jimp} from 'jimp';
+import sharp from 'sharp';
 import { removeBackground } from "@imgly/background-removal-node";
 
 // Configure multer
@@ -54,7 +58,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max - allow large images
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB max - allow large images
   fileFilter: (req, file, cb) => {
     file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only images allowed'));
   }
@@ -70,6 +74,11 @@ const addProduct = async (req, res) => {
       if (!title || !barcode) {
         if (req.file) fs.unlinkSync(req.file.path);
         return res.status(400).json({ error: "Title and barcode required" });
+      }
+
+      if (req.file && !safeImageBarcode(String(barcode))) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: 'Invalid barcode for product image.' });
       }
 
       // Check existing product
@@ -91,7 +100,7 @@ const addProduct = async (req, res) => {
           // Use @imgly/background-removal-node
           const blob = await removeBackground(req.file.path, {
             publicPath: `file://${path.resolve('node_modules/@imgly/background-removal-node/dist')}/`,
-            debug: true,
+            debug: false,
             output: {
               format: 'image/png',
               quality: 0.8,
@@ -105,16 +114,15 @@ const addProduct = async (req, res) => {
           imgPath = `/api/image/${barcode}`;
 
         } catch (bgError) {
-          console.error("Background removal failed:", bgError);
+          securityLog.error("Background removal failed:", bgError);
           
           // Jimp fallback
           try {
-            const image = await Jimp.read(req.file.path);
-            await image.writeAsync(outputPath);
+            await sharp(req.file.path, { limitInputPixels: 40000000 }).png().toFile(outputPath);
             fs.unlinkSync(req.file.path);
             imgPath = `/api/image/${barcode}`;
           } catch (jimpError) {
-            console.error("Fallback failed:", jimpError);
+            securityLog.error("Fallback failed:", jimpError);
             return res.status(500).json({ error: "Image processing failed" });
           }
         }
@@ -149,7 +157,7 @@ const addProduct = async (req, res) => {
         if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         return res.status(error.statusCode).json({ error: error.message, code: error.code });
       }
-      console.error("Error:", error);
+      securityLog.error("Error:", error);
       if (req.file) fs.unlinkSync(req.file.path);
       res.status(500).json({ error: "Server error" });
     }
@@ -215,7 +223,7 @@ const addProduct = async (req, res) => {
 //       },
 //     });
 //   } catch (error) {
-//     console.error("Error adding product:", error);
+//     securityLog.error("Error adding product:", error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -278,7 +286,7 @@ const addProduct = async (req, res) => {
 //     if (error.code === "P2025") {
 //       return res.status(404).json({ error: "Product not found." });
 //     }
-//     console.error("Error editing product:", error);
+//     securityLog.error("Error editing product:", error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -305,7 +313,7 @@ const editProduct = async (req, res) => {
       const targetBarcode = barcode || existingProduct.barcode;
       
       // Validate barcode for image upload
-      if (req.file && !targetBarcode) {
+      if (req.file && !safeImageBarcode(String(targetBarcode || ''))) {
         fs.unlinkSync(req.file.path);
         return res.status(400).json({ error: "Product barcode is required to upload the image." });
       }
@@ -344,15 +352,14 @@ const editProduct = async (req, res) => {
           dataToUpdate.img = imagePath;
 
         } catch (bgError) {
-          console.error("Background removal failed:", bgError);
+          securityLog.error("Background removal failed:", bgError);
           try {
-            const image = await Jimp.read(req.file.path);
-            await image.writeAsync(outputPath);
+            await sharp(req.file.path, { limitInputPixels: 40000000 }).png().toFile(outputPath);
             fs.unlinkSync(req.file.path);
             const imagePath = `/api/image/${targetBarcode}`;
             dataToUpdate.img = imagePath;
           } catch (jimpError) {
-            console.error("Fallback failed:", jimpError);
+            securityLog.error("Fallback failed:", jimpError);
             return res.status(500).json({ error: "Image processing failed" });
           }
         }
@@ -383,7 +390,7 @@ const editProduct = async (req, res) => {
         return res.status(error.statusCode).json({ error: error.message, code: error.code });
       }
       if (error.code === "P2025") return res.status(404).json({ error: "Product not found." });
-      console.error("Error editing product:", error);
+      securityLog.error("Error editing product:", error);
       res.status(500).json({ error: "Internal server error." });
     }
   });
@@ -425,13 +432,13 @@ const getProductById = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        ...product,
+        ...presentCatalogueProduct(product),
         barcode: product.barcode ? product.barcode.toString() : null,
         shops: formattedShops, // Include shop details in the response
       },
     });
   } catch (error) {
-    console.error("Error fetching product by ID:", error);
+    securityLog.error("Error fetching product by ID:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -458,11 +465,11 @@ const getProductByBarcode = async (req, res) => {
 
     // Handle case where product is not found
     if (!product) {
-      console.log("Product not found for barcode:", cleanBarcode);
+      securityLog.log("Product not found for barcode:", cleanBarcode);
       return res.status(404).json({ error: "Product not found." });
     }
 
-    console.log("Product found:", product.title);
+    securityLog.log("Product found:", product.title);
 
     // Format response with shop details
     const formattedShops = product.shops.map(row => presentSupplierPrice(row, product.matchedPackaging));
@@ -470,7 +477,7 @@ const getProductByBarcode = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        ...product,
+        ...presentCatalogueProduct(product),
         barcode: product.barcode ? product.barcode.toString() : null,
         ...(product.matchedPackaging && {
           caseBarcode: product.matchedPackaging.caseBarcode,
@@ -483,10 +490,10 @@ const getProductByBarcode = async (req, res) => {
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
     if (error.name === "SyntaxError" || error.message.includes("BigInt")) {
-      console.log(error);
+      securityLog.log(error);
       return res.status(400).json({ error: "Invalid barcode format." });
     }
-    console.error("Error fetching product by barcode:", error);
+    securityLog.error("Error fetching product by barcode:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -581,7 +588,7 @@ const quickAddProductFromScan = async (req, res) => {
     });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
-    console.error("Error quick adding product from scan:", error);
+    securityLog.error("Error quick adding product from scan:", error);
     return res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -686,7 +693,7 @@ const getPendingSubmittedProducts = async (req, res) => {
       data: enrichedProducts,
     });
   } catch (error) {
-    console.error("Error fetching pending submitted products:", error);
+    securityLog.error("Error fetching pending submitted products:", error);
     return res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -765,7 +772,7 @@ const approveSubmittedProduct = async (req, res) => {
     });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
-    console.error('Error approving submitted product:', error);
+    securityLog.error('Error approving submitted product:', error);
     return res.status(500).json({ error: 'Internal server error.' });
   }
 };
@@ -835,7 +842,7 @@ const searchProducts = async (req, res) => {
       data: formattedProducts,
     });
   } catch (error) {
-    console.error("Error searching products:", error);
+    securityLog.error("Error searching products:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -897,7 +904,7 @@ const deleteProduct = async (req, res) => {
       message: "Product deleted successfully"
     });
   } catch (error) {
-    console.error("Error deleting product:", error);
+    securityLog.error("Error deleting product:", error);
     res.status(500).json({ error: "Failed to delete product" });
   }
 };

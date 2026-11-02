@@ -1,0 +1,81 @@
+✔ admin customer creation hashes passwords and every customer response omits credentials (1514.050167ms)
+✔ ordinary customers cannot invoke administrative credential operations (103.928716ms)
+✔ admin customer password changes revoke sessions and clear recovery proofs atomically (740.714151ms)
+✔ company staff password updates revoke old sessions and never return hashes (965.601847ms)
+✔ shop employee password changes revoke old tokens and bcrypt truncation is rejected (1004.269511ms)
+✔ registration/recovery responses and resend cooldown do not reveal whether an address exists (1462.727752ms)
+✔ account restrictions prevent new sessions, authenticated me and socket connections until expiry (147.62289ms)
+✔ cookie-only socket restoration authenticates the correct user; explicit bad tokens cannot fall back (121.223263ms)
+✔ durable OTP attempts and consumption remain atomic across independent application stores with Redis unavailable (192.045436ms)
+✔ reset-code races change the password once and revoke prior sessions (514.002652ms)
+✔ registration retries remain idempotent while a valid proof cannot create multiple accounts (1755.736977ms)
+Request failed {
+  name: 'Error',
+  code: 'INVALID_UPLOAD',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ authenticated image routes reject active content and traversal, and private incident images stay tenant scoped (141.329495ms)
+▶ shop owner creates employees
+  ✔ creates only a shop membership in the owner's own shop, never company membership (368.12776ms)
+  ✔ a client-submitted shopId for another shop is rejected (38.022477ms)
+  ✔ a shop owner cannot assign company roles or permissions (531.308715ms)
+✔ shop owner creates employees (1829.044773ms)
+▶ shop employees and owners cannot reach company administration
+  ✔ shop employee gets 403 on every company endpoint (500.096045ms)
+  ✔ shop owner gets 403 on every company endpoint (515.50976ms)
+  ✔ previously unauthenticated company endpoints now require a token (39.097339ms)
+  ✔ a forged EMPLOYEE token for a shop employee still has no company access (75.761373ms)
+✔ shop employees and owners cannot reach company administration (1666.503084ms)
+▶ cross-shop isolation
+  ✔ owner B only sees Bravo employees (27.810272ms)
+  ✔ owner B cannot read or change an Alpha employee by id (79.030898ms)
+  ✔ owner B cannot track, read or claim Alpha lists or shop (134.388157ms)
+  ✔ Bravo employee cannot read Alpha lists (301.248106ms)
+  ✔ admin customer view cannot be pointed at another customer's shop (42.918763ms)
+✔ cross-shop isolation (1370.089026ms)
+▶ deactivation and stale sessions
+  ✔ inactive employee loses access on an existing token; lists are kept (1162.332337ms)
+  ✔ removing an employee keeps the account and lists but revokes access (571.693274ms)
+  ✔ bumping the session version invalidates old tokens (607.632701ms)
+✔ deactivation and stale sessions (2342.01712ms)
+▶ single shop role
+  ✔ the shop manager role no longer exists and only the owner manages employees (586.893143ms)
+  ✔ a regular shop employee cannot manage employees (521.442004ms)
+✔ single shop role (1108.555616ms)
+▶ company staff
+  ✔ staff keep exactly their granted company permissions (234.455146ms)
+  ✔ deactivated company membership revokes existing sessions (106.877225ms)
+  ✔ company staff list contains only company staff (31.102392ms)
+  ✔ staff managers cannot grant permissions they do not hold (314.510823ms)
+✔ company staff (687.37476ms)
+▶ dual membership
+  ✔ company and shop permissions are checked independently (1123.215812ms)
+  ✔ a shop owner cannot attach an existing company staff account to their shop (30.29637ms)
+✔ dual membership (1153.813514ms)
+▶ Customers → Customer details → Employees
+  ✔ shows the customer's shop employees, status counts and their lists (93.944235ms)
+  ✔ viewing customer employees grants them no company access (299.515328ms)
+✔ Customers → Customer details → Employees (393.715541ms)
+▶ realtime shop rooms
+  ✔ only members/owner of a shop may join its list room (6.116167ms)
+✔ realtime shop rooms (6.244295ms)
+✔ write-only shop employee creates a list and adds three cases in one request (1705.587799ms)
+✔ concurrent additions preserve the sum and do not create duplicate logical products (245.412915ms)
+✔ lists and employees remain current without the retired list-cache dependency (302.733868ms)
+Product found: Test Cola 330ml
+✔ product search, detail, barcode and list prices load for the employee (240.545248ms)
+✔ employee access changes apply immediately and management cannot cross shops (930.891804ms)
+✔ summary preserves legacy admin-owned lists and distinguishes typed IDs and shop scopes (129.39993ms)
+ℹ tests 44
+ℹ suites 9
+ℹ pass 44
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 26158.258759

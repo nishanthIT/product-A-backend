@@ -1,69 +1,30 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/chat.js');
+import { selectedChatShop } from '../services/shopChatScope.js';
 import { lockAccountForWrite } from '../services/accountWriteBarrier.js';
 import { activeSuspension } from '../services/chatSafety.js';
 import { requireChatPosting } from '../services/chatSafety.js';
 import { PrismaClient } from '@prisma/client';
 const uploadDb = new PrismaClient();
 import express from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
+import multer from '../middleware/secureUpload.js';
+import { chatAttachmentType, getChatStorage, MAX_CHAT_ATTACHMENT_BYTES } from '../services/chatStorage.js';
+import { serviceError } from '../services/serviceErrors.js';
+import { queueUnusedAttachment } from '../services/chatRetention.js';
 import { getUserChats, createChat, getChatById, sendMessage, markAsRead, deleteChat, getAllUsers, deleteMessage } from '../controller/chat.js';
 import { isAuthenticated } from '../middleware/authware.js';
 
 const router = express.Router();
 
-// Configure multer for chat file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadPath = 'uploads/chat';
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    let ext = path.extname(file.originalname);
-    
-    // If no extension, derive from mimetype
-    if (!ext || ext === '') {
-      const mimeToExt = {
-        'image/jpeg': '.jpg',
-        'image/jpg': '.jpg',
-        'image/png': '.png',
-        'image/gif': '.gif',
-        'image/webp': '.webp',
-        'application/pdf': '.pdf',
-        'text/plain': '.txt',
-      };
-      ext = mimeToExt[file.mimetype] || '.bin';
-    }
-    
-    console.log('📎 Saving file with extension:', ext, 'from mimetype:', file.mimetype);
-    cb(null, 'chat-' + uniqueSuffix + ext);
-  }
-});
-
+// A bounded in-memory upload avoids environment-specific temporary paths.
+// Storage chooses local disk or private object storage after authorization.
 const upload = multer({
-  storage,
-  limits: {
-    fileSize: 20 * 1024 * 1024, // 20MB limit
+  allowedTypes: ['image', 'document'],
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_CHAT_ATTACHMENT_BYTES, files: 1, fields: 5, parts: 6 },
+  fileFilter: (_req, file, cb) => {
+    cb(chatAttachmentType(file.originalname, file.mimetype) ? null : new Error('File type not allowed'), true);
   },
-  fileFilter: (req, file, cb) => {
-    // Allow images and documents based on mimetype or extension
-    const allowedMimeTypes = /image\/(jpeg|jpg|png|gif|webp)|application\/(pdf|msword|vnd\.openxmlformats|octet-stream)|text\//;
-    const allowedExtensions = /jpeg|jpg|png|gif|webp|pdf|doc|docx|xls|xlsx|txt/;
-    
-    const extname = allowedExtensions.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedMimeTypes.test(file.mimetype);
-    
-    // Allow if either extension or mimetype matches
-    if (extname || mimetype) {
-      return cb(null, true);
-    } else {
-      cb(new Error('File type not allowed. Allowed: images, PDF, Word, Excel, text files'));
-    }
-  }
 });
 
 // All routes require authentication
@@ -94,7 +55,21 @@ router.delete('/message/:messageId', deleteMessage);
 router.delete('/:chatId', deleteChat);
 
 // Upload file for chat
-router.post('/upload', requireChatPosting, upload.single('file'), async (req, res) => {
+router.post('/upload', requireChatPosting, async (req, res, next) => {
+  try {
+    if (!await selectedChatShop(req.user, uploadDb)) return res.status(403).json({ error: 'An active shop membership is required.' });
+    next();
+  } catch { res.status(503).json({ error: 'Could not verify shop access.' }); }
+}, (req, res, next) => {
+  upload.single('file')(req, res, error => {
+    if (!error) return next();
+    res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      success: false,
+      message: error.code === 'LIMIT_FILE_SIZE' ? 'Attachments must be 20 MB or smaller.' : 'Choose an image or supported document.',
+    });
+  });
+}, async (req, res) => {
+  let stored;
   try {
     if (!req.file) {
       return res.status(400).json({ 
@@ -104,32 +79,52 @@ router.post('/upload', requireChatPosting, upload.single('file'), async (req, re
     }
 
     const file = req.file;
-    const fileUrl = `/uploads/chat/${file.filename}`;
-    
-    await uploadDb.$transaction(async tx => {
-      await lockAccountForWrite(tx, req.user);
-      if (await activeSuspension(req.user, tx)) throw Object.assign(new Error('Chat posting is suspended'), { status: 403 });
-      await tx.chatUpload.create({ data: { filename: file.filename, uploaderId: req.user.id, uploaderType: req.user.userType } });
+    stored = await getChatStorage().put({
+      buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype,
+      onPrepared: async descriptor => {
+        stored = descriptor;
+        await uploadDb.$transaction(async tx => {
+          await lockAccountForWrite(tx, req.user);
+          if (await activeSuspension(req.user, tx)) throw Object.assign(new Error('Chat posting is suspended'), { status: 403 });
+          await tx.chatUpload.create({ data: { ...descriptor, uploaderId: req.user.id, uploaderType: req.user.userType } });
+        }, { maxWait: 15000, timeout: 60000 });
+      },
     });
-
-    // Determine file type
-    const ext = path.extname(file.originalname).toLowerCase();
-    const imageTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-    const fileType = imageTypes.includes(ext) ? 'IMAGE' : 'DOCUMENT';
+    if (stored.storageVersionId) await uploadDb.chatUpload.update({
+      where: { filename: stored.filename }, data: { storageVersionId: stored.storageVersionId },
+    });
 
     res.status(200).json({
       success: true,
       file: {
-        url: fileUrl,
+        url: stored.url,
         name: file.originalname,
         size: file.size,
-        type: fileType,
-        mimetype: file.mimetype
+        type: stored.type,
+        mimetype: stored.contentType
       }
     });
   } catch (error) {
-    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
-    console.error('Chat upload failed');
+    if (stored) {
+      try {
+        // An interrupted PUT can finish remotely after its response is lost.
+        // Keep ownership and defer cleanup beyond the request deadline instead
+        // of treating an immediate missing-object response as final success.
+        await uploadDb.$transaction(async tx => {
+          if (stored.storageVersionId) await tx.chatUpload.updateMany({
+            where: { filename: stored.filename }, data: { storageVersionId: stored.storageVersionId },
+          });
+          if (await queueUnusedAttachment(tx, stored.filename)) await tx.chatAttachmentDeletionJob.updateMany({
+            where: { filename: stored.filename }, data: { nextAttemptAt: new Date(Date.now() + 5 * 60000) },
+          });
+        }, { maxWait: 15000, timeout: 60000 });
+      } catch (cleanupError) {
+        // Leave the ownership row for retention retry. Never log credentials,
+        // temporary URLs, or private attachment names from provider errors.
+        securityLog.warn('Chat upload cleanup deferred', serviceError(cleanupError));
+      }
+    }
+    securityLog.error('Chat upload failed', serviceError(error));
     res.status(error.status || 500).json({
       success: false, 
       message: error.status ? error.message : 'Failed to upload file'

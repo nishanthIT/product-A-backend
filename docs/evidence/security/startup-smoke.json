@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-29",
+  "environment": "Production-mode startup using fixture-only secrets and disposable localhost PostgreSQL/Redis; not deployed",
+  "checks": [
+    {
+      "check": "health",
+      "status": 200,
+      "expected": 200,
+      "body": {
+        "success": true,
+        "status": "healthy"
+      },
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox",
+        "Access-Control-Allow-Origin": null
+      }
+    },
+    {
+      "check": "protected catalogue",
+      "status": 401,
+      "expected": 401,
+      "body": {
+        "error": "Authentication required - No token found"
+      },
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox",
+        "Access-Control-Allow-Origin": null
+      }
+    },
+    {
+      "check": "untrusted write origin",
+      "status": 403,
+      "expected": 403,
+      "body": {
+        "error": "Request origin is not permitted"
+      },
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox",
+        "Access-Control-Allow-Origin": null
+      }
+    },
+    {
+      "check": "protected security center",
+      "status": 401,
+      "expected": 401,
+      "body": {
+        "error": "Authentication required - No token found"
+      },
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; sandbox",
+        "Access-Control-Allow-Origin": null
+      }
+    }
+  ],
+  "passed": 4
+}

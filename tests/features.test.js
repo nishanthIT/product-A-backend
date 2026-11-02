@@ -48,7 +48,7 @@ before(async () => {
   T.allChatId = allChat.id;
   const personal = await prisma.chat.create({
     data: {
-      type: 'PERSONAL',
+      type: 'PERSONAL', shopId: seed.a.shop.id,
       participants: { create: [{ userId: seed.a.owner.id, userType: 'CUSTOMER' }, { userId: E.a1.id, userType: 'EMPLOYEE' }] },
       messages: { create: [{ content: 'old hello', senderId: seed.a.owner.id, senderType: 'CUSTOMER' }] },
     },
@@ -90,26 +90,15 @@ describe('chats', () => {
     assert.equal(global.status, 201);
   });
 
-  test('chat user selectors are scoped: owner sees own shop employees, company staff can reach customers for support', async () => {
+  test('chat selectors include retail users across shops and exclude company-only support staff', async () => {
     const ownerUsers = await app.request('GET', '/chat/users', { token: T.ownerA });
-    const ownerEmployees = ownerUsers.body.users.filter((u) => u.userType === 'EMPLOYEE').map((u) => Number(u.id));
-    assert.deepEqual(ownerEmployees.sort(), [E.a1.id, E.a2.id].sort());
-    assert.ok(ownerUsers.body.users.some((u) => u.userType === 'ADMIN'), 'customers can still reach company admins');
-
+    assert.deepEqual(ownerUsers.body.users.filter(u => u.userType === 'EMPLOYEE').map(u => Number(u.id)).sort(), [E.a1.id, E.a2.id, E.b1.id].sort());
+    assert.ok(!ownerUsers.body.users.some(u => u.userType === 'ADMIN'));
     const employeeUsers = await app.request('GET', '/chat/users', { token: T.a1 });
-    assert.deepEqual(employeeUsers.body.users.map((u) => [u.userType, Number(u.id)]), [['CUSTOMER', seed.a.owner.id]]);
-
-    const staffUsers = await app.request('GET', '/chat/users', { token: T.staff });
-    const staffCustomers = staffUsers.body.users.filter((u) => u.userType === 'CUSTOMER').map((u) => Number(u.id));
-    assert.ok(staffCustomers.includes(seed.a.owner.id) && staffCustomers.includes(seed.b.owner.id));
-
-    const support = await app.request('POST', '/chat', {
-      token: T.staff,
-      body: { type: 'PERSONAL', participantIds: [{ userId: seed.b.owner.id, userType: 'CUSTOMER' }] },
-    });
-    assert.equal(support.status, 201);
-    const answer = await app.request('POST', '/chat/message', { token: T.ownerB, body: { chatId: support.body.chat.id, content: 'thanks' } });
-    assert.equal(answer.status, 201);
+    assert.deepEqual(employeeUsers.body.users.map(u => `${u.userType}:${u.id}`).sort(), [`CUSTOMER:${seed.a.owner.id}`, `CUSTOMER:${seed.b.owner.id}`, `EMPLOYEE:${E.a2.id}`, `EMPLOYEE:${E.b1.id}`].sort());
+    assert.equal((await app.request('GET', '/chat/users', { token: T.staff })).status, 403);
+    const support = await app.request('POST', '/chat', { token: T.staff, body: { type: 'PERSONAL', participantIds: [{ userId: seed.b.owner.id, userType: 'CUSTOMER' }] } });
+    assert.equal(support.status, 403);
   });
 
   test('sockets: rooms are authorized and per-user events do not leak across account types', async () => {

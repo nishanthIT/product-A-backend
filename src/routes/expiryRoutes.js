@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/expiryRoutes.js');
 import { resolveProductBarcode } from '../services/productBarcodes.js';
 import { SHOP_FEATURES } from '../services/accessControl.js';
 import express from 'express';
@@ -142,7 +144,7 @@ router.get('/', authenticateToken, async (req, res) => {
       counts
     });
   } catch (error) {
-    console.error('Error fetching expiry products:', error);
+    securityLog.error('Error fetching expiry products:', error);
     res.status(500).json({ error: 'Failed to fetch expiry products' });
   }
 });
@@ -237,7 +239,7 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error adding expiry product:', error);
+    securityLog.error('Error adding expiry product:', error);
     res.status(500).json({ error: 'Failed to add product to expiry tracking' });
   }
 });
@@ -314,7 +316,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error updating expiry product:', error);
+    securityLog.error('Error updating expiry product:', error);
     res.status(500).json({ error: 'Failed to update expiry product' });
   }
 });
@@ -348,7 +350,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
       message: 'Expiry product removed from tracking'
     });
   } catch (error) {
-    console.error('Error deleting expiry product:', error);
+    securityLog.error('Error deleting expiry product:', error);
     res.status(500).json({ error: 'Failed to delete expiry product' });
   }
 });
@@ -448,7 +450,7 @@ router.get('/notifications', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching expiry notifications:', error);
+    securityLog.error('Error fetching expiry notifications:', error);
     res.status(500).json({ error: 'Failed to fetch notifications' });
   }
 });
@@ -493,7 +495,7 @@ router.get('/search-product', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, code: error.code });
-    console.error('Error searching products:', error);
+    securityLog.error('Error searching products:', error);
     res.status(500).json({ error: 'Failed to search products' });
   }
 });
@@ -506,7 +508,7 @@ router.post('/trigger-notifications', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    console.log('[API] Manual notification trigger requested by admin:', req.user.email);
+    securityLog.log('[API] Manual notification trigger requested by admin:', req.user.email);
     
     // Trigger the notification check
     await expiryNotificationService.triggerManually();
@@ -516,7 +518,7 @@ router.post('/trigger-notifications', authenticateToken, async (req, res) => {
       message: 'Expiry notification check triggered successfully'
     });
   } catch (error) {
-    console.error('Error triggering notifications:', error);
+    securityLog.error('Error triggering notifications:', error);
     res.status(500).json({ error: 'Failed to trigger notifications' });
   }
 });
@@ -556,7 +558,7 @@ router.get('/categories', authenticateToken, async (req, res) => {
       }))
     });
   } catch (error) {
-    console.error('Error fetching expiry categories:', error);
+    securityLog.error('Error fetching expiry categories:', error);
     res.status(500).json({ error: 'Failed to fetch expiry categories' });
   }
 });
@@ -611,7 +613,7 @@ router.post('/categories', authenticateToken, async (req, res) => {
       category
     });
   } catch (error) {
-    console.error('Error creating expiry category:', error);
+    securityLog.error('Error creating expiry category:', error);
     res.status(500).json({ error: 'Failed to create expiry category' });
   }
 });
@@ -675,7 +677,7 @@ router.put('/categories/:id', authenticateToken, async (req, res) => {
       category: updatedCategory
     });
   } catch (error) {
-    console.error('Error updating expiry category:', error);
+    securityLog.error('Error updating expiry category:', error);
     res.status(500).json({ error: 'Failed to update expiry category' });
   }
 });
@@ -715,7 +717,7 @@ router.delete('/categories/:id', authenticateToken, async (req, res) => {
       message: `Category deleted. ${existingCategory._count.products} product(s) unassigned from this category.`
     });
   } catch (error) {
-    console.error('Error deleting expiry category:', error);
+    securityLog.error('Error deleting expiry category:', error);
     res.status(500).json({ error: 'Failed to delete expiry category' });
   }
 });

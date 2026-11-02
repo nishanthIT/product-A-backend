@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/employee.js');
 // import { PrismaClient } from "@prisma/client";
 // const prisma = new PrismaClient();
 
@@ -14,7 +16,7 @@
 //     });
 //     res.json(empolyee);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -34,10 +36,10 @@
 //         password: password,
 //       },
 //     });
-//     console.log(empolyee);
+//     securityLog.log(empolyee);
 //     res.json(employee);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -53,7 +55,7 @@
 //     });
 //     res.json(employee);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -69,10 +71,10 @@
 //         id: id,
 //       },
 //     });
-//     console.log(employee);
+//     securityLog.log(employee);
 //     res.json(employee);
 //   } catch (error) {
-//     console.error(error);
+//     securityLog.error(error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -154,7 +156,7 @@
 //       data: employeeActivity,
 //     });
 //   } catch (error) {
-//     console.error("Error fetching employees and their activities:", error);
+//     securityLog.error("Error fetching employees and their activities:", error);
 //     res.status(500).json({ error: "Internal server error." });
 //   }
 // };
@@ -166,7 +168,8 @@
 // export { addEmployee, updateEmployee, deleteEmployee, getEmployee,getAllEmployees };
 
 import { PrismaClient } from "@prisma/client";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
+import { disconnectUser } from '../services/realtime.js';
 import {
   ALL_COMPANY_PERMISSIONS,
   COMPANY_PERMISSIONS,
@@ -177,6 +180,7 @@ import {
 // Company Staff management. Every handler here is mounted behind
 // requireCompanyPermission('staff.manage') and only touches CompanyStaffMembership.
 const prisma = new PrismaClient();
+const validStaffPassword = value => typeof value === 'string' && value.length >= 8 && Buffer.byteLength(value, 'utf8') <= 72;
 
 const staffSelect = {
   id: true,
@@ -270,6 +274,7 @@ const addEmployee = async (req, res) => {
     if (!name || !email || !password) {
       return res.status(400).json({ error: "Name, email and password are required." });
     }
+    if (!validStaffPassword(password)) return res.status(400).json({ error: 'Password must contain at least 8 characters and at most 72 UTF-8 bytes.' });
 
     const grant = validateCompanyGrant(req.body, req.user, { partial: false });
     if (grant.error) return res.status(400).json({ error: grant.error });
@@ -289,7 +294,7 @@ const addEmployee = async (req, res) => {
       return res.status(400).json({ error: "An employee with this phone number already exists." });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
     const grantedByAdminId = req.user.userType === "ADMIN" ? req.user.id : null;
 
     const employee = await prisma.empolyee.create({
@@ -314,7 +319,7 @@ const addEmployee = async (req, res) => {
 
     res.status(201).json({ message: "Company staff member created", employee: formatStaff(employee) });
   } catch (error) {
-    console.error("Error adding company staff:", error);
+    securityLog.error("Error adding company staff:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -360,7 +365,7 @@ const grantCompanyAccess = async (req, res) => {
     const updated = await prisma.empolyee.findUnique({ where: { id: employeeId }, select: staffSelect });
     res.json({ message: "Company access granted", employee: formatStaff(updated) });
   } catch (error) {
-    console.error("Error granting company access:", error);
+    securityLog.error("Error granting company access:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -376,6 +381,7 @@ const updateEmployee = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const { name, phoneNo, password } = req.body;
     const email = req.body.email ? String(req.body.email).trim().toLowerCase() : undefined;
+    if (password !== undefined && password !== '' && !validStaffPassword(password)) return res.status(400).json({ error: 'Password must contain at least 8 characters and at most 72 UTF-8 bytes.' });
 
     const staff = Number.isNaN(id) ? null : await findStaffMember(id);
     if (!staff) return res.status(404).json({ error: "Company staff member not found" });
@@ -398,7 +404,7 @@ const updateEmployee = async (req, res) => {
       }
     }
 
-    const hashedPassword = password ? await bcrypt.hash(password, 10) : undefined;
+    const hashedPassword = password ? await bcrypt.hash(password, 12) : undefined;
 
     await prisma.$transaction([
       prisma.empolyee.update({
@@ -407,7 +413,7 @@ const updateEmployee = async (req, res) => {
           ...(name && { name }),
           ...(phoneNo && { phoneNo }),
           ...(email && { email }),
-          ...(hashedPassword && { password: hashedPassword }),
+          ...(hashedPassword && { password: hashedPassword, sessionVersion: { increment: 1 }, resetToken: null, resetTokenExpiry: null }),
         },
       }),
       prisma.companyStaffMembership.update({
@@ -420,10 +426,12 @@ const updateEmployee = async (req, res) => {
       }),
     ]);
 
+    if (hashedPassword) disconnectUser('EMPLOYEE', id);
+
     const employee = await prisma.empolyee.findUnique({ where: { id }, select: staffSelect });
     res.json({ message: "Company staff member updated", employee: formatStaff(employee) });
   } catch (error) {
-    console.error("Error updating company staff:", error);
+    securityLog.error("Error updating company staff:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -444,7 +452,7 @@ const deleteEmployee = async (req, res) => {
     });
     res.json({ id, message: "Company access removed" });
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -461,7 +469,7 @@ const getEmployee = async (req, res) => {
     if (!employee) return res.status(404).json({ error: "Company staff member not found" });
     res.json(formatStaff(employee));
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -543,7 +551,7 @@ const getAllEmployees = async (req, res) => {
       data: employeeActivity,
     });
   } catch (error) {
-    console.error("Error fetching employees and their activities:", error);
+    securityLog.error("Error fetching employees and their activities:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };

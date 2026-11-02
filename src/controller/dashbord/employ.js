@@ -1,3 +1,5 @@
+import { safeLogger } from '../../services/safeLogger.js';
+const securityLog = safeLogger('controller/dashbord/employ.js');
 // src/pages/api/employee/dashboard-data.js
 import { PrismaClient } from '@prisma/client';
 
@@ -121,7 +123,7 @@ const emp_dash_handler = async (req, res)=> {
       }
     });
   } catch (error) {
-    console.error("Error fetching employee stats:", error);
+    securityLog.error("Error fetching employee stats:", error);
     return res.status(500).json({ error: "Failed to fetch employee stats" });
   }
 }
@@ -203,7 +205,7 @@ const getEmployeeListItemUpdates = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching employee list item updates:', error);
+    securityLog.error('Error fetching employee list item updates:', error);
     return res.status(500).json({ error: 'Failed to fetch list item updates' });
   }
 };

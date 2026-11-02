@@ -1,8 +1,10 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/authRoutes.js');
 import { authRateLimit } from '../middleware/authRateLimit.js';
 import { requireSupplierScope } from '../middleware/supplierScope.js';
 import { requireListScope } from '../middleware/listScope.js';
 import express from "express";
-import multer from "multer";
+import multer from "../middleware/secureUpload.js";
 import path from "path";
 import fs from 'fs';
 import { filterProducts, getProductFilters } from "../controller/filterProducts.js";
@@ -111,7 +113,7 @@ const productStorage = multer.diskStorage({
 
 const productUpload = multer({
   storage: productStorage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max - allow larger images
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB max - allow larger images
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|webp|heic|heif|bmp|tiff/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -128,7 +130,7 @@ const productUpload = multer({
 router.post("/auth/login", authRateLimit("login"), login);
 router.post("/auth/register/send-otp", authRateLimit("register/send-otp"), sendRegistrationOtp);
 router.post("/auth/register", authRateLimit("register"), register);
-router.get("/auth/me", verify); // Make sure this route exists and is correctly defined
+router.get("/auth/me", isAuthenticated, verify); // Make sure this route exists and is correctly defined
 router.post("/auth/logout", logout);
 router.post("/auth/extend-trial", isAuthenticated, extendTrialWithPoints);
 router.post("/auth/forgot-password", authRateLimit("forgot-password"), forgotPassword);
@@ -181,24 +183,24 @@ router.delete("/shops/:id",isAuthenticated,isAdmin, requireSupplierScope, delete
 
 // Add a new product and associate it with a shop (with optional image upload)
 router.post('/addProductAtShop', (req, res, next) => {
-  console.log('=== addProductAtShop route hit ===');
+  securityLog.log('=== addProductAtShop route hit ===');
 
   next();
 }, shopsManage, (req, res, next) => {
-  console.log('=== Passed auth, starting multer ===');
+  securityLog.log('=== Passed auth, starting multer ===');
   productUpload.single('image')(req, res, (err) => {
     if (err) {
-      console.error('=== Multer error ===', err);
+      securityLog.error('=== Multer error ===', err);
       if (err instanceof multer.MulterError) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          return res.status(400).json({ error: 'File is too large. Maximum size is 100MB.' });
+          return res.status(400).json({ error: 'File is too large. Maximum size is 20MB.' });
         }
         return res.status(400).json({ error: `Upload error: ${err.message}` });
       } else {
         return res.status(400).json({ error: err.message });
       }
     }
-    console.log('=== Multer complete, file:', req.file ? req.file.filename : 'no file');
+    securityLog.log('=== Multer complete, file:', req.file ? req.file.filename : 'no file');
     next();
   });
 }, requireSupplierScope, addProductAtShop);
@@ -209,7 +211,7 @@ router.post('/addProductAtShopifExistAtProduct', shopsManage, (req, res, next) =
     if (err instanceof multer.MulterError) {
       // A Multer error occurred when uploading
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: 'File is too large. Maximum size is 100MB.' });
+        return res.status(400).json({ error: 'File is too large. Maximum size is 20MB.' });
       }
       return res.status(400).json({ error: `Upload error: ${err.message}` });
     } else if (err) {
@@ -364,7 +366,7 @@ router.get('/product-promotions/:shopId/:productId', shopsManage, async (req, re
       } 
     });
   } catch (error) {
-    console.error('Error fetching product promotions:', error);
+    securityLog.error('Error fetching product promotions:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch promotions' });
   }
 });
@@ -419,7 +421,7 @@ router.post('/product-promotions/:shopId/:productId', shopsManage, async (req, r
       }
     });
   } catch (error) {
-    console.error('Error adding product promotions:', error);
+    securityLog.error('Error adding product promotions:', error);
     res.status(500).json({ success: false, error: 'Failed to add promotions' });
   }
 });
@@ -450,7 +452,7 @@ router.delete('/product-promotions/:promotionId', shopsManage, async (req, res) 
     
     res.json({ success: true, message: 'Promotion deleted' });
   } catch (error) {
-    console.error('Error deleting promotion:', error);
+    securityLog.error('Error deleting promotion:', error);
     res.status(500).json({ success: false, error: 'Failed to delete promotion' });
   }
 });
@@ -480,7 +482,7 @@ router.post('/product-promotions/:shopId/:productId/apply', shopsManage, async (
       data: updated
     });
   } catch (error) {
-    console.error('Error applying promotion:', error);
+    securityLog.error('Error applying promotion:', error);
     res.status(500).json({ success: false, error: 'Failed to apply promotion' });
   }
 });

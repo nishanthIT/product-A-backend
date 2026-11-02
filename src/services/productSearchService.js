@@ -1,3 +1,5 @@
+import { safeLogger } from './safeLogger.js';
+const securityLog = safeLogger('services/productSearchService.js');
 import { barcodeAliases } from './productBarcodes.js';
 import { PrismaClient } from '@prisma/client';
 
@@ -477,9 +479,9 @@ function rebuildIndex() {
       for (const op of pendingOps) op(next);
       activeIndex = next;
       builtAt = Date.now();
-      console.log(`[productSearch] indexed ${next.size} products in ${builtAt - startedAt}ms`);
+      securityLog.log(`[productSearch] indexed ${next.size} products in ${builtAt - startedAt}ms`);
     })
-    .catch((error) => console.error('[productSearch] index build failed:', error.message))
+    .catch((error) => securityLog.error('[productSearch] index build failed:', error.message))
     .finally(() => {
       buildPromise = null;
       pendingOps = null;
@@ -520,7 +522,7 @@ async function loadFallbackCandidates(rawQuery) {
  * @returns {Promise<Array<{ id: string, score: number }>>}
  */
 export async function searchProductIds(rawQuery, { limit = 20 } = {}) {
-  if (!rawQuery || typeof rawQuery !== 'string') return [];
+  if (!rawQuery || typeof rawQuery !== 'string' || rawQuery.length > 200 || rawQuery.trim().split(/\s+/).length > 20) return [];
   if (activeIndex) {
     if (Date.now() - builtAt > INDEX_TTL_MS) rebuildIndex();
     return activeIndex.search(rawQuery, { limit });
@@ -564,6 +566,6 @@ export async function refreshIndexedProduct(id) {
     if (row) indexProduct(row);
     else removeIndexedProduct(id);
   } catch (error) {
-    console.error('[productSearch] failed to refresh product in index:', error.message);
+    securityLog.error('[productSearch] failed to refresh product in index:', error.message);
   }
 }

@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/makeList.js');
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import { PrismaClient } from "@prisma/client";
 import { getListSummaries } from '../services/listSummaries.js';
@@ -13,9 +15,9 @@ const emitListSync = (req, shopId, event, payload) => {
   if (!shopId || !req?.io) return;
   try {
     req.io.to(`shop_${shopId}_lists`).emit(event, payload);
-    console.log(`📡 Emitted ${event} to shop_${shopId}_lists`);
+    securityLog.log(`📡 Emitted ${event} to shop_${shopId}_lists`);
   } catch (err) {
-    console.error(`Socket emit failed (${event}):`, err?.message);
+    securityLog.error(`Socket emit failed (${event}):`, err?.message);
   }
 };
 
@@ -130,7 +132,7 @@ const makeList = async (req, res) => {
 
     res.status(201).json(formattedList);
   } catch (error) {
-    console.error("Error creating list:", error);
+    securityLog.error("Error creating list:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -212,7 +214,7 @@ const addProductToList = async (req, res) => {
       },
     });
 
-    console.log(`Found ${productAtShops.length} in-stock shops with product ${productId}`);
+    securityLog.log(`Found ${productAtShops.length} in-stock shops with product ${productId}`);
 
     let candidateProductAtShops = productAtShops;
 
@@ -223,7 +225,7 @@ const addProductToList = async (req, res) => {
       if (!productExists) return res.status(404).json({ error: 'Product not found' });
       const unknownProductAtShop = await getOrCreateUnknownProductAtShop(productId);
       candidateProductAtShops = [unknownProductAtShop];
-      console.log(`No active shop stock for ${productId}. Using Unknown Shop fallback.`);
+      securityLog.log(`No active shop stock for ${productId}. Using Unknown Shop fallback.`);
     }
 
     // Find the shop with the lowest effective price (considering offers)
@@ -234,7 +236,7 @@ const addProductToList = async (req, res) => {
     });
 
     const finalEffectivePrice = getEffectivePrice(lowestPriceEntry);
-    console.log(`Adding product with lowest effective price: £${finalEffectivePrice.price} (${finalEffectivePrice.hasActiveOffer ? 'offer price' : 'regular price'}) at ${lowestPriceEntry.shop.name}`);
+    securityLog.log(`Adding product with lowest effective price: £${finalEffectivePrice.price} (${finalEffectivePrice.hasActiveOffer ? 'offer price' : 'regular price'}) at ${lowestPriceEntry.shop.name}`);
 
     const { entry: listProduct, alreadyExists } = await addListProduct(prisma, {
       listId, productId, productAtShopId: lowestPriceEntry.id, quantity,
@@ -268,7 +270,7 @@ const addProductToList = async (req, res) => {
     
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
-    console.error("Error adding product to list:", error);
+    securityLog.error("Error adding product to list:", error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -359,7 +361,7 @@ const getLowestPricesInList = async (req, res) => {
       data: response,
     });
   } catch (error) {
-    console.error(error);
+    securityLog.error(error);
     res.status(500).json({ error: "Internal server error." });
   }
 };
@@ -377,10 +379,10 @@ const removeProductFromList = async (req, res) => {
     // Verify list exists
     const list = await prisma.list.findUnique({ where: { id: listId } });
 
-    console.log('List found?', list ? 'YES' : 'NO');
+    securityLog.log('List found?', list ? 'YES' : 'NO');
 
     if (!list) {
-      console.log('ERROR: List not found or does not belong to user');
+      securityLog.log('ERROR: List not found or does not belong to user');
       return res.status(404).json({ error: "List not found-e2" });
     }
 
@@ -405,7 +407,7 @@ const removeProductFromList = async (req, res) => {
     }
 
     if (!isOwner && !isTracking) {
-      console.log('ERROR: List not found or does not belong to user');
+      securityLog.log('ERROR: List not found or does not belong to user');
       return res.status(403).json({ error: "You don't have permission to modify this list" });
     }
 
@@ -419,7 +421,7 @@ const removeProductFromList = async (req, res) => {
       }
     });
 
-    console.log('Deleted count:', deleted.count);
+    securityLog.log('Deleted count:', deleted.count);
 
     if (deleted.count === 0) {
       return res.status(404).json({ error: "Product not found in list" });
@@ -433,7 +435,7 @@ const removeProductFromList = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("DELETE ERROR:", error);
+    securityLog.error("DELETE ERROR:", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -453,14 +455,14 @@ const getUserLists = async (req, res) => {
 
     res.status(200).json({ lists: formattedLists });
   } catch (error) {
-    console.error("Error fetching lists:", error);
+    securityLog.error("Error fetching lists:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
 
 // Get a specific list by ID
 const getListById = async (req, res) => {
-  console.log("Yes i am printing from here-------")
+  securityLog.log("Yes i am printing from here-------")
   const userId = req.user?.id;
   const userType = req.user?.userType;
   const { listId } = req.params;
@@ -500,7 +502,7 @@ const getListById = async (req, res) => {
       return res.status(403).json({ error: "You don't have permission to access this list" });
     }
 
-    console.log('🔍 First product raw data:', JSON.stringify(list.products[0]?.productAtShop, null, 2));
+    securityLog.log('🔍 First product raw data:', JSON.stringify(list.products[0]?.productAtShop, null, 2));
 
     // Group by productId and keep only the entry with lowest effective price (including offers)
     const productMap = new Map();
@@ -508,7 +510,7 @@ const getListById = async (req, res) => {
       const productId = lp.productAtShop.productId;
       const effectivePrice = getEffectivePrice(lp.productAtShop);
       
-      console.log('Processing product:', {
+      securityLog.log('Processing product:', {
         productId,
         productName: lp.productAtShop.product.title,
         shopName: lp.productAtShop.shop?.name,
@@ -538,7 +540,7 @@ const getListById = async (req, res) => {
           quantity: lp.quantity || 1,
         });
         
-        console.log(`✅ Set product in map with effective price £${effectivePrice.price} ${effectivePrice.hasActiveOffer ? '(OFFER)' : '(REGULAR)'} - aiel: ${lp.productAtShop.card_aiel_number}`);
+        securityLog.log(`✅ Set product in map with effective price £${effectivePrice.price} ${effectivePrice.hasActiveOffer ? '(OFFER)' : '(REGULAR)'} - aiel: ${lp.productAtShop.card_aiel_number}`);
       }
     });
 
@@ -553,7 +555,7 @@ const getListById = async (req, res) => {
       products: Array.from(productMap.values()),
     };
 
-    console.log('📦 Sending formatted list with products and aiel numbers:', 
+    securityLog.log('📦 Sending formatted list with products and aiel numbers:',
       JSON.stringify(formattedList.products.map(p => ({
         name: p.productName,
         aielNumber: p.aielNumber,
@@ -564,7 +566,7 @@ const getListById = async (req, res) => {
 
     res.status(200).json(formattedList);
   } catch (error) {
-    console.error("Error fetching list:", error);
+    securityLog.error("Error fetching list:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -610,7 +612,7 @@ const deleteList = async (req, res) => {
       message: "List deleted successfully" 
     });
   } catch (error) {
-    console.error("Error deleting list:", error);
+    securityLog.error("Error deleting list:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -660,7 +662,7 @@ const renameList = async (req, res) => {
 
     res.status(200).json({ success: true, id: updated.id, name: updated.name });
   } catch (error) {
-    console.error("Error renaming list:", error);
+    securityLog.error("Error renaming list:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -683,7 +685,7 @@ const untrackList = async (req, res) => {
 
     res.status(200).json({ success: true, removed: result.count });
   } catch (error) {
-    console.error("Error untracking list:", error);
+    securityLog.error("Error untracking list:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };

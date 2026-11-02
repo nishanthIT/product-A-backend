@@ -1,0 +1,29 @@
+✔ registration/recovery responses and resend cooldown do not reveal whether an address exists (1473.953111ms)
+✔ account restrictions prevent new sessions, authenticated me and socket connections until expiry (180.236852ms)
+✔ cookie-only socket restoration authenticates the correct user; explicit bad tokens cannot fall back (114.434827ms)
+✔ durable OTP attempts and consumption remain atomic across independent application stores with Redis unavailable (219.798468ms)
+✔ reset-code races change the password once and revoke prior sessions (534.615934ms)
+✔ registration retries remain idempotent while a valid proof cannot create multiple accounts (1741.076214ms)
+Request failed {
+  name: 'Error',
+  code: 'INVALID_UPLOAD',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ authenticated image routes reject active content and traversal, and private incident images stay tenant scoped (144.187032ms)
+✔ uploaded raster bytes are decoded and re-encoded; names and MIME cannot authorize active content (20.034909ms)
+✔ truncated images, decompression bombs, oversize files and documents in image fields are rejected (245.219996ms)
+✔ text documents require valid text and generated image paths reject traversal (0.646856ms)
+✔ multipart validation occurs before disk write and accepted filenames are random safe extensions (43.034779ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5902.455037

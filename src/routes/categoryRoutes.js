@@ -13,9 +13,9 @@ import { isAuthenticated, isAdmin } from "../middleware/authware.js";
 const router = express.Router();
 
 // Public routes - anyone can view/search categories
-router.get("/", getAllCategories);
-router.get("/search", searchCategories);
-router.get("/product-categories", getProductCategories);
+router.get("/", isAuthenticated, getAllCategories);
+router.get("/search", isAuthenticated, searchCategories);
+router.get("/product-categories", isAuthenticated, getProductCategories);
 
 // Protected routes - only authenticated users can add categories
 router.post("/", isAuthenticated, addCategory);

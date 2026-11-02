@@ -35,7 +35,7 @@ export async function removeMessages(db, ids) {
     if (!message || message.deletedAt) continue;
     const legacyReports = await db.contentReport.findMany({ where: { messageId: id } });
     for (const report of legacyReports) if (!report.evidence) {
-      await db.contentReport.update({ where: { id: report.id }, data: { ...await captureEvidence(message), reportedUserId: message.senderId, reportedUserType: message.senderType, chatId: message.chatId } });
+      await db.contentReport.update({ where: { id: report.id }, data: { ...await captureEvidence(message, { db }), reportedUserId: message.senderId, reportedUserType: message.senderType, chatId: message.chatId } });
     }
     await db.message.update({ where: { id }, data: { deletedAt: new Date(), content: '[Removed by moderation]' } });
     removed.push({ id, chatId: message.chatId });

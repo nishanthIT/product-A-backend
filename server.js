@@ -1,5 +1,14 @@
+import { trustedProxySetting, corsConfiguration, csrfProtection, securityHeaders, requestConstraints, safeErrorHandler } from './src/middleware/httpSecurity.js';
+import { securityResponseObserver, publicApiProtection } from './src/middleware/securityProtection.js';
+import securityAdminRoutes from './src/routes/securityAdminRoutes.js';
+import { pruneSecurityEvents, securityAuditKey } from './src/services/securityProtection.js';
 import 'dotenv/config';
 import { verifyServiceSchema } from './src/services/serviceReadiness.js';
+import { ensureGlobalChat } from './src/services/globalChat.js';
+import { startChatRetentionWorker, chatRetentionStatus, retentionConfig } from './src/services/chatRetention.js';
+import { getChatStorage } from './src/services/chatStorage.js';
+import { initRealtimeAdapter } from './src/realtime/redisAdapter.js';
+import { drainChatWork } from './src/services/chatBroadcast.js';
 import { serviceError } from './src/services/serviceErrors.js';
 import { startModerationWorker, moderationWorkerStatus } from './src/services/moderation.js';
 import { restoreGuard } from './src/middleware/restoreGuard.js';
@@ -42,16 +51,21 @@ import multiLayerCache from './src/services/multiLayerCache.js';
 import expiryNotificationService from './src/services/expiryNotificationService.js';
 import { attachSocketServer } from './src/realtime/socketServer.js';
 
+securityAuditKey();
 jwtSecret(); // Fail before accepting requests when the signing secret is missing.
 const app = express();
 const server = createServer(app);
 
 // Respect reverse-proxy headers in production (protocol/host forwarding).
-app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.set('trust proxy', trustedProxySetting());
+app.set('query parser', 'simple');
 
 // Dependency failures are startup errors, not a healthy HTTP server with broken auth.
 try {
   await verifyServiceSchema();
+  getChatStorage(); retentionConfig();
+  await ensureGlobalChat();
   console.log('Session validation dependencies ready (PostgreSQL)');
   await redisService.connect();
   console.log('Cache status:', redisService.getStatus());
@@ -60,26 +74,15 @@ try {
   process.exit(1);
 }
 
-// Configure Socket.IO with CORS - Allow all origins
-const io = new Server(server, {
-  cors: {
-    origin: true,
-    credentials: true,
-    methods: ['GET', 'POST']
-  }
+const corsOptions = corsConfiguration();
+const io = new Server(server, { cors: corsOptions, maxHttpBufferSize: 1024 * 1024,
+  allowRequest: (req, callback) => corsOptions.origin(req.headers.origin, (_error, allowed) => callback(null, Boolean(allowed))),
 });
-
-// CORS configuration - Allow all origins
-const corsOptions = {
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie', 'X-Requested-With', 'X-Supermarket-Id', 'Idempotency-Key'],
-  exposedHeaders: ['Set-Cookie'],
-  optionsSuccessStatus: 204
-};
+const realtimeAdapter = await initRealtimeAdapter(io);
 
 // A restored environment stays closed until deletion-ledger replay and operational checks finish.
+app.use(securityHeaders);
+app.use(securityResponseObserver);
 app.use(restoreGuard);
 app.use(cors(corsOptions));
 
@@ -87,7 +90,9 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
 app.use(cookieParser());
-app.use(express.json());
+app.use(csrfProtection());
+app.use(express.json({ limit: '256kb', strict: true }));
+app.use(requestConstraints);
 
 // Serve uploaded files
 app.use('/uploads', privateUploads);
@@ -110,6 +115,7 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use('/api', publicApiProtection);
 app.use('/api/chat-safety', chatSafetyRoutes);
 app.use(publicResources);
 app.use("/api/account-deletion", accountDeletionRoutes);
@@ -117,6 +123,7 @@ app.use("/api", authRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/price-reports", priceReportsRoutes);
 app.use("/api/promotions", promotionsRoutes);
+app.use("/api/admin/security", securityAdminRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/lists", listRoutes);
 app.use("/api/advertisements", advertisementsRoutes);
@@ -137,39 +144,34 @@ app.use('/api/supplier-payouts', supplierPayoutRoutes);
 app.use('/api/shift-sheet', shiftSheetRoutes);
 app.use('/api/products', compareRoutes);
 
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('=== GLOBAL ERROR HANDLER ===');
-  console.error('Error:', err.message);
-  console.error('Stack:', err.stack);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-// Health check endpoint with Redis status
-app.get('/api/health', async (req, res) => {
-  try { await verifyServiceSchema(); }
-  catch (error) {
-    console.error('Backend health check failed', serviceError(error));
-    return res.status(503).json({ success: false, status: 'unavailable', service: error.service || 'database' });
+// Public liveness reveals no infrastructure, cache keys or operational metadata.
+let healthAt = 0, databaseHealthy = false, healthInFlight = null;
+app.get('/api/health', async (_req, res) => {
+  if (Date.now() - healthAt > 5000) {
+    healthInFlight ||= verifyServiceSchema().then(() => { databaseHealthy = true; }).catch(() => { databaseHealthy = false; }).finally(() => { healthAt = Date.now(); healthInFlight = null; });
+    await healthInFlight;
   }
-  const status = cacheService.getStatus();
-  res.status(moderationWorkerStatus.state === 'ready' ? 200 : 503).json({
-    success: moderationWorkerStatus.state === 'ready',
-    status: moderationWorkerStatus.state === 'ready' ? 'healthy' : 'degraded',
-    services: { sessions: 'ready', moderation: moderationWorkerStatus },
-    timestamp: new Date().toISOString(),
-    cache: status,
-    inventoryCache: multiLayerCache.getStats(),
-    uptime: process.uptime()
-  });
+  const healthy = databaseHealthy && moderationWorkerStatus.state === 'ready';
+  res.status(healthy ? 200 : 503).json({ success: healthy, status: healthy ? 'healthy' : 'unavailable' });
 });
+app.use(safeErrorHandler);
 
 let stopModerationWorker;
+let stopChatRetentionWorker;
+const securityRetentionTimer = setInterval(() => {
+  pruneSecurityEvents().catch(error => console.error('Security retention failed', serviceError(error)));
+}, 3600000);
+securityRetentionTimer.unref();
+// Bound slow uploads/headers; upstream and database timeouts remain deployment controls.
+server.requestTimeout = 60000;
+server.headersTimeout = 15000;
+server.keepAliveTimeout = 5000;
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, process.env.HOST || '0.0.0.0', () => {
   console.log(`Server is running on http://localhost:${PORT}`);
   
   stopModerationWorker = startModerationWorker(io);
+  stopChatRetentionWorker = startChatRetentionWorker(io);
   // Start expiry notification service
   expiryNotificationService.start();
   console.log('✅ Expiry notification service started');
@@ -178,10 +180,14 @@ server.listen(PORT, () => {
 // Allow expiry notification service to push realtime events to connected users.
 expiryNotificationService.setRealtimeContext(io);
 
-for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, async () => {
+  const force = setTimeout(() => process.exit(0), 30000); force.unref();
+  clearInterval(securityRetentionTimer);
   stopModerationWorker?.();
-  void redisService.disconnect();
+  await stopChatRetentionWorker?.();
+  await drainChatWork();
+  await realtimeAdapter.close();
+  await redisService.disconnect();
   io.close();
   server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 5000).unref();
 });

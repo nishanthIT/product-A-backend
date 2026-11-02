@@ -16,13 +16,13 @@ export function registrationRequestHash(input, secret) {
   ])).digest('hex');
 }
 
-export function normalizeRegistration(body) {
+export function normalizeRegistration(body = {}) {
   const clean = (value) => typeof value === 'string' ? value.trim() : '';
   const name = clean(body.name);
   const email = clean(body.email).toLowerCase();
   const password = body.password;
-  if (!name || name.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || typeof password !== 'string' || password.length < 6 || password.length > 1024) {
-    throw new SupermarketError('Enter a valid name, email and password (at least 6 characters).', 400, 'INVALID_REGISTRATION');
+  if (!name || name.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || typeof password !== 'string' || password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) {
+    throw new SupermarketError('Enter a valid name, email and password (8 characters minimum, 72 UTF-8 bytes maximum).', 400, 'INVALID_REGISTRATION');
   }
   if (!/^\d{6}$/.test(String(body.otp ?? '').trim())) throw new SupermarketError('Enter the six-digit verification code.', 400, 'INVALID_OTP');
   const shopName = body.shopName === undefined ? `${name}'s Shop` : clean(body.shopName);

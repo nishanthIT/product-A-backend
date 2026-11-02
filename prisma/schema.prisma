@@ -91,8 +91,10 @@ model Product {
 model ProductPackaging {
   id                 String   @id @default(cuid())
   productId          String
-  caseBarcode        String
-  caseGtin           String   @unique
+  // Some suppliers verify case size/count but do not expose an outer barcode.
+  // Both barcode fields stay null until a barcode is independently verified.
+  caseBarcode        String?
+  caseGtin           String?  @unique
   unitsPerCase       Int
   packageSize        String
   packageSizeKey     String
@@ -142,6 +144,7 @@ model Shop {
   creationReceipts SupermarketCreationReceipt[]
   retailStock SupermarketProductState[]
   operationalLists List[]
+  scopedChats Chat[] @relation("ShopChats")
 
   @@index([shopType])
   @@unique([id, shopType])
@@ -282,7 +285,7 @@ model PriceTier {
   productAtShopId String
   quantity        Int
   price           Decimal
-  // Imported tiers are case totals; quantity counts retail units when the base is one unit.
+  // Linked tiers are case totals and quantity counts retail units, independently of the base pack.
   packagingId     String?
   sourcePricing   Json?
   priceObservedAt DateTime?
@@ -541,8 +544,12 @@ model Chat {
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
   lastMessageAt DateTime?
+  shopId        String?
+  shop          Shop?             @relation("ShopChats", fields: [shopId], references: [id], onDelete: SetNull)
   participants  ChatParticipant[]
   messages      Message[]
+
+  @@index([shopId, type])
 }
 
 model ChatParticipant {
@@ -575,11 +582,25 @@ model Message {
   chat           Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
   reports        ContentReport[]
   readReceipts   MessageRead[]
+  deliveryReceipts MessageDelivery[]
   sharedList     List?         @relation("SharedListMessages", fields: [sharedListId], references: [id], onDelete: SetNull)
 
   @@index([chatId, createdAt])
   @@index([senderId, senderType])
   @@index([sharedListId])
+  @@index([createdAt, id])
+  @@index([attachmentUrl])
+}
+
+model MessageDelivery {
+  id String @id @default(cuid())
+  messageId String
+  userId Int
+  userType UserType
+  deliveredAt DateTime @default(now())
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  @@unique([messageId, userId, userType])
+  @@index([userId, userType])
 }
 
 model MessageRead {
@@ -1120,7 +1141,46 @@ model ChatUpload {
   uploaderId Int
   uploaderType UserType
   createdAt DateTime @default(now())
+  storageProvider String?
+  storageKey String?
+  storageBucket String?
+  storageEndpoint String?
+  storageVersionId String?
+  contentType String?
+  pendingDeletion Boolean @default(false)
   @@index([uploaderId, uploaderType])
+}
+
+// One durable run per UTC schedule day. Batches lock the run row and commit
+// deletion plus attachment outbox entries together, so restart/retry is safe.
+model ChatRetentionRun {
+  id String @id
+  cutoff DateTime
+  status String @default("RUNNING")
+  removed Int @default(0)
+  attempts Int @default(0)
+  lastError String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+}
+
+// File deletion follows committed message deletion. Provider metadata remains
+// until deletion succeeds, even if the upload owner or process disappears.
+model ChatAttachmentDeletionJob {
+  filename String @id
+  storageProvider String?
+  storageKey String?
+  storageBucket String?
+  storageEndpoint String?
+  storageVersionId String?
+  contentType String?
+  attempts Int @default(0)
+  lastError String?
+  nextAttemptAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([nextAttemptAt])
 }
 
 // Durable deletion workflow. IDs support backup erasure; no raw password/token is stored.
@@ -1234,4 +1294,91 @@ model ModerationDeletionJob {
   updatedAt DateTime @updatedAt
   completedAt DateTime?
   @@index([status, updatedAt])
+}
+
+// Central security telemetry and enforcement. Typed identities do not cascade
+// when an account is deleted, preserving the short-lived investigation record.
+model SecurityEvent {
+  id String @id @default(cuid())
+  createdAt DateTime @default(now())
+  subjectKey String?
+  userId Int?
+  userType String?
+  username String?
+  shopId String?
+  sourceIp String?
+  ipHash String?
+  sessionHash String?
+  endpoint String
+  method String
+  userAgent String
+  category String
+  severity String
+  rule String
+  reason String
+  action String
+  evidence Json
+  riskScore Int @default(0)
+  restrictionId String?
+  status String @default("OPEN")
+  reviewedBy Int?
+  reviewedAt DateTime?
+
+  @@index([createdAt])
+  @@index([subjectKey, createdAt])
+  @@index([ipHash, createdAt])
+  @@index([category, severity, createdAt])
+  @@index([status, createdAt])
+}
+
+model SecurityRestriction {
+  id String @id @default(cuid())
+  subjectKey String
+  scope String
+  startedAt DateTime @default(now())
+  until DateTime
+  liftedAt DateTime?
+  reason String
+  source String
+  createdBy Int?
+  enforcementCount Int @default(0)
+
+  @@unique([subjectKey, scope])
+  @@index([until])
+}
+
+model SecurityException {
+  id String @id @default(cuid())
+  subjectKey String
+  scope String
+  until DateTime
+  createdAt DateTime @default(now())
+  liftedAt DateTime?
+  createdBy Int
+  reason String
+
+  @@index([subjectKey, scope, until])
+}
+
+model SecurityPolicy {
+  id String @id @default("default")
+  values Json
+  updatedAt DateTime @updatedAt
+  updatedBy Int
+}
+
+// Globally serialized HMAC chain detects modification/reordering by an actor
+// without the separate audit key. Migration also rejects SQL UPDATE/DELETE.
+model SecurityAdminAudit {
+  sequence Int @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  adminId Int
+  action String
+  reason String
+  details Json
+  sourceIp String?
+  previousHash String
+  hash String
+
+  @@index([createdAt])
 }

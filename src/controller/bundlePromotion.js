@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/bundlePromotion.js');
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
@@ -77,7 +79,7 @@ const createBundlePromotion = async (req, res) => {
       data: bundlePromotion
     });
   } catch (error) {
-    console.error("Error creating bundle promotion:", error);
+    securityLog.error("Error creating bundle promotion:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -137,7 +139,7 @@ const getBundlePromotions = async (req, res) => {
       data: bundlePromotions
     });
   } catch (error) {
-    console.error("Error fetching bundle promotions:", error);
+    securityLog.error("Error fetching bundle promotions:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -183,7 +185,7 @@ const getBundlePromotion = async (req, res) => {
       data: bundlePromotion
     });
   } catch (error) {
-    console.error("Error fetching bundle promotion:", error);
+    securityLog.error("Error fetching bundle promotion:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -277,7 +279,7 @@ const updateBundlePromotion = async (req, res) => {
       data: updated
     });
   } catch (error) {
-    console.error("Error updating bundle promotion:", error);
+    securityLog.error("Error updating bundle promotion:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -310,7 +312,7 @@ const deleteBundlePromotion = async (req, res) => {
       message: "Bundle promotion deleted successfully"
     });
   } catch (error) {
-    console.error("Error deleting bundle promotion:", error);
+    securityLog.error("Error deleting bundle promotion:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -374,7 +376,7 @@ const checkProductBundleOffers = async (req, res) => {
       offers: bundleOffers
     });
   } catch (error) {
-    console.error("Error checking product bundle offers:", error);
+    securityLog.error("Error checking product bundle offers:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -490,7 +492,7 @@ const checkCartBundleOffers = async (req, res) => {
       partialOffers
     });
   } catch (error) {
-    console.error("Error checking cart bundle offers:", error);
+    securityLog.error("Error checking cart bundle offers:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };

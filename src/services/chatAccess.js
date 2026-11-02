@@ -1,40 +1,30 @@
-import { teamShopWhere } from './chatDirectory.js';
 import { blockedPeers } from './chatSafety.js';
+import { selectedChatShop, visibleShopChat, chatOwningShop, rosterForShop, chatIdentity } from './shopChatScope.js';
 import { PrismaClient } from '@prisma/client';
-
+import { findGlobalChat, retailChatRoster, visibleCommunityDirect } from './globalChat.js';
 const prisma = new PrismaClient();
 
-export const GLOBAL_CHAT_NAME = 'ALL Chat';
-
-
-/**
- * Who may read/post in a chat. A shop's group chat is reachable only through the
- * caller's verified ownership or ACTIVE membership; stale participants never grant access.
- * Returns { chat, canRead, canJoin } or null if the chat does not exist.
- */
+/** REST, private attachments and sockets share retail and private-team rules. */
 export async function getChatAccess(user, chatId, db = prisma) {
-  if (!user || !chatId) return null;
-  const chat = await db.chat.findUnique({
-    where: { id: String(chatId) },
-    select: { id: true, type: true, name: true, participants: { select: { userId: true, userType: true } } },
-  });
+  if (!user || typeof chatId !== 'string') return null;
+  const [chat, shop] = await Promise.all([
+    db.chat.findUnique({ where: { id: chatId }, include: { participants: true } }),
+    selectedChatShop(user, db),
+  ]);
   if (!chat) return null;
-
-  if (chat.type === 'PERSONAL') {
+  const isGlobalChat = !chat.shopId && chat.type === 'GROUP' && (await findGlobalChat(db))?.id === chat.id;
+  const owning = isGlobalChat ? null : chat.shopId ? { id: chat.shopId } : await chatOwningShop(chat, db);
+  let canRead = !!shop && (isGlobalChat || (chat.type === 'PERSONAL' && !chat.shopId
+    ? visibleCommunityDirect(user, chat, await retailChatRoster(db, chat.participants))
+    : owning?.id === shop.id && visibleShopChat(user, chat, shop)));
+  if (canRead && chat.type === 'PERSONAL') {
     const peers = await blockedPeers(user, db);
-    if (chat.participants.some(p => peers.some(b => b.id === p.userId && b.userType === p.userType))) return { chat, canRead: false, canJoin: false };
+    canRead = !chat.participants.some(p => peers.some(b => b.id === p.userId && b.userType === p.userType));
   }
-  const isParticipant = chat.participants.some((p) => p.userId === user.id && p.userType === user.userType);
-  const isAdmin = user.userType === 'ADMIN';
-
-  if (chat.type === 'GROUP') {
-    const shop = await db.shop.findFirst({ where: { groupChatId: chat.id }, select: { id: true } });
-    if (shop) {
-      const ownShop = !!await db.shop.findFirst({ where: { id: shop.id, ...teamShopWhere(user) }, select: { id: true } });
-      return { chat, shopId: shop.id, canRead: ownShop || isAdmin, canJoin: ownShop };
-    }
-    if (chat.name === GLOBAL_CHAT_NAME) return { chat, canRead: true, canJoin: true };
-  }
-
-  return { chat, canRead: isParticipant || isAdmin, canJoin: false };
+  // Shop-list sharing remains available to two current teammates, but can never
+  // expose shop data to the global room or a direct recipient from another shop.
+  const teammates = new Set(rosterForShop(shop).map(chatIdentity));
+  const listShopId = isGlobalChat || (chat.type === 'PERSONAL' && !chat.participants.every(p => teammates.has(chatIdentity(p)))) ? null : shop?.id;
+  return { chat, shopId: listShopId,
+    isGlobalChat, canRead, canJoin: canRead && (isGlobalChat || (chat.type === 'GROUP' && chat.id === shop.groupChatId)) };
 }

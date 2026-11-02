@@ -1,7 +1,9 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/advertisements.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated } from '../middleware/authware.js';
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -70,21 +72,24 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+const publicListingAccess = (req, res, next) => req.query.all === 'true'
+  ? isAuthenticated(req, res, () => requireAdmin(req, res, next)) : next();
+
 // GET /api/advertisements - Get all active advertisements (public)
-router.get('/', async (req, res) => {
+router.get('/', publicListingAccess, async (req, res) => {
   try {
-    const { all } = req.query;
+    const { all, page = 1 } = req.query;
     
     const whereCondition = all === 'true' ? {} : { isActive: true };
 
     const advertisements = await prisma.advertisement.findMany({
       where: whereCondition,
-      orderBy: { sortOrder: 'asc' }
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }], take: 101, skip: (Number(page) - 1) * 100
     });
 
-    res.json({ advertisements: advertisements.map(normalizeAdvertisement) });
+    res.json({ advertisements: advertisements.slice(0, 100).map(normalizeAdvertisement), page: Number(page), hasMore: advertisements.length > 100 });
   } catch (error) {
-    console.error('Error fetching advertisements:', error);
+    securityLog.error('Error fetching advertisements:', error);
     res.status(500).json({ error: 'Failed to fetch advertisements' });
   }
 });
@@ -112,7 +117,7 @@ router.post('/', authenticateToken, requireAdmin, upload.single('image'), async 
 
     res.status(201).json({ advertisement: normalizeAdvertisement(advertisement) });
   } catch (error) {
-    console.error('Error creating advertisement:', error);
+    securityLog.error('Error creating advertisement:', error);
     res.status(500).json({ error: 'Failed to create advertisement' });
   }
 });
@@ -140,7 +145,7 @@ router.put('/:id', authenticateToken, requireAdmin, upload.single('image'), asyn
 
     res.json({ advertisement: normalizeAdvertisement(advertisement) });
   } catch (error) {
-    console.error('Error updating advertisement:', error);
+    securityLog.error('Error updating advertisement:', error);
     res.status(500).json({ error: 'Failed to update advertisement' });
   }
 });
@@ -156,7 +161,7 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
 
     res.json({ message: 'Advertisement deleted successfully' });
   } catch (error) {
-    console.error('Error deleting advertisement:', error);
+    securityLog.error('Error deleting advertisement:', error);
     res.status(500).json({ error: 'Failed to delete advertisement' });
   }
 });

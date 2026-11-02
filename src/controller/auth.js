@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/auth.js');
 import { serviceError } from '../services/serviceErrors.js';
 import { verifySessionToken, revokeSessionToken, isInvalidSession } from '../services/sessionTokens.js';
 import { jwtSecret, readSessionToken, sessionCookieOptions } from '../services/sessionSecurity.js';
@@ -15,90 +17,20 @@ import { findRegistrationRetry, normalizeRegistration, provisionRegistration, re
 
 const prisma = new PrismaClient();
 
-// â”€â”€â”€ OTP helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// 6-digit codes, stored hashed in Redis (memory fallback) with a 10 min TTL,
-// max 5 verify attempts and a 60s resend cooldown.
-const OTP_TTL_SECONDS = 10 * 60;
-const OTP_MAX_ATTEMPTS = 5;
-const OTP_RESEND_COOLDOWN = 60;
-
-const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
-
-const hashOtp = (email, code) =>
-  crypto
-    .createHmac('sha256', jwtSecret())
-    .update(`${email}:${code}`)
-    .digest('hex');
-
-const otpKey = (kind, email) => `otp:${kind}:${email}`;
-const otpCooldownKey = (kind, email) => `otp_cd:${kind}:${email}`;
-
-/** Returns remaining cooldown seconds, or 0 if a new code may be sent. */
-async function getOtpCooldown(kind, email) {
-  const raw = await redisService.get(otpCooldownKey(kind, email));
-  if (!raw) return 0;
-  const remaining = Math.ceil((Number(raw) - Date.now()) / 1000);
-  return remaining > 0 ? remaining : 0;
-}
-
-/** Generates, stores and returns a fresh OTP code for `email`. */
-async function issueOtp(kind, email) {
-  const code = crypto.randomInt(100000, 1000000).toString();
-  await redisService.set(
-    otpKey(kind, email),
-    { hash: hashOtp(email, code), attempts: 0, expiresAt: Date.now() + OTP_TTL_SECONDS * 1000 },
-    OTP_TTL_SECONDS
-  );
-  await redisService.set(
-    otpCooldownKey(kind, email),
-    String(Date.now() + OTP_RESEND_COOLDOWN * 1000),
-    OTP_RESEND_COOLDOWN
-  );
-  return code;
-}
-
-/** Verifies an OTP. On success the code is consumed. Returns { ok, error }. */
-async function verifyOtp(kind, email, code, { consume = true } = {}) {
-  const record = await redisService.get(otpKey(kind, email), true);
-  if (!record || !record.hash || Date.now() > Number(record.expiresAt)) {
-    return { ok: false, error: 'This code has expired. Please request a new one.' };
-  }
-  if (record.attempts >= OTP_MAX_ATTEMPTS) {
-    await redisService.del(otpKey(kind, email));
-    return { ok: false, error: 'Too many incorrect attempts. Please request a new code.' };
-  }
-
-  const expected = Buffer.from(record.hash, 'hex');
-  const provided = Buffer.from(hashOtp(email, String(code).trim()), 'hex');
-  const matches = expected.length === provided.length && crypto.timingSafeEqual(expected, provided);
-
-  if (!matches) {
-    const remainingTtl = Math.max(1, Math.ceil((Number(record.expiresAt) - Date.now()) / 1000));
-    await redisService.set(
-      otpKey(kind, email),
-      { ...record, attempts: (record.attempts || 0) + 1 },
-      remainingTtl
-    );
-    const attemptsLeft = OTP_MAX_ATTEMPTS - (record.attempts || 0) - 1;
-    return {
-      ok: false,
-      error:
-        attemptsLeft > 0
-          ? `Incorrect code. ${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining.`
-          : 'Too many incorrect attempts. Please request a new code.',
-    };
-  }
-
-  if (consume) await redisService.del(otpKey(kind, email));
-  return { ok: true };
-}
+import { OTP_TTL_SECONDS, OTP_RESEND_COOLDOWN, otpKey, reserveOtpDelivery, issueOtp, verifyOtp } from '../services/otpSecurity.js';
+import { sessionSignOptions } from '../services/sessionSecurity.js';
+import { recordSecurityEvent, activeSecurityRestriction } from '../services/securityProtection.js';
+import { sendSecurityRestriction } from '../middleware/securityProtection.js';
+const normalizeEmail = email => typeof email === 'string' ? email.trim().toLowerCase() : '';
+const validPassword = value => typeof value === 'string' && value.length >= 8 && Buffer.byteLength(value, 'utf8') <= 72;
+const dummyPasswordHash = bcrypt.hashSync('not-an-account-credential', 12);
 
 const login = async (req, res) => {
   try {
-    const { password } = req.body;
-    const email = normalizeEmail(req.body.email);
+    const { password } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
     
-    if (!email || !password) {
+    if (!email || email.length > 254 || typeof password !== 'string' || password.length > 1024 || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
     
@@ -126,6 +58,8 @@ const login = async (req, res) => {
     }
     
     if (!user) {
+      await bcrypt.compare(password, dummyPasswordHash);
+      await recordSecurityEvent(req, { category: 'authentication', severity: 'medium', rule: 'AUTH_FAILURE', reason: 'Sign-in failed', subjectKey: req.authSecuritySubject });
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     
@@ -133,6 +67,14 @@ const login = async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     
     if (!isPasswordValid) {
+      // Link known-account failures to its investigation history without
+      // granting a principal or changing the public sign-in response.
+      const eventRequest = Object.create(req);
+      eventRequest.user = { id: user.id, userType, name: user.name, shopId: user.shopId || null };
+      await recordSecurityEvent(eventRequest, {
+        category: 'authentication', severity: 'medium', rule: 'AUTH_FAILURE', reason: 'Sign-in failed',
+        subjectKey: `${userType}:${user.id}`, evidence: { identityHash: req.authSecuritySubject?.replace(/^identity:/, '') },
+      });
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
@@ -147,11 +89,14 @@ const login = async (req, res) => {
       });
     }
     
+    req.user = principal.user;
+    const restriction = await activeSecurityRestriction(req, 'auth');
+    if (restriction) return sendSecurityRestriction(res, restriction);
     // Generate JWT - Extended to 7 days for better mobile UX
     const token = jwt.sign(
       tokenPayload,
       jwtSecret(),
-      { expiresIn: '7d', jwtid: crypto.randomUUID() }
+      { ...sessionSignOptions(), jwtid: crypto.randomUUID() }
     );
     
     // CRITICAL: Send token both as cookie AND in response body
@@ -163,7 +108,7 @@ const login = async (req, res) => {
       token: token // Send token in response body as backup
     });
   } catch (error) {
-    console.error('Login error:', error);
+    securityLog.error('Login error:', serviceError(error));
     return res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -172,17 +117,17 @@ const login = async (req, res) => {
 // No account is created until the code is verified in /auth/register.
 const sendRegistrationOtp = async (req, res) => {
   try {
-    const { name, password } = req.body;
-    const email = normalizeEmail(req.body.email);
+    const { name, password } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
 
-    if (!name || !email || !password) {
+    if (typeof name !== 'string' || !name.trim() || name.length > 200 || !email || email.length > 254 || !password) {
       return res.status(400).json({ error: 'Name, email and password are required' });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: 'Please enter a valid email address' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    if (!validPassword(password)) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters and at most 72 UTF-8 bytes.' });
     }
 
     // Check if user already exists in any table
@@ -191,29 +136,21 @@ const sendRegistrationOtp = async (req, res) => {
       prisma.empolyee.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }),
       prisma.customer.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }),
     ]);
-    if (existingAdmin || existingEmployee || existingCustomer) {
-      return res.status(400).json({ error: 'User with this email already exists' });
+    // Reserve the same cooldown for every address, including existing accounts.
+    const cooldown = await reserveOtpDelivery('register', email);
+    if (!cooldown && !(existingAdmin || existingEmployee || existingCustomer)) {
+      const code = await issueOtp('register', email);
+      await sendRegistrationOtpEmail(email, code).catch(error => securityLog.warn('Registration email delivery unavailable', error));
     }
-
-    const cooldown = await getOtpCooldown('register', email);
-    if (cooldown > 0) {
-      return res.status(429).json({
-        error: `Please wait ${cooldown}s before requesting another code.`,
-        retryAfter: cooldown,
-      });
-    }
-
-    const code = await issueOtp('register', email);
-    await sendRegistrationOtpEmail(email, code);
 
     return res.status(200).json({
       success: true,
-      message: 'Verification code sent to your email.',
+      message: 'If this email can be registered, a verification code has been sent.',
       resendIn: OTP_RESEND_COOLDOWN,
       expiresIn: OTP_TTL_SECONDS,
     });
   } catch (error) {
-    console.error('Send registration OTP error:', error);
+    securityLog.error('Send registration OTP error:', serviceError(error));
     return res.status(500).json({ error: 'Failed to send verification code. Please try again.' });
   }
 };
@@ -237,10 +174,15 @@ const register = async (req, res) => {
       }
     }
     const { customer, shop, replayed } = result;
+    const principal = await resolvePrincipal({ id: customer.id, userType: 'CUSTOMER', sv: customer.sessionVersion ?? 0 });
+    if (!principal.user) return res.status(principal.status).json({ error: 'This account is not available. Please contact support.', code: principal.code });
+    req.user = principal.user;
+    const restriction = await activeSecurityRestriction(req, 'auth');
+    if (restriction) return sendSecurityRestriction(res, restriction);
     const token = jwt.sign(
       { id: customer.id, email: customer.email, userType: 'CUSTOMER', sv: customer.sessionVersion ?? 0 },
       jwtSecret(),
-      { expiresIn: '7d', jwtid: crypto.randomUUID() }
+      { ...sessionSignOptions(), jwtid: crypto.randomUUID() }
     );
     res.cookie('auth_token', token, { ...sessionCookieOptions(), maxAge: 7 * 24 * 60 * 60 * 1000 });
     const { password: _, resetToken: _rt, resetTokenExpiry: _rte, shop: _shop, sessionVersion: _sv, ...safeCustomer } = customer;
@@ -252,7 +194,7 @@ const register = async (req, res) => {
     });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message, code: error.code });
-    console.error('Registration failed:', error.code || error.name);
+    securityLog.error('Registration failed:', error.code || error.name);
     return res.status(500).json({ error: 'Unable to complete registration. Please retry.' });
   }
 };
@@ -273,8 +215,8 @@ const logout = async (req, res) => {
 
 const verify = async (req, res) => {
   try {
-    // console.log('Cookies received:', req.cookies);
-    // console.log('Headers:', req.headers);
+    // securityLog.log('Cookies received:', req.cookies);
+    // securityLog.log('Headers:', req.headers);
     
     // Try to get token from cookie OR authorization header
     const token = readSessionToken(req);
@@ -286,7 +228,7 @@ const verify = async (req, res) => {
     const decoded = await verifySessionToken(token);
 
     if (decoded.userType === 'EMPLOYEE' || decoded.userType === 'ADMIN') {
-      const principal = await resolvePrincipal(decoded);
+      const principal = req.user ? { user: req.user } : await resolvePrincipal(decoded, undefined, req.get('X-Supermarket-Id'));
       if (!principal.user) {
         return res.status(principal.status).json({ error: principal.error, code: principal.code });
       }
@@ -319,7 +261,7 @@ const verify = async (req, res) => {
           trialEndDate: true,
           points: true
         }
-      }), resolvePrincipal(decoded, undefined, req.get('X-Supermarket-Id'))]);
+      }), req.user ? { user: req.user } : resolvePrincipal(decoded, undefined, req.get('X-Supermarket-Id'))]);
 
       if (!user) return res.status(401).json({ error: 'Account no longer exists', code: 'SESSION_REVOKED' });
       if (!principal.user) return res.status(principal.status).json({ error: principal.error, code: principal.code });
@@ -340,7 +282,7 @@ const verify = async (req, res) => {
     return res.status(401).json({ error: 'Invalid or expired token' });
   } catch (error) {
     if (isInvalidSession(error)) return res.status(401).json({ error: 'Invalid or expired token' });
-    console.error('Session validation service unavailable', serviceError(error));
+    securityLog.error('Session validation service unavailable', serviceError(error));
     return res.status(503).json({ error: 'Session verification is temporarily unavailable. Try again.' });
   }
 };
@@ -364,10 +306,10 @@ async function findUserByEmail(email) {
 // the account exists, to avoid leaking which emails are registered.
 const forgotPassword = async (req, res) => {
   try {
-    const email = normalizeEmail(req.body.email);
+    const email = normalizeEmail(req.body?.email);
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'A valid email is required' });
     }
 
     const genericResponse = {
@@ -377,26 +319,16 @@ const forgotPassword = async (req, res) => {
       expiresIn: OTP_TTL_SECONDS,
     };
 
-    const cooldown = await getOtpCooldown('reset', email);
-    if (cooldown > 0) {
-      return res.status(429).json({
-        error: `Please wait ${cooldown}s before requesting another code.`,
-        retryAfter: cooldown,
-      });
-    }
-
+    const cooldown = await reserveOtpDelivery('reset', email);
     const found = await findUserByEmail(email);
-    if (!found) {
-      // Don't reveal that the user doesn't exist.
-      return res.status(200).json(genericResponse);
+    if (!cooldown && found) {
+      const code = await issueOtp('reset', email);
+      await sendPasswordResetOtpEmail(email, code).catch(error => securityLog.warn('Password recovery email delivery unavailable', error));
     }
-
-    const code = await issueOtp('reset', email);
-    await sendPasswordResetOtpEmail(email, code);
 
     return res.status(200).json(genericResponse);
   } catch (error) {
-    console.error('Forgot password error:', error);
+    securityLog.error('Forgot password error:', serviceError(error));
     return res.status(500).json({ error: 'Failed to send reset code. Please try again.' });
   }
 };
@@ -404,15 +336,15 @@ const forgotPassword = async (req, res) => {
 // Step 2: verify the code and set the new password.
 const resetPassword = async (req, res) => {
   try {
-    const { otp, newPassword } = req.body;
-    const email = normalizeEmail(req.body.email);
+    const { otp, newPassword } = req.body || {};
+    const email = normalizeEmail(req.body?.email);
 
-    if (!email || !otp || !newPassword) {
+    if (!email || email.length > 254 || typeof otp !== 'string' || !/^\d{6}$/.test(otp.trim()) || !newPassword) {
       return res.status(400).json({ error: 'Email, code and new password are required' });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    if (!validPassword(newPassword)) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters and at most 72 UTF-8 bytes.' });
     }
 
     const verification = await verifyOtp('reset', email, otp);
@@ -441,7 +373,7 @@ const resetPassword = async (req, res) => {
       message: 'Password has been reset successfully. You can now sign in with your new password.',
     });
   } catch (error) {
-    console.error('Reset password error:', error);
+    securityLog.error('Reset password error:', serviceError(error));
     return res.status(500).json({ error: 'Failed to reset password' });
   }
 };

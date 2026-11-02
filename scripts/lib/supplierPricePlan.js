@@ -2,10 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { gtin } from '../../src/services/productBarcodes.js';
 import { hash, packageSize } from './productMasterPlan.js';
+import { prepareCostcutterMaster } from './costcutterMasterPlan.js';
 
 export const SUPPLIERS = {
   DHAMECHA: { id: 'cmhmfswa60000dgqs90qv3x02', name: 'DAM&CHA CASH & CARRY' },
   BESTWAY: { id: 'cmlxrkf550002caussfk5azlh', name: 'Bestway' },
+  COSTCUTTER: { id: 'cmvcjmo96000ddgowr3g6avtl', name: 'ActiveHub_CostCutter (Online)' },
 };
 export function money(value) {
   if (value == null || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(String(value).trim())) return null;
@@ -38,7 +40,53 @@ export function bestwayBarcode(record) {
   return { code: codes[0], barcode: values[0], evidence: typed.length ? 'typed_retail_barcode' : 'flattened_retail_barcode' };
 }
 
-export async function readSupplierSources(directory) {
+// Bestway's product code and SKU are provenance, never master-product barcodes.
+// Older checkpoint rows retain only the SKU in their original product URL.
+export function bestwayIdentity(record) {
+  const codes = [record.product_code, record.product_id].filter(v => v != null).map(String);
+  const skus = [];
+  if (record.sku != null) skus.push(String(record.sku));
+  if (record.url != null) {
+    try {
+      const url = new URL(record.url);
+      const match = url.pathname.match(/^\/product\/(\d+-\d+)\/?$/);
+      if (url.protocol !== 'https:' || url.hostname !== 'www.bestwaywholesale.co.uk' || !match) throw new Error('Invalid product URL');
+      skus.push(match[1]);
+    } catch { return { id:null, reason:'invalid_product_id' }; }
+  }
+  if (codes.some(v => !/^\d+$/.test(v)) || skus.some(v => !/^\d+-\d+$/.test(v))) return { id:null, reason:'invalid_product_id' };
+  if (new Set(skus).size > 1 || new Set([...codes, ...skus.map(v => v.split('-')[0])]).size > 1) return { id:null, reason:'conflicting_product_ids' };
+  return { id:skus[0] || codes[0] || null, reason:null };
+}
+
+// Match an ID-less flattened export to its exact checkpoint projection. This
+// does not resolve master identity: the planner still requires a unique GTIN
+// and verified size/count. Conflicting SKUs cannot be reconciled by name.
+const bestwayProjection = r => r.code && typeof r.productName === 'string' && r.productName.trim() && r.regularPrice
+  ? JSON.stringify([r.code,r.productName.trim(),sizeKey(r.unitSize),sizeKey(r.packDisplay),r.regularPrice,r.evidence.rawPricing.currency]) : null;
+
+function costcutterRecords(raw,ref) {
+  if(!Array.isArray(raw.matches)) throw new Error(`Unrecognized Costcutter row: ${ref.file}:${ref.row}`);
+  return raw.matches.map((m,index)=>{
+    const s=m.source_fields||{}, pack=m.pack||{}, proof=m.match_evidence||{};
+    const invoices=(m.prices||[]).filter(p=>p.type==='invoice_cost');
+    const invoice=invoices.length===1?invoices[0]:null;
+    const display=typeof pack.display==='string'?pack.display.match(/^([1-9]\d*)\s*[x×]\s*(.+)$/i):null;
+    const unitSize=display?.[2].trim()??null, count=pack.units_per_case;
+    const codes=(m.barcodes||[]).filter(b=>b.role==='inner').map(b=>b.value);
+    const problems=[];
+    if(!gtin(raw.barcode)||codes.length!==1||codes[0]!==raw.barcode||s.innerBarcode!==raw.barcode||proof.method!=='exact_returned_innerBarcode'||proof.barcode_role!=='inner'||proof.matched_value!==raw.barcode) problems.push('unverified_inner_barcode');
+    if(typeof m.product_id!=='string'||!/^\d+$/.test(m.product_id)||m.product_id!==s.supplierProductCode||m.product_name!==s.productDescription) problems.push('invalid_source_identity');
+    if(!display||Number(display[1])!==count||count!==s.caseSize||pack.display!==s.unitSize||!packageSize(unitSize)||(pack.unit_size!=null&&packageSize(pack.unit_size)!==packageSize(unitSize))) problems.push('conflicting_pack_fields');
+    if(!invoice||invoice.basis!=='case'||invoice.currency!=='GBP'||money(invoice.amount)!==money(s.cost)) problems.push('unverified_invoice_price');
+    if(m.errors?.length) problems.push('source_extraction_error');
+    if(!asDate(raw.fetched_at)) problems.push('missing_source_date');
+    return {supplier:'COSTCUTTER',ref:{...ref,match:index+1},sourceProductId:m.product_id,productName:m.product_name,barcode:raw.barcode,code:gtin(raw.barcode),status:['found','partial'].includes(raw.status)?'found':'source_unresolved',regularPrice:money(invoice?.amount),currentPrice:null,rrp:null,units:count,unitSize,packDisplay:pack.display,observedAt:asDate(raw.fetched_at),inputProblems:problems,
+      evidence:{sourceProductCode:m.product_id,supplierCode:s.supplierCode,rawPricing:m.prices,rawPackaging:pack,matchEvidence:proof,sourceFields:s,promotion:null}};
+  });
+}
+
+export async function readSupplierSources(directory, { supplier: selectedSupplier } = {}) {
   const files = [];
   async function walk(dir) {
     for (const entry of (await fs.readdir(dir, { withFileTypes: true })).sort((a,b) => a.name.localeCompare(b.name))) {
@@ -50,11 +98,11 @@ export async function readSupplierSources(directory) {
   const manifest = [], records = [], sourceUnresolved = [];
   for (const file of files) {
     const relative = path.relative(directory, file).split(path.sep).join('/');
-    const supplier = /^Dhamecha\//i.test(relative) ? 'DHAMECHA' : /^bestway\//i.test(relative) ? 'BESTWAY' : null;
+    const supplier = /^Dhamecha\//i.test(relative) ? 'DHAMECHA' : /^bestway\//i.test(relative) ? 'BESTWAY' : /^ActiveHub_CostCutter\//i.test(relative) ? 'COSTCUTTER' : null;
     const bytes = await fs.readFile(file);
-    const entry = { file: relative, bytes: bytes.length, sha256: hash(bytes.toString()), supplier, excluded: !supplier };
+    const entry = { file: relative, bytes: bytes.length, sha256: hash(bytes.toString()), supplier, excluded: !supplier || Boolean(selectedSupplier && selectedSupplier !== supplier) || (!selectedSupplier&&supplier==='COSTCUTTER') };
     manifest.push(entry);
-    if (!supplier) continue; // Active Hub is inventoried, never a source of writes.
+    if (entry.excluded) continue; // Unselected suppliers are inventoried, never parsed or written.
     const doc = file.endsWith('.jsonl') ? bytes.toString().split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line)) : JSON.parse(bytes);
     const rows = Array.isArray(doc) ? doc : doc.products;
     if (!Array.isArray(rows)) throw new Error(`Unrecognized supplier schema: ${relative}`);
@@ -63,34 +111,49 @@ export async function readSupplierSources(directory) {
     entry.recordKeys = [...new Set(rows.flatMap(row => Object.keys(row)))].sort();
     entry.schemaVersion = doc.schema_version ?? null;
     entry.sourceIncomplete = doc.status === 'stopped';
+    if(supplier==='COSTCUTTER') {entry.sourceIncomplete=doc.run_summary?.complete!==true;entry.runSummary=doc.run_summary??null;}
     if (!Array.isArray(doc)) {
       entry.pricingContext = doc.pricing_context ?? null;
       for (const [index, record] of (doc.unresolved_products || []).entries()) sourceUnresolved.push({ supplier, file: relative, row: index + 1, barcode: record.barcode, url: record.url, reasons: record.warnings || ['source_unresolved'] });
     }
     rows.forEach((raw, index) => {
       const ref = { file: relative, row: index + 1 };
-      if (supplier === 'DHAMECHA') {
+      if(supplier==='COSTCUTTER') records.push(...costcutterRecords(raw,ref));
+      else if (supplier === 'DHAMECHA') {
         const r = raw.result, p = r?.pricing || {}, pack = r?.packaging || {};
         if (!r) throw new Error(`Unrecognized Dhamecha row: ${relative}:${index+1}`);
-        records.push({ supplier, ref, barcode: r.barcode, code: gtin(r.barcode), status: r.status, regularPrice: money(p.original_price_1), currentPrice: money(p.product_price), rrp: money(p.rrp), units: pack.pack_count, unitSize: pack.unit_size, packDisplay: pack.pack_size,
+        records.push({ supplier, ref, sourceProductId: r.product_id, productName: r.product_name, barcode: r.barcode, code: gtin(r.barcode), status: r.status, regularPrice: money(p.original_price_1), currentPrice: money(p.product_price), rrp: money(p.rrp), units: pack.pack_count, unitSize: pack.unit_size, packDisplay: pack.pack_size,
           observedAt: asDate(raw.evidence?.response?.captured_at),
           evidence: { sourceProductCode: r.product_id, rawPricing: p, rawPackaging: pack, promotion: r.web_metadata?.promotion ?? null, promotionName: r.web_metadata?.promotion_name ?? null, promotionId: r.web_metadata?.promotion_id ?? null, depot: raw.evidence?.request?.depot ?? null },
           inputProblems: raw.evidence?.request?.barcode !== r.barcode || raw.evidence?.response?.barcode !== r.barcode ? ['scan_evidence_mismatch'] : [],
         });
       } else {
         const barcode = bestwayBarcode(raw);
+        const identity = bestwayIdentity(raw);
         const display = typeof raw.pack_display === 'string' ? raw.pack_display.match(/^(.+?)\s*[×x]\s*(\d+)\s*$/i) : null;
         const count = raw.units_per_priced_pack ?? (display ? Number(display[2]) : null);
-        records.push({ supplier, ref, barcode: barcode.barcode ?? raw.barcode, code: barcode.code, status: raw.import_ready === false ? 'source_unresolved' : 'found', regularPrice: money(raw.wholesale_price), currentPrice: null, rrp: null, units: count, unitSize: raw.pack_size, packDisplay: raw.pack_display,
+        records.push({ supplier, ref, sourceProductId:identity.id, productName:raw.name ?? raw.product_name, identityBasis:identity.id ? 'source_product_id' : null, barcode: barcode.barcode ?? raw.barcode, code: barcode.code, status: raw.import_ready === false ? 'source_unresolved' : 'found', regularPrice: money(raw.wholesale_price), currentPrice: null, rrp: null, units: count, unitSize: raw.pack_size, packDisplay: raw.pack_display,
           observedAt: asDate(raw.observed_at_utc || doc.updated_at_utc),
           evidence: { sourceProductCode: raw.product_code ?? null, sku: raw.sku ?? null, url: raw.url ?? null, barcodeEvidence: barcode.evidence, rawPricing: { wholesale_price: raw.wholesale_price, currency: raw.currency, price_excludes_vat: raw.price_excludes_vat ?? null, vat_rate_text: raw.vat_rate_text ?? null }, rawPackaging: { pack_size: raw.pack_size, pack_display: raw.pack_display, units_per_priced_pack: raw.units_per_priced_pack ?? null }, depot: doc.pricing_context?.depot ?? null },
-          inputProblems: [barcode.reason, raw.currency !== 'GBP' ? 'unsupported_currency' : null, !display || sizeKey(display[1]) !== sizeKey(raw.pack_size) || Number(display[2]) !== count ? 'conflicting_pack_fields' : null].filter(Boolean),
+          inputProblems: [barcode.reason, identity.reason, raw.name != null && raw.product_name != null && raw.name !== raw.product_name ? 'conflicting_product_names' : null, raw.currency !== 'GBP' ? 'unsupported_currency' : null, !display || sizeKey(display[1]) !== sizeKey(raw.pack_size) || Number(display[2]) !== count ? 'conflicting_pack_fields' : null].filter(Boolean),
         });
       }
     });
   }
-  if (manifest.filter(f => f.supplier === 'BESTWAY').length !== 4) throw new Error('Expected all four audited Bestway files; review changed source inventory');
-  return { manifest, records, sourceUnresolved, sourceHash: hash(manifest) };
+  if ((!selectedSupplier || selectedSupplier === 'BESTWAY') && manifest.filter(f => f.supplier === 'BESTWAY').length !== 4) throw new Error('Expected all four audited Bestway files; review changed source inventory');
+  const identities = new Map();
+  for (const r of records.filter(r => r.supplier === 'BESTWAY' && r.sourceProductId && r.status === 'found' && !r.inputProblems.some(p => p.includes('product_')))) add(identities,bestwayProjection(r),r);
+  for (const r of records.filter(r => r.supplier === 'BESTWAY' && !r.sourceProductId && !r.inputProblems.some(p => p.includes('product_')))) {
+    const matches = identities.get(bestwayProjection(r)) || [];
+    if (new Set(matches.map(m => m.sourceProductId)).size > 1) r.inputProblems.push('ambiguous_source_identity');
+    else if (matches.length) {
+      r.sourceProductId = matches[0].sourceProductId;
+      r.identityBasis = 'exact_checkpoint_projection';
+      r.identityReferences = matches.map(m => m.ref);
+    }
+  }
+  const identityAudit = records.filter(r => r.supplier === 'BESTWAY').map(r => ({ ...r.ref, sourceProductId:r.sourceProductId, productName:r.productName ?? null, basis:r.identityBasis, references:r.identityReferences ?? [], problems:r.inputProblems.filter(p => p.includes('product_') || p === 'ambiguous_source_identity') }));
+  return { manifest, records, sourceUnresolved, identityAudit, sourceHash: hash(selectedSupplier ? manifest.filter(f => f.supplier === selectedSupplier) : manifest) };
 }
 
 export const stableJson = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
@@ -101,15 +164,23 @@ function samePriceRow(existing, intended) {
   return priceEqual(a.price,b.price) && priceEqual(a.offerPrice,b.offerPrice) && stableJson({ ...a, price: null, offerPrice: null }) === stableJson({ ...b, price: null, offerPrice: null });
 }
 
-export function buildSupplierPricePlan(source, state, suppliers = SUPPLIERS) {
+export function buildSupplierPricePlan(source, state, suppliers = {DHAMECHA:SUPPLIERS.DHAMECHA,BESTWAY:SUPPLIERS.BESTWAY}) {
   for (const [key, shop] of Object.entries(suppliers)) if (!state.shops.some(s => s.id === shop.id && s.name === shop.name && s.shopType === 'WHOLESALE')) throw new Error(`Existing supplier identity mismatch: ${key}`);
+  let staged={productCreates:[],packagingCreates:[]};
+  if(suppliers.COSTCUTTER) {
+    source={...source,records:source.records.map(r=>({...r,inputProblems:[...r.inputProblems]}))};
+    staged=prepareCostcutterMaster(source,state);state=staged.state;
+  }
   const byUnit = new Map(), byCase = new Map(), byLegacyCase = new Map(), packagingByProduct = new Map(), byProduct = new Map(state.products.map(p => [p.id,p]));
   for (const p of state.products) { add(byUnit, gtin(p.barcode), p); add(byLegacyCase, gtin(p.caseBarcode), p); }
   for (const p of state.packaging) { add(byCase, p.caseGtin, p); add(packagingByProduct,p.productId,p); }
   const unresolved = [], matched = [], warnings = [], candidates = new Map(), rrps = new Map();
   for (const r of source.records) {
+    if (!suppliers[r.supplier]) continue;
     const reasons = [...r.inputProblems], ref = { supplier: r.supplier, ...r.ref, barcode: r.barcode, units: r.units, unitSize: r.unitSize };
-    if (r.status !== 'found') { unresolved.push({ ...ref, reasons: [r.status === 'not_available' ? 'source_not_available' : 'source_unresolved'] }); continue; }
+    if (r.sourceProductId == null || String(r.sourceProductId).trim() === '') reasons.push('missing_product_id');
+    if (typeof r.productName !== 'string' || !r.productName.trim()) reasons.push('missing_product_name');
+    if (r.status !== 'found') { unresolved.push({ ...ref, sourceProductId:r.sourceProductId ?? null, productName:r.productName ?? null, reasons: [r.status === 'not_available' ? 'source_not_available' : 'source_unresolved', ...reasons] }); continue; }
     if (!r.code) reasons.push('missing_or_invalid_gtin');
     const units = byUnit.get(r.code) || [], cases = byCase.get(r.code) || [];
     const legacyCases = byLegacyCase.get(r.code) || [];
@@ -119,7 +190,7 @@ export function buildSupplierPricePlan(source, state, suppliers = SUPPLIERS) {
     if (legacyCases.length && !units.length && !cases.length) reasons.push('unverified_legacy_case_barcode');
     if (productIds.length > 1 || units.length > 1) reasons.push('ambiguous_product_match');
     // RRP describes the scanned retail unit, independently of an uncertain case count.
-    if (r.supplier === 'DHAMECHA' && r.rrp && product && units.length === 1 && !r.inputProblems.length) add(rrps, product.id, r.rrp);
+    if (r.supplier === 'DHAMECHA' && r.rrp && product && units.length === 1 && !reasons.length) add(rrps, product.id, r.rrp);
     if (!r.regularPrice || (r.supplier === 'DHAMECHA' && !r.currentPrice)) reasons.push('missing_or_invalid_price');
     if (r.currentPrice && r.regularPrice && Number(r.currentPrice) > Number(r.regularPrice)) reasons.push('current_price_above_original');
     const normalizedSize = normalizeSize(r.unitSize);
@@ -158,7 +229,7 @@ export function buildSupplierPricePlan(source, state, suppliers = SUPPLIERS) {
   for (const rows of groups.values()) {
     const first = rows[0], shopId = suppliers[first.supplier].id, existing = priceMap.get(`${shopId}:${first.productId}`);
     const unit = rows.find(r => r.units === 1);
-    const base = unit || (rows.length === 1 ? first : null);
+    const base = unit || (rows.length === 1 ? first : first.supplier==='COSTCUTTER'?[...rows].sort((a,b)=>a.units-b.units)[0]:null);
     const reject = reason => { for (const r of rows) unresolved.push({ ...r.ref, productId:r.productId, reasons:[reason], references:r.references }); };
     if (!base) { reject('multiple_cases_without_unit_price'); continue; }
     const data = { price:base.regularPrice, packagingId:base.packagingId, unitsPerPack:base.units, pricedUnitSize:base.unitSize, sourcePricing:evidence(base), priceObservedAt:base.observedAt };
@@ -180,7 +251,7 @@ export function buildSupplierPricePlan(source, state, suppliers = SUPPLIERS) {
     for (const row of rows.filter(r => r !== base)) {
       const existingTier = tierMap.get(`${pasId}:${row.units}`);
       const tier = { id:`st_${hash(`${pasId}:${row.units}`).slice(0,32)}`, productAtShopId:pasId, quantity:row.units, price:row.regularPrice, packagingId:row.packagingId, sourcePricing:evidence(row), priceObservedAt:row.observedAt };
-      if (base.supplier !== 'BESTWAY' || base.units !== 1 || !row.packagingId) { unresolved.push({ ...row.ref,productId:row.productId,reasons:['unsupported_alternate_price_basis'] }); continue; }
+      if (!['BESTWAY','COSTCUTTER'].includes(base.supplier) || (base.units !== 1 && base.supplier!=='COSTCUTTER') || !row.packagingId) { unresolved.push({ ...row.ref,productId:row.productId,reasons:['unsupported_alternate_price_basis'] }); continue; }
       if (existingTier && (!priceEqual(existingTier.price,tier.price) || existingTier.packagingId !== tier.packagingId || stableJson(existingTier.sourcePricing) !== stableJson(tier.sourcePricing))) { unresolved.push({ ...row.ref,productId:row.productId,reasons:['existing_quantity_tier_preserved'] }); continue; }
       if (!existingTier) tierCreates.push(tier);
       accepted.push({ supplier:row.supplier, productId:row.productId, productAtShopId:pasId, type:'case_tier', units:row.units, packagingId:row.packagingId, price:row.regularPrice, references:row.references });
@@ -197,12 +268,20 @@ export function buildSupplierPricePlan(source, state, suppliers = SUPPLIERS) {
   const supplierSummary = {};
   for (const supplier of Object.keys(suppliers)) supplierSummary[supplier] = {
     sourceRows:source.records.filter(r => r.supplier === supplier).length,
+    eligibleSourceRows:source.records.filter(r => r.supplier === supplier && r.status === 'found' && r.sourceProductId != null && String(r.sourceProductId).trim() !== '' && typeof r.productName === 'string' && r.productName.trim() !== '').length,
     matchedRows:matched.filter(r => r.supplier === supplier).length,
     acceptedBasePrices:accepted.filter(r => r.supplier === supplier && r.type === 'base').length,
+    acceptedUnitPrices:accepted.filter(r => r.supplier === supplier && r.type === 'base' && r.units === 1).length,
+    acceptedCaseBasePrices:accepted.filter(r => r.supplier === supplier && r.type === 'base' && r.units > 1).length,
     acceptedCaseTiers:accepted.filter(r => r.supplier === supplier && r.type === 'case_tier').length,
     createPrices:creates.filter(r => r.shopId === suppliers[supplier].id).length,
     updatePrices:updates.filter(r => r.shopId === suppliers[supplier].id).length,
+    unchangedPrices:accepted.filter(r => r.supplier === supplier && r.type === 'base').length - creates.filter(r => r.shopId === suppliers[supplier].id).length - updates.filter(r => r.shopId === suppliers[supplier].id).length,
     unresolvedRows:unresolved.filter(r => r.supplier === supplier).length,
+    skippedMissingIdentityRows:unresolved.filter(r => r.supplier === supplier && r.reasons.some(reason => ['missing_product_id','missing_product_name'].includes(reason))).length,
+    reviewRows:unresolved.filter(r => r.supplier === supplier && !r.reasons.some(reason => ['source_not_available','missing_product_id','missing_product_name'].includes(reason))).length,
   };
-  return { summary:{ suppliers:supplierSummary, duplicateSourceRowsCollapsed:collapsed, newQuantityTiers:tierCreates.length, rrpUpdates:rrpUpdates.length, reasonCounts }, creates, updates, tierCreates, rrpUpdates, matched, accepted, unresolved, warnings, sourceUnresolved:source.sourceUnresolved };
+  const productCreates=staged.productCreates.filter(p=>accepted.some(a=>a.productId===p.id));
+  const packagingCreates=staged.packagingCreates.filter(p=>accepted.some(a=>a.packagingId===p.id));
+  return { summary:{ suppliers:supplierSummary, duplicateSourceRowsCollapsed:collapsed, newQuantityTiers:tierCreates.length, newMasterProducts:productCreates.length, newPackagingConfigurations:packagingCreates.length, rrpUpdates:rrpUpdates.length, reasonCounts }, productCreates,packagingCreates,creates, updates, tierCreates, rrpUpdates, matched, accepted, unresolved, warnings, sourceUnresolved:source.sourceUnresolved, sourceIdentityAudit:source.identityAudit ?? [] };
 }

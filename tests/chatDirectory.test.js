@@ -13,11 +13,11 @@ before(async () => {
   await db.shopEmployeeMembership.create({data:{employeeId:employee.id,shopId:third.id,status:'ACTIVE',permissions:[]}});
   employeeSession=await app.login(employee.email,seed.password);
   all=await db.chat.create({data:{name:'ALL Chat',type:'GROUP'}});
-  custom=await db.chat.create({data:{name:'Existing custom group',type:'GROUP',participants:{create:[{userId:seed.a.owner.id,userType:'CUSTOMER'},{userId:employee.id,userType:'EMPLOYEE'}]}}});
-  direct=await db.chat.create({data:{type:'PERSONAL',participants:{create:[{userId:seed.a.owner.id,userType:'CUSTOMER'},{userId:seed.admin.id,userType:'ADMIN'}]}}});
+  custom=await db.chat.create({data:{name:'Existing custom group',type:'GROUP',shopId:seed.a.shop.id,participants:{create:[{userId:seed.a.owner.id,userType:'CUSTOMER'},{userId:employee.id,userType:'EMPLOYEE'}]}}});
+  direct=await db.chat.create({data:{type:'PERSONAL',shopId:seed.a.shop.id,participants:{create:[{userId:seed.a.owner.id,userType:'CUSTOMER'},{userId:employee.id,userType:'EMPLOYEE'}]}}});
   await db.message.createMany({data:[
     {chatId:custom.id,senderId:employee.id,senderType:'EMPLOYEE',content:'old group history',createdAt:new Date('2020-01-02')},
-    {chatId:direct.id,senderId:seed.admin.id,senderType:'ADMIN',content:'new direct history',createdAt:new Date()},
+    {chatId:direct.id,senderId:employee.id,senderType:'EMPLOYEE',content:'new direct history',createdAt:new Date()},
     {chatId:third.groupChatId,senderId:employee.id,senderType:'EMPLOYEE',content:'second shop history'},
   ]});
   // Stale membership in another owner's team must never grant private access.
@@ -30,30 +30,31 @@ test('all authorized existing groups, teams and direct histories are visible; li
   const response=await app.request('GET','/chat',{token:owner.token});
   assert.equal(response.status,200);
   const chats=response.body.chats,ids=chats.map(c=>c.id);
-  for(const id of [all.id,custom.id,direct.id,seed.a.shop.groupChatId,third.groupChatId]) assert.ok(ids.includes(id));
+  for(const id of [custom.id,direct.id,seed.a.shop.groupChatId]) assert.ok(ids.includes(id));
   assert.ok(!ids.includes(seed.b.shop.groupChatId));
+  assert.ok(ids.includes(all.id)); assert.equal(chats.find(c => c.id === all.id).isGlobalChat, true); assert.ok(!ids.includes(third.groupChatId));
   assert.deepEqual(chats.map(c=>c.lastActivityAt),chats.map(c=>c.lastActivityAt).sort((a,b)=>new Date(b)-new Date(a)));
-  const dm=chats.find(c=>c.id===direct.id);assert.equal(dm.name,seed.admin.name);assert.equal(dm.lastMessage,'new direct history');
+  const dm=chats.find(c=>c.id===direct.id);assert.equal(dm.name,employee.name);assert.equal(dm.lastMessage,'new direct history');
   for(const id of [custom.id,direct.id,third.groupChatId]) {
-    const thread=await app.request('GET',`/chat/${id}`,{token:owner.token});assert.equal(thread.status,200);assert.equal(thread.body.chat.messages.length,1);
+    const thread=await app.request('GET',`/chat/${id}`,{token:owner.token,shopId:id===third.groupChatId?third.id:seed.a.shop.id});assert.equal(thread.status,200);assert.equal(thread.body.chat.messages.length,1);
   }
   assert.equal(await snapshot(),before);
 });
 test('team rosters derive from active memberships without recreating participant records',async()=>{
-  const response=await app.request('GET','/chat',{token:owner.token});
   for(const id of [seed.a.shop.groupChatId,third.groupChatId]) {
+    const response=await app.request('GET','/chat',{token:owner.token,shopId:id===third.groupChatId?third.id:seed.a.shop.id});
     const chat=response.body.chats.find(c=>c.id===id);
     assert.ok(chat.participants.some(p=>p.id===employee.id&&p.userType==='EMPLOYEE'));
     assert.ok(chat.participants.some(p=>p.id===seed.a.owner.id&&p.userType==='CUSTOMER'));
   }
   assert.equal(await db.chatParticipant.count({where:{chatId:third.groupChatId}}),0);
-  const employeeChats=await app.request('GET','/chat',{token:employeeSession.token});assert.equal(employeeChats.status,200);
+  const employeeChats=await app.request('GET','/chat',{token:employeeSession.token,shopId:third.id});assert.equal(employeeChats.status,200);
   assert.ok(employeeChats.body.chats.some(c=>c.id===third.groupChatId));
-  assert.equal((await app.request('GET',`/chat/${third.groupChatId}`,{token:employeeSession.token})).status,200);
+  assert.equal((await app.request('GET',`/chat/${third.groupChatId}`,{token:employeeSession.token,shopId:third.id})).status,200);
   await db.shopEmployeeMembership.updateMany({where:{employeeId:employee.id,shopId:third.id},data:{status:'INACTIVE'}});
-  const after=await app.request('GET','/chat',{token:owner.token});
+  const after=await app.request('GET','/chat',{token:owner.token,shopId:third.id});
   assert.ok(!after.body.chats.find(c=>c.id===third.groupChatId).participants.some(p=>p.id===employee.id&&p.userType==='EMPLOYEE'));
-  assert.equal((await app.request('GET',`/chat/${third.groupChatId}`,{token:employeeSession.token})).status,403);
+  assert.equal((await app.request('GET',`/chat/${third.groupChatId}`,{token:employeeSession.token,shopId:third.id})).status,403);
   assert.equal(await db.message.count({where:{chatId:third.groupChatId}}),1);
 });
 test('missing shop links do not trigger replacement chat creation',async()=>{

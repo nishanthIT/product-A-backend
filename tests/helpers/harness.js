@@ -101,21 +101,31 @@ export async function startApp() {
     import('../../src/services/cacheService.js'),
   ]);
 
+  const { trustedProxySetting, corsConfiguration, csrfProtection, securityHeaders, requestConstraints, safeErrorHandler } = await import('../../src/middleware/httpSecurity.js');
+  const { securityResponseObserver, publicApiProtection } = await import('../../src/middleware/securityProtection.js');
   const app = express();
+  app.disable('x-powered-by');
+  app.set('trust proxy', trustedProxySetting());
+  app.set('query parser', 'simple');
   const server = http.createServer(app);
   const io = new Server(server);
   const userSockets = new Map();
   socketServer.attachSocketServer(io, { userSockets, cacheService: cacheService.default });
 
   app.use((await import('../../src/middleware/restoreGuard.js')).restoreGuard);
-  app.use((await import('cors')).default({ origin: true, credentials: true }));
+  app.use(securityHeaders);
+  app.use(securityResponseObserver);
+  app.use((await import('cors')).default(corsConfiguration()));
   app.use(cookieParser());
-  app.use(express.json());
+  app.use(csrfProtection());
+  app.use(express.json({ limit: '256kb', strict: true }));
+  app.use(requestConstraints);
   app.use((req, _res, next) => {
     req.io = io;
     req.userSockets = userSockets;
     next();
   });
+  app.use('/api', publicApiProtection);
   app.use((await import('../../src/routes/publicResources.js')).default);
   app.use('/api', authRoutes.default);
   app.use('/api/chat', chatRoutes.default);
@@ -123,17 +133,23 @@ export async function startApp() {
   app.use('/api/chat-safety', (await import('../../src/routes/chatSafetyRoutes.js')).default);
   app.use('/api/price-reports', priceReports.default);
   app.use('/api/products', (await import('../../src/routes/compareRoutes.js')).default);
+  app.use('/api/admin/security', (await import('../../src/routes/securityAdminRoutes.js')).default);
   app.use('/api/admin', adminRoutes.default);
   app.use('/api/lists', listRoutes.default);
   app.use('/api/employees', employeeRoutes.default);
   app.use('/api/shop', shopRoutes.default);
   app.use('/api/account-deletion', (await import('../../src/routes/accountDeletionRoutes.js')).default);
   app.use('/api/tasks', taskRoutes.default);
+  app.use('/api/news', (await import('../../src/routes/news.js')).default);
+  app.use('/api/advertisements', (await import('../../src/routes/advertisements.js')).default);
+  app.use('/api/categories', (await import('../../src/routes/categoryRoutes.js')).default);
   app.use('/api/uploads', (await import('../../src/middleware/privateUploads.js')).default);
   app.use('/uploads', (await import('../../src/middleware/privateUploads.js')).default);
   for (const [route, file] of Object.entries({ expiry: 'expiry', fridges: 'fridge', cleaning: 'cleaning', incidents: 'incident', 'age-restriction-records': 'ageRestrictionRecord', 'age-restricted-records': 'ageRestrictedRecord', certificates: 'certificate', waste: 'waste', 'supplier-payouts': 'supplierPayout', 'shift-sheet': 'shiftSheet' })) {
     app.use(`/api/${route}`, (await import(`../../src/routes/${file}Routes.js`)).default);
   }
+
+  app.use(safeErrorHandler);
 
   await new Promise((resolve) => server.listen(Number(process.env.TEST_HTTP_PORT || 0), '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -157,13 +173,13 @@ export async function startApp() {
     } catch {
       data = null;
     }
-    return { status: res.status, body: data };
+    return { status: res.status, body: data, headers: Object.fromEntries(res.headers.entries()) };
   };
 
   /** Connects a socket.io client (same library the mobile app uses) and records received events. */
-  const connectSocket = async (token) => {
-    const { io: ioClient } = await import(path.join(root, '../paymi_v2/node_modules/socket.io-client/build/esm-debug/index.js'));
-    const socket = ioClient(origin, { auth: token ? { token } : {}, transports: ['websocket'], reconnection: false });
+  const connectSocket = async (token, shopId) => {
+    const { io: ioClient } = await import('socket.io-client');
+    const socket = ioClient(origin, { auth: token ? { token, supermarketId: shopId } : {}, transports: ['websocket'], reconnection: false });
     socket.received = [];
     socket.onAny((event, payload) => socket.received.push({ event, payload }));
     await new Promise((resolve, reject) => {
@@ -183,6 +199,7 @@ export async function startApp() {
       return { ...res, token: res.body?.token };
     },
     close: async () => {
+      await (await import('../../src/services/chatBroadcast.js')).drainChatWork();
       sockets.forEach((s) => s.disconnect());
       io.close();
       await new Promise((resolve) => server.close(() => resolve()));
@@ -244,4 +261,16 @@ export async function createCompanyStaff(prisma, { email, passwordHash, permissi
       companyMembership: { create: { role, permissions, status } },
     },
   });
+}
+
+/** Moderation fixtures share a verified shop, without granting access to their other shops. */
+export async function seedSharedChatShop(db, seed) {
+  const shop = await db.shop.create({ data: { name: 'Shared fixture shop', address: 'test', mobile: 'test', shopType: 'CUSTOMER' } });
+  const chat = await db.chat.create({ data: { name: 'Fixture Team Chat', type: 'GROUP', shopId: shop.id } });
+  await db.shop.update({ where: { id: shop.id }, data: { groupChatId: chat.id } });
+  for (const owner of [seed.a.owner, seed.b.owner]) {
+    await db.supermarketOwnership.create({ data: { customerId: owner.id, shopId: shop.id, source: 'TEST' } });
+    await db.customer.update({ where: { id: owner.id }, data: { defaultSupermarketId: shop.id } });
+  }
+  return chat;
 }

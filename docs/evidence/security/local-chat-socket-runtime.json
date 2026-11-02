@@ -1,0 +1,25 @@
+{
+  "date": "2026-10-30",
+  "apiOrigin": "http://192.168.1.151:3000",
+  "checks": [
+    {
+      "transport": "websocket",
+      "originAccepted": true,
+      "connected": true
+    },
+    {
+      "transport": "polling",
+      "originAccepted": true,
+      "connected": true
+    },
+    {
+      "check": "foreign origin rejected",
+      "passed": true
+    },
+    {
+      "check": "invalid credential rejected",
+      "passed": true
+    }
+  ],
+  "authenticatedPhoneWorkflowVerified": false
+}

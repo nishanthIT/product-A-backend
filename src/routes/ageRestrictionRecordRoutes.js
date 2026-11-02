@@ -1,9 +1,11 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/ageRestrictionRecordRoutes.js');
 import { parseProductDetails } from '../services/ageRecordValidation.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature } from '../middleware/authware.js';
 import { SHOP_FEATURES } from '../services/accessControl.js';
-import multer from 'multer';
+import multer from '../middleware/secureUpload.js';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -155,7 +157,7 @@ router.get('/categories', authenticateToken, async (req, res) => {
     }
     res.json({ success: true, categories: [...unique.values()].sort((a, b) => a.localeCompare(b)) });
   } catch (error) {
-    console.error('Error fetching age record categories:', error);
+    securityLog.error('Error fetching age record categories:', error);
     res.status(500).json({ error: 'Failed to load categories' });
   }
 });
@@ -178,7 +180,7 @@ router.get('/products', authenticateToken, async (req, res) => {
     });
     res.json({ success: true, products, hasMore: products.length === 30 });
   } catch (error) {
-    console.error('Error fetching age record products:', error);
+    securityLog.error('Error fetching age record products:', error);
     res.status(500).json({ error: 'Failed to load products' });
   }
 });
@@ -216,7 +218,7 @@ router.get('/', authenticateToken, async (req, res) => {
     const nameOf = await loadUserNames(records);
     res.json({ success: true, records: records.map((record) => serialize(req, record, nameOf)) });
   } catch (error) {
-    console.error('Error fetching age restriction records:', error);
+    securityLog.error('Error fetching age restriction records:', error);
     res.status(500).json({ error: 'Failed to fetch age restriction records' });
   }
 });
@@ -265,7 +267,7 @@ router.post('/', authenticateToken, uploadImage, async (req, res) => {
     res.status(201).json({ success: true, record: serialize(req, record, nameOf) });
   } catch (error) {
     discardUpload(req);
-    console.error('Error creating age restriction record:', error);
+    securityLog.error('Error creating age restriction record:', error);
     res.status(500).json({ error: 'Failed to create age restriction record' });
   }
 });
@@ -330,7 +332,7 @@ router.put('/:id', authenticateToken, uploadImage, async (req, res) => {
     res.json({ success: true, record: serialize(req, record, nameOf) });
   } catch (error) {
     discardUpload(req);
-    console.error('Error updating age restriction record:', error);
+    securityLog.error('Error updating age restriction record:', error);
     res.status(500).json({ error: 'Failed to update age restriction record' });
   }
 });
@@ -356,7 +358,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting age restriction record:', error);
+    securityLog.error('Error deleting age restriction record:', error);
     res.status(500).json({ error: 'Failed to delete age restriction record' });
   }
 });

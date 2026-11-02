@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('controller/packComparison.js');
 import { getEffectivePrice } from '../services/supplierPricing.js';
 import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
@@ -98,7 +100,7 @@ const getPackOptions = async (req, res) => {
       include: {
         packagingConfigurations: true,
         shops: {
-          where: { outOfStock: false },
+          where: { outOfStock: false, shop: { shopType: 'WHOLESALE' } },
         },
       },
       take: 25,
@@ -167,7 +169,7 @@ const getPackOptions = async (req, res) => {
       hasOptions: cleaned.length > 1,
     });
   } catch (error) {
-    console.error("Error fetching pack options:", error);
+    securityLog.error("Error fetching pack options:", error);
     res.status(500).json({ error: "Failed to fetch pack options" });
   }
 };

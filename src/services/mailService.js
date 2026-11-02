@@ -10,22 +10,44 @@ import nodemailer from 'nodemailer';
  */
 let transporter = null;
 
+export function mailTransportOptions(env = process.env) {
+  const host = env.MAIL_HOST?.trim() || 'smtp.zoho.eu';
+  const user = env.MAIL_USER?.trim() || 'noreply@paymi.co.uk';
+  const port = Number(env.MAIL_PORT || 465);
+  if (!env.MAIL_PASS || !env.MAIL_PASS.trim()) {
+    throw Object.assign(new Error('Transactional mail credentials are not configured'), { code: 'MAIL_NOT_CONFIGURED' });
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw Object.assign(new Error('Transactional mail port is invalid'), { code: 'MAIL_CONFIG_INVALID' });
+  }
+  return {
+    host,
+    port,
+    secure: port === 465,
+    requireTLS: port !== 465,
+    auth: { user, pass: env.MAIL_PASS },
+    // Do not leave OTP requests waiting on Nodemailer's multi-minute defaults.
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
+    logger: false,
+    debug: false,
+  };
+}
+
 function getTransporter() {
   if (!transporter) {
-    transporter = nodemailer.createTransport({
-      host: process.env.MAIL_HOST || 'smtp.zoho.eu',
-      port: Number(process.env.MAIL_PORT || 465),
-      secure: true,
-      auth: {
-        user: process.env.MAIL_USER || 'noreply@paymi.co.uk',
-        pass: process.env.MAIL_PASS,
-      },
-    });
+    transporter = nodemailer.createTransport(mailTransportOptions());
   }
   return transporter;
 }
 
-const from = () => `"Paymi" <${process.env.MAIL_USER || 'noreply@paymi.co.uk'}>`;
+/** Checks DNS, TLS and SMTP authentication without sending an email. */
+export async function verifyMailConfiguration() {
+  return getTransporter().verify();
+}
+
+const from = () => `"Paymi" <${process.env.MAIL_USER?.trim() || 'noreply@paymi.co.uk'}>`;
 
 function otpTemplate({ heading, intro, code, footer }) {
   return `

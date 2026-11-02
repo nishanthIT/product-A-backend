@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/ageRestrictedRecordRoutes.js');
 import { parseProductDetails } from '../services/ageRecordValidation.js';
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
@@ -120,7 +122,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, records });
   } catch (error) {
-    console.error('Error fetching age restricted records:', error);
+    securityLog.error('Error fetching age restricted records:', error);
     res.status(500).json({ error: 'Failed to fetch age restricted records' });
   }
 });
@@ -169,7 +171,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
     res.status(201).json({ success: true, record });
   } catch (error) {
-    console.error('Error creating age restricted record:', error);
+    securityLog.error('Error creating age restricted record:', error);
     res.status(500).json({ error: 'Failed to create age restricted record' });
   }
 });

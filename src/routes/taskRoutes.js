@@ -1,3 +1,5 @@
+import { safeLogger } from '../services/safeLogger.js';
+const securityLog = safeLogger('routes/taskRoutes.js');
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { isAuthenticated, requireShopFeature, requireShopMembershipForEmployees } from '../middleware/authware.js';
@@ -93,7 +95,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     res.json({ success: true, tasks: formattedTasks });
   } catch (error) {
-    console.error('Error fetching tasks:', error);
+    securityLog.error('Error fetching tasks:', error);
     res.status(500).json({ error: 'Failed to fetch tasks' });
   }
 });
@@ -198,7 +200,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
         }
       }
     } catch (notificationError) {
-      console.error('Task created but notification dispatch failed:', notificationError);
+      securityLog.error('Task created but notification dispatch failed:', notificationError);
     }
 
     res.status(201).json({ 
@@ -207,7 +209,7 @@ router.post('/', authenticateToken, requireCustomer, async (req, res) => {
       task 
     });
   } catch (error) {
-    console.error('Error creating task:', error);
+    securityLog.error('Error creating task:', error);
     res.status(500).json({ error: 'Failed to create task' });
   }
 });
@@ -292,7 +294,7 @@ router.put('/:id', authenticateToken, requireCustomer, async (req, res) => {
       task: updatedTask 
     });
   } catch (error) {
-    console.error('Error updating task:', error);
+    securityLog.error('Error updating task:', error);
     res.status(500).json({ error: 'Failed to update task' });
   }
 });
@@ -323,7 +325,7 @@ router.delete('/:id', authenticateToken, requireCustomer, async (req, res) => {
 
     res.json({ success: true, message: 'Task deleted successfully' });
   } catch (error) {
-    console.error('Error deleting task:', error);
+    securityLog.error('Error deleting task:', error);
     res.status(500).json({ error: 'Failed to delete task' });
   }
 });
@@ -373,7 +375,7 @@ router.get('/my-tasks', authenticateToken, requireShopMembershipForEmployees, as
 
     res.json({ success: true, tasks });
   } catch (error) {
-    console.error('Error fetching my tasks:', error);
+    securityLog.error('Error fetching my tasks:', error);
     res.status(500).json({ error: 'Failed to fetch tasks' });
   }
 });
@@ -452,7 +454,7 @@ router.put('/start/:assignmentId', taskProgressAuth, requireShopMembershipForEmp
       assignment: updatedAssignment
     });
   } catch (error) {
-    console.error('Error starting task:', error);
+    securityLog.error('Error starting task:', error);
     res.status(500).json({ error: 'Failed to start task' });
   }
 });
@@ -552,7 +554,7 @@ router.put('/complete/:assignmentId', taskProgressAuth, requireShopMembershipFor
       assignment: updatedAssignment
     });
   } catch (error) {
-    console.error('Error completing task:', error);
+    securityLog.error('Error completing task:', error);
     res.status(500).json({ error: 'Failed to update task' });
   }
 });

@@ -1,6 +1,9 @@
+import { safeLogger } from '../../services/safeLogger.js';
+const securityLog = safeLogger('controller/dashbord/customerEmployees.js');
 import { PrismaClient } from '@prisma/client';
 import { ALL_SHOP_PERMISSIONS, MEMBERSHIP_STATUSES, SHOP_EMPLOYEE_ROLES, defaultShopPermissions, normalizeShopPermissions } from '../../services/accessControl.js';
 import { SLOW_DB_TX_OPTIONS, createShopMembership } from '../../services/membershipService.js';
+import { notifyShopTeamChanged } from '../../services/chatMembershipSync.js';
 
 // Company-admin views of customers' Shop Employees and the access-review queue.
 // Read access here never creates or changes company membership.
@@ -105,7 +108,7 @@ const getCustomerEmployees = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching customer employees:', error);
+    securityLog.error('Error fetching customer employees:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch customer employees' });
   }
 };
@@ -162,7 +165,7 @@ const getListForAdmin = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error fetching list for admin:', error);
+    securityLog.error('Error fetching list for admin:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch list' });
   }
 };
@@ -190,7 +193,7 @@ const getAccessReviews = async (req, res) => {
     });
     res.json({ success: true, data: reviews });
   } catch (error) {
-    console.error('Error fetching access reviews:', error);
+    securityLog.error('Error fetching access reviews:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch access reviews' });
   }
 };
@@ -248,7 +251,7 @@ const getAssignableShops = async (req, res) => {
 
     res.json({ success: true, data });
   } catch (error) {
-    console.error('Error fetching assignable shops:', error);
+    securityLog.error('Error fetching assignable shops:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch shops' });
   }
 };
@@ -330,10 +333,11 @@ const resolveAccessReview = async (req, res) => {
       });
     }, SLOW_DB_TX_OPTIONS);
 
+    if (action === 'ASSIGN_SHOP') await notifyShopTeamChanged(String(shopId), review.employeeId);
     res.json({ success: true, message: 'Review resolved' });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ success: false, error: error.message });
-    console.error('Error resolving access review:', error);
+    securityLog.error('Error resolving access review:', error);
     res.status(500).json({ success: false, error: 'Failed to resolve review' });
   }
 };

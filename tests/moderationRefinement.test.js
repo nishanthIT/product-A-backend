@@ -1,15 +1,15 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout } from 'node:timers/promises';
-import { getPrisma, resetDatabase, seedBase, startApp, createCompanyStaff } from './helpers/harness.js';
+import { getPrisma, resetDatabase, seedBase, seedSharedChatShop, startApp, createCompanyStaff } from './helpers/harness.js';
 import { processModerationDeletion } from '../src/services/moderation.js';
 let db, app, seed, a, b, admin, staff, chat, message, report;
 before(async () => {
-  await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); app = await startApp();
+  await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); chat = await seedSharedChatShop(db, seed); app = await startApp();
   a = await app.login(seed.a.owner.email, seed.password); b = await app.login(seed.b.owner.email, seed.password); admin = await app.login(seed.admin.email, seed.password);
   const user = await createCompanyStaff(db, { email:'staff@moderation.test', passwordHash:seed.passwordHash, permissions:['content.manage'] });
   staff = await app.login(user.email, seed.password);
-  chat = await db.chat.create({ data:{ name:'ALL Chat', type:'GROUP' } });
+
 });
 after(async () => { await app?.close(); await db?.$disconnect(); });
 const post = (token, route, body) => app.request('POST', route, { token, body });
@@ -17,6 +17,8 @@ const send = (token, content) => post(token, '/chat/message', { chatId:chat.id, 
 test('new and existing accounts send, receive and upload without any acceptance row', async () => {
   await db.communityAcceptance.deleteMany();
   const fresh = await db.customer.create({ data:{ name:'Fresh', email:'fresh@moderation.test', mobile:'fresh', password:seed.passwordHash } });
+  await db.supermarketOwnership.create({ data: { shopId: chat.shopId, customerId: fresh.id, source: 'TEST' } });
+  await db.customer.update({ where: { id: fresh.id }, data: { defaultSupermarketId: chat.shopId } });
   const login = await app.login(fresh.email,seed.password);
   const socket = await app.connectSocket(b.token); socket.emit('join_chat',chat.id); await setTimeout(60);
   for (const token of [a.token,login.token]) {
