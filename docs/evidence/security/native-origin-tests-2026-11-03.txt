@@ -1,0 +1,40 @@
+✔ proxy trust defaults closed and rejects numeric hop counts/wildcards (25.865708ms)
+✔ CORS reflects only explicit trusted origins and permits security reauthentication header (7.002022ms)
+✔ the deployed admin is trusted in production without optional environment configuration (0.274865ms)
+✔ native app production origin works without browser-origin or proxy configuration (13.820714ms)
+✔ deployed admin login preflight includes credentials and session errors remain browser-readable (4.712055ms)
+✔ deployed admin cookie login reaches the handler while foreign origins remain denied (10.503404ms)
+✔ cookie mutations require trusted Origin; bearer native clients continue working (8.121152ms)
+✔ native API Origin and originless clients connect over both socket transports; foreign origins stay denied (49.018062ms)
+✔ headers prevent content sniffing, framing and caching; server errors redact internals (3.178788ms)
+✔ query limits reject unbounded, duplicate, nested and malformed pagination parameters (15.730561ms)
+Request failed {
+  name: 'SyntaxError',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+Request failed {
+  name: 'PayloadTooLargeError',
+  code: 'UNKNOWN',
+  databaseCode: undefined,
+  service: undefined,
+  model: undefined,
+  table: undefined,
+  column: undefined,
+  action: undefined
+}
+✔ JSON body bounds reject oversized batches, pollution keys, malformed and huge bodies (10.369652ms)
+✔ application diagnostics omit request credentials, SQL values, pricing and error text (0.387478ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 299.214398

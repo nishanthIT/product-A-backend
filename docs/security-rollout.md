@@ -24,12 +24,14 @@ Start from [`.env.example`](../.env.example), replacing every placeholder. Retai
 | `DATABASE_URL` | Same authoritative PostgreSQL database on every replica, using a restricted runtime role and verified TLS on remote connections. No read replica or independent database for quota/session writes. |
 | `REDIS_URL` | Private, authenticated Redis; use `rediss://` where the provider supports TLS. Restrict network access and keep it inaccessible from the public Internet. |
 | `PUBLIC_BASE_URL` | Canonical HTTPS API URL, with the expected public host. |
-| `CORS_ALLOWED_ORIGINS` | Comma-separated exact browser origins, including scheme and port. No wildcards, paths or trailing slash. Include the admin and web application origins. |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated additional exact browser origins, including scheme and port. No wildcards, paths or trailing slash. The deployed admin `https://bigsave.h7tex.com` and native API origin `https://backend.h7tex.com` are always included in the shared CORS/CSRF/socket allowlist. Set them explicitly in the hosted environment too for compatibility with older backend releases. Phone IPs and app bundle IDs are not needed. |
 | `TRUSTED_PROXY_CIDRS` | Exact ingress proxy IPs/CIDRs. Empty means no proxy trust. Do not use hop counts or ranges that include untrusted clients. |
 | `HOST`, `PORT` | Bind to the intended private interface/container; expose only through the approved ingress. |
 | Mail settings | Preserve the configuration consumed by the existing transport, with newly rotated credentials. Test delivery using a non-production mailbox first. |
 
 The admin stores bearer tokens in memory and relies on the HttpOnly, Secure, SameSite=Lax cookie to restore a session after reload. Host the admin and API on the same HTTPS site (for example, sibling subdomains). Test the actual domain arrangement. A truly cross-site deployment may lose reload authentication; do not change the cookie policy without a separate CSRF review. Native clients continue using bearer tokens.
+
+The iOS/Android HTTP client disables cookie credentials and sends its SecureStore bearer token. This prevents a stale OS cookie from blocking sign-in/reset after the stored token is cleared. Native requests without an Origin are allowed by the origin policy; native WebSocket requests carrying the production API origin are allowed too. Additional local API addresses should use `PUBLIC_BASE_URL`. Proxy trust is server-ingress configuration for accurate client IP/protocol handling, not a device-access allowlist. Never add customer phone IPs or guess the trusted ingress addresses. Authentication, tenant checks and abuse limits still apply.
 
 The reverse proxy must replace client-supplied forwarding headers and prevent direct public access to the origin. Verify the resulting `req.ip` and HTTPS detection using a controlled staging request; forged `X-Forwarded-For` must not change the client identity. Set ingress request/header/body limits consistent with real upload workflows. Configure browser security headers/CSP at the **admin static host** as well; API headers do not cover a separately hosted frontend.
 

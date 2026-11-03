@@ -1,6 +1,11 @@
 import { isIP } from 'node:net';
 import { serviceError } from '../services/serviceErrors.js';
 
+// First-party origins stay available when deployment configuration is omitted.
+// Android's native WebSocket client sends the API's HTTP(S) origin; it does not
+// send a phone IP, app bundle ID or an Expo development-server origin.
+const FIRST_PARTY_ORIGINS = ['https://bigsave.h7tex.com', 'https://backend.h7tex.com'];
+
 export function trustedProxySetting(value = process.env.TRUSTED_PROXY_CIDRS || '') {
   if (!value.trim()) return false;
   const addresses = value.split(',').map(v => v.trim());
@@ -15,7 +20,7 @@ export function trustedProxySetting(value = process.env.TRUSTED_PROXY_CIDRS || '
 }
 
 export function allowedOrigins(env = process.env) {
-  const configured = (env.CORS_ALLOWED_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean);
+  const configured = [...FIRST_PARTY_ORIGINS, ...(env.CORS_ALLOWED_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean)];
   if (env.PUBLIC_BASE_URL) configured.push(new URL(env.PUBLIC_BASE_URL).origin);
   if (env.NODE_ENV !== 'production') configured.push('http://localhost:5173', 'http://localhost:8081', 'http://localhost:3000', 'http://localhost:8080');
   return new Set(configured.map(value => {
