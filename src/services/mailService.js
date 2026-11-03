@@ -1,8 +1,9 @@
 import nodemailer from 'nodemailer';
 import { domainToASCII } from 'node:url';
+import { zohoMailApiOptions, sendZohoApiEmail } from './zohoMailApi.js';
 
 /**
- * Zoho Mail transporter for transactional Paymi email (OTP + password reset).
+ * SMTP or Zoho CPaaS HTTPS transport for transactional Paymi email.
  * Uses MAIL_* env vars so the legacy EMAIL_* gmail config used by the expiry
  * service keeps working independently.
  *
@@ -10,6 +11,14 @@ import { domainToASCII } from 'node:url';
  * has populated process.env by the time we read it.
  */
 let transporter = null;
+
+export function mailTransport(env = process.env) {
+  const transport = env.MAIL_TRANSPORT?.trim().toLowerCase() || 'smtp';
+  if (!['smtp', 'zoho-api'].includes(transport)) {
+    throw Object.assign(new Error('Invalid transactional mail transport'), { code: 'MAIL_CONFIG_INVALID' });
+  }
+  return transport;
+}
 
 export function mailTransportOptions(env = process.env) {
   const host = env.MAIL_HOST?.trim() || 'smtp.zoho.eu';
@@ -43,12 +52,18 @@ function getTransporter() {
   return transporter;
 }
 
-/** Checks DNS, TLS and SMTP authentication without sending an email. */
+/** SMTP: checks DNS/TLS/auth. HTTPS: validates configuration only; no email sent. */
 export async function verifyMailConfiguration() {
+  if (mailTransport() === 'zoho-api') {
+    zohoMailApiOptions();
+    mailSender();
+    return { transport: 'zoho-api', authenticationVerified: false };
+  }
+  mailSender();
   return getTransporter().verify();
 }
 
-const from = () => `"Paymi" <${process.env.MAIL_USER?.trim() || 'noreply@paymi.co.uk'}>`;
+const from = () => `"Paymi" <${mailSender()}>`;
 
 const normalizeMailbox = address => {
   if (typeof address !== 'string' || !/^[^\s@<>;,"]+@[^\s@<>;,"]+\.[^\s@<>;,"]+$/.test(address)) return '';
@@ -57,9 +72,19 @@ const normalizeMailbox = address => {
   return asciiDomain ? `${local.toLowerCase()}@${asciiDomain.toLowerCase()}` : '';
 };
 
+function mailSender() {
+  const configured = process.env.MAIL_FROM?.trim() || process.env.MAIL_USER?.trim();
+  const sender = normalizeMailbox(configured || (mailTransport() === 'smtp' ? 'noreply@paymi.co.uk' : ''));
+  if (!sender) throw Object.assign(new Error('Invalid transactional sender'), { code: 'MAIL_CONFIG_INVALID' });
+  return sender;
+}
+
 async function sendTransactionalEmail(message) {
   const recipient = normalizeMailbox(message.to);
   if (!recipient) throw Object.assign(new Error('Invalid mail recipient'), { code: 'MAIL_INVALID_RECIPIENT' });
+  if (mailTransport() === 'zoho-api') {
+    return sendZohoApiEmail({ ...message, from: mailSender(), to: recipient });
+  }
   // A structured address prevents SMTP list/display-name parsing of API input.
   const result = await getTransporter().sendMail({ ...message, to: { address: recipient } });
   // A completed SMTP call is only successful if the intended recipient was

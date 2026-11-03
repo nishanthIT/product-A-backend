@@ -14,6 +14,9 @@ export function mailFailureDetails(error) {
   ].filter(([pattern]) => pattern.test(response)).map(([, label]) => label);
   return {
     code,
+    ...(Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599
+      ? { httpStatus: error.httpStatus } : {}),
+    ...(typeof error?.providerCode === 'string' && /^(EM|TM)_[0-9]{1,8}$/.test(error.providerCode) ? { providerCode: error.providerCode } : {}),
     ...(Number.isInteger(error?.responseCode) && error.responseCode >= 400 && error.responseCode <= 599
       ? { smtpStatus: error.responseCode } : {}),
     ...(['CONN', 'EHLO', 'HELO', 'STARTTLS', 'AUTH PLAIN', 'AUTH LOGIN', 'MAIL FROM', 'RCPT TO', 'DATA', 'API'].includes(error?.command)

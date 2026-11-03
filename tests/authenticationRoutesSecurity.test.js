@@ -216,6 +216,50 @@ test('failed OTP sends still count toward authentication abuse limits', async ()
   }
 });
 
+test('HTTPS delivery rejection is retryable and accepted registration/reset codes complete both flows', async () => {
+  const values = {
+    MAIL_TRANSPORT: 'zoho-api', MAIL_FROM: 'info@example.test',
+    ZOHO_MAIL_API_URL: 'https://cpaas.zoho.in/v1.1/email', ZOHO_MAIL_API_KEY: 'fixture-api-key',
+  };
+  const previous = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch, submitted = [];
+  let rejectApi = true;
+  const fetchMock = mock.method(globalThis, 'fetch', async (url, options) => {
+    if (String(url) !== values.ZOHO_MAIL_API_URL) return originalFetch(url, options);
+    if (rejectApi) return Response.json({ message: 'error' }, { status: 401 });
+    submitted.push(JSON.parse(options.body));
+    return Response.json({ message: 'OK', data: [{ code: 'EM_104' }] });
+  });
+  Object.assign(process.env, values);
+  const body = { name: 'HTTPS registration fixture', email: 'https-registration@example.test', password: 'HTTPS-Fixture-Password123' };
+  const smtpAttempts = mailAttempts.length;
+  try {
+    const failed = await app.request('POST', '/auth/register/send-otp', { body });
+    assert.equal(failed.status, 503);
+    assert.equal(failed.body.code, 'REGISTRATION_EMAIL_UNAVAILABLE');
+    assert.equal(await redisService.get(`otp:register:${body.email}`), null);
+    assert.equal(await redisService.get(`otp_cd:register:${body.email}`), null);
+    rejectApi = false;
+    assert.equal((await app.request('POST', '/auth/register/send-otp', { body })).status, 200);
+    const otp = submitted[0].subject.match(/^\d{6}/)[0];
+    assert.equal((await app.request('POST', '/auth/register', { body: { ...body, otp } })).status, 201);
+    rejectApi = true;
+    assert.equal((await app.request('POST', '/auth/forgot-password', { body: { email: body.email } })).status, 503);
+    assert.equal(await redisService.get(`otp:reset:${body.email}`), null);
+    rejectApi = false;
+    assert.equal((await app.request('POST', '/auth/forgot-password', { body: { email: body.email } })).status, 200);
+    const reset = { email: body.email, otp: submitted[1].subject.match(/^\d{6}/)[0], newPassword: 'HTTPS-Replaced-Password123' };
+    assert.equal((await app.request('POST', '/auth/reset-password', { body: reset })).status, 200);
+    assert.equal((await app.login(body.email, reset.newPassword)).status, 200);
+    assert.equal(mailAttempts.length, smtpAttempts, 'HTTPS failures must not fall back to blocked SMTP');
+  } finally {
+    fetchMock.mock.restore();
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test('account restrictions prevent new sessions, authenticated me and socket connections until expiry', async () => {
   const subjectKey = `CUSTOMER:${seed.a.owner.id}`;
   const restriction = await db.securityRestriction.create({ data: {
