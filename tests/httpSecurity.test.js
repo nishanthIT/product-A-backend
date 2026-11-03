@@ -23,6 +23,8 @@ before(async () => {
   app.post('/api/auth/login', (_req, res) => res.json({ reachedLoginHandler: true }));
   app.get('/api/auth/me', (_req, res) => res.status(401).json({ error: 'Authentication required' }));
   app.get('/api/fail', (_req, res) => res.status(500).json({ details: 'database-secret', stack: 'private-stack' }));
+  app.get('/api/mail-fail', (_req, res) => res.status(503).json({ code: 'REGISTRATION_EMAIL_UNAVAILABLE', error: 'private-provider-response', details: 'private-recipient' }));
+  app.get('/api/reset-mail-fail', (_req, res) => res.status(503).json({ code: 'PASSWORD_RESET_EMAIL_UNAVAILABLE', error: 'private-provider-response', details: 'private-recipient' }));
   app.use(safeErrorHandler);
   server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -142,6 +144,20 @@ test('headers prevent content sniffing, framing and caching; server errors redac
   assert.equal(response.headers.get('x-powered-by'), null);
   assert.match(response.headers.get('cache-control'), /no-store/);
   assert.deepEqual(await response.json(), { error: 'Internal server error' });
+});
+test('registration mail failure remains actionable while provider details stay private', async () => {
+  const response = await fetch(`${base}/api/mail-fail`);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: 'We could not send your registration email. Please try again shortly.',
+    code: 'REGISTRATION_EMAIL_UNAVAILABLE',
+  });
+  const reset = await fetch(`${base}/api/reset-mail-fail`);
+  assert.equal(reset.status, 503);
+  assert.deepEqual(await reset.json(), {
+    error: 'We could not send your password reset email. Please try again shortly.',
+    code: 'PASSWORD_RESET_EMAIL_UNAVAILABLE',
+  });
 });
 test('query limits reject unbounded, duplicate, nested and malformed pagination parameters', async () => {
   for (const query of ['page=0','page=-1','page=1e9','page=1001','limit=501','page=1&page=2','q[x]=y',`q=${'x'.repeat(257)}`]) {

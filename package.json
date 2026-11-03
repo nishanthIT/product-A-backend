@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
+    "check:mail": "node scripts/checkMail.js",
     "test": "node --test --test-concurrency=1 \"tests/*.test.js\"",
     "migrate:employee-memberships": "node scripts/migrateEmployeeMemberships.js",
     "import-products": "node scripts/importProductData.js",

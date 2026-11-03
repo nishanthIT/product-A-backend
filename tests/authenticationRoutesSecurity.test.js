@@ -5,7 +5,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 import nodemailer from 'nodemailer';
 import { getPrisma, resetDatabase, seedBase, startApp } from './helpers/harness.js';
-import { issueOtp, verifyOtp, reserveOtpDelivery } from '../src/services/otpSecurity.js';
+import { issueOtp, verifyOtp, reserveOtpDelivery, completeOtpDelivery } from '../src/services/otpSecurity.js';
 import redisService, { RedisService } from '../src/services/redisService.js';
 import { DatabaseCache } from '../src/services/databaseCache.js';
 import { PrismaClient } from '@prisma/client';
@@ -13,10 +13,30 @@ import { io as ioClient } from 'socket.io-client';
 
 let db, app, seed, ownerToken, otherToken, adminToken;
 const deliveries = [];
+const mailAttempts = [];
+let mailFailure;
+let mailGate;
+function samePublicSuccess(actual, expected) {
+  // Remaining times can cross a second boundary between HTTP requests.
+  for (const value of [actual, expected]) {
+    assert.ok(value.resendIn > 0 && value.resendIn <= 60);
+    assert.equal(value.expiresIn, 540 + value.resendIn);
+  }
+  assert.deepEqual({ ...actual, resendIn: 0, expiresIn: 0 }, { ...expected, resendIn: 0, expiresIn: 0 });
+}
 before(async () => {
   // No real SMTP connection or message leaves this disposable integration run.
   process.env.MAIL_PASS = 'disposable-mail-fixture';
-  mock.method(nodemailer, 'createTransport', () => ({ sendMail: async message => { deliveries.push(message); return { accepted: [message.to] }; } }));
+  mock.method(nodemailer, 'createTransport', () => ({ sendMail: async message => {
+    assert.equal(typeof message.to, 'object');
+    message = { ...message, to: message.to.address };
+    mailAttempts.push(message);
+    if (mailGate) await mailGate(message);
+    if (mailFailure === 'EAUTH') throw Object.assign(new Error('Fixture SMTP failure'), { code: 'EAUTH' });
+    if (mailFailure === 'MAIL_NOT_ACCEPTED') return { accepted: [], rejected: [message.to] };
+    deliveries.push(message);
+    return { accepted: [message.to] };
+  } }));
   await resetDatabase(); db = await getPrisma(); seed = await seedBase(db); app = await startApp();
   ownerToken = (await app.login(seed.a.owner.email, seed.password)).token;
   otherToken = (await app.login(seed.b.owner.email, seed.password)).token;
@@ -30,19 +50,59 @@ test('registration/recovery responses and resend cooldown do not reveal whether 
   for (const [route, extra] of [['/auth/forgot-password', {}], ['/auth/register/send-otp', { name: 'Fixture owner', password: 'New-Fixture-Password123' }]]) {
     const known = await app.request('POST', route, { body: { email: seed.a.owner.email, ...extra } });
     const unknown = await app.request('POST', route, { body: { email: absent, ...extra } });
-    assert.equal(known.status, 200); assert.equal(unknown.status, 200); assert.deepEqual(known.body, unknown.body);
+    assert.equal(known.status, 200); assert.equal(unknown.status, 200); samePublicSuccess(known.body, unknown.body);
     const retryKnown = await app.request('POST', route, { body: { email: seed.a.owner.email, ...extra } });
     const retryUnknown = await app.request('POST', route, { body: { email: absent, ...extra } });
-    assert.equal(retryKnown.status, known.status); assert.deepEqual(retryKnown.body, known.body);
-    assert.equal(retryUnknown.status, unknown.status); assert.deepEqual(retryUnknown.body, unknown.body);
+    assert.equal(retryKnown.status, known.status); samePublicSuccess(retryKnown.body, known.body);
+    assert.equal(retryUnknown.status, unknown.status); samePublicSuccess(retryUnknown.body, unknown.body);
   }
-  assert.equal(deliveries.filter(message => message.to === seed.a.owner.email).length, 1);
-  assert.equal(deliveries.filter(message => message.to === absent).length, 1);
+  assert.equal(deliveries.filter(message => message.to === seed.a.owner.email).length, 2);
+  assert.equal(deliveries.filter(message => message.to === absent).length, 2);
+  const signInMessage = deliveries.find(message => message.to === seed.a.owner.email && message.subject === 'Your Paymi registration request');
+  assert.match(signInMessage.text, /sign in/);
+  assert.equal(await redisService.get(`otp:register:${seed.a.owner.email}`), null);
+  assert.equal(await redisService.get(`otp:reset:${absent}`), null);
   const wrong = await app.login(seed.a.owner.email, 'wrong-password');
   const missing = await app.login('no-account@example.test', 'wrong-password');
   assert.equal(wrong.status, 401); assert.deepEqual(wrong.body, missing.body);
   assert.equal(JSON.stringify(wrong.body).includes('passwordHash'), false);
   assert.equal(await db.securityEvent.count({ where: { rule: 'AUTH_FAILURE', subjectKey: `CUSTOMER:${seed.a.owner.id}` } }), 1);
+});
+
+test('SMTP failures return the same retryable registration error for new and existing accounts', async () => {
+  for (const failure of ['EAUTH', 'MAIL_NOT_ACCEPTED']) {
+    const knownEmail = `known-mail-failure-${failure.toLowerCase()}@example.test`;
+    const newEmail = `new-mail-failure-${failure.toLowerCase()}@example.test`;
+    await db.admin.create({ data: { name: 'Mail failure fixture', email: knownEmail, password: seed.passwordHash } });
+    const details = { name: 'Mail failure fixture', password: 'Mail-Fixture-Password123' };
+    mailFailure = failure;
+    try {
+      const failedKnown = await app.request('POST', '/auth/register/send-otp', { body: { ...details, email: knownEmail } });
+      const failedNew = await app.request('POST', '/auth/register/send-otp', { body: { ...details, email: newEmail } });
+      assert.equal(failedKnown.status, 503);
+      assert.equal(failedNew.status, 503);
+      assert.deepEqual(failedKnown.body, failedNew.body);
+      assert.equal(failedNew.body.code, 'REGISTRATION_EMAIL_UNAVAILABLE');
+      assert.doesNotMatch(JSON.stringify(failedNew.body), /EAUTH|MAIL_NOT_ACCEPTED|@|\b\d{6}\b/);
+      for (const email of [knownEmail, newEmail]) {
+        assert.equal(await redisService.get(`otp:register:${email}`), null);
+        assert.equal(await redisService.get(`otp_cd:register:${email}`), null);
+      }
+      const failedCode = mailAttempts.find(message => message.to === newEmail).subject.match(/^\d{6}/)[0];
+      assert.equal((await verifyOtp('register', newEmail, failedCode)).ok, false);
+    } finally { mailFailure = undefined; }
+
+    for (const email of [knownEmail, newEmail]) {
+      const retried = await app.request('POST', '/auth/register/send-otp', { body: { ...details, email } });
+      assert.equal(retried.status, 200);
+      assert.equal(deliveries.filter(message => message.to === email).length, 1);
+      const cooldown = await app.request('POST', '/auth/register/send-otp', { body: { ...details, email } });
+      assert.equal(cooldown.status, 200);
+      assert.equal(deliveries.filter(message => message.to === email).length, 1);
+    }
+    const sentCode = deliveries.find(message => message.to === newEmail).subject.match(/^\d{6}/)[0];
+    assert.equal((await verifyOtp('register', newEmail, sentCode)).ok, true);
+  }
 });
 
 test('the code sent by registration completes signup, and resend cooldown keeps that code valid', async () => {
@@ -66,6 +126,94 @@ test('the code sent by registration completes signup, and resend cooldown keeps 
   assert.ok(registered.body.token);
   assert.ok(registered.body.shop.id);
   assert.equal(await db.customer.count({ where: { email } }), 1);
+});
+
+test('password recovery reports SMTP rejection privately, releases failed sends, and completes reset with the emailed code', async () => {
+  const knownEmail = 'reset-delivery-known@example.test';
+  const unknownEmail = 'reset-delivery-unknown@example.test';
+  const account = await db.admin.create({ data: { name: 'Reset delivery fixture', email: knownEmail, password: seed.passwordHash } });
+  mailFailure = 'MAIL_NOT_ACCEPTED';
+  try {
+    const known = await app.request('POST', '/auth/forgot-password', { body: { email: knownEmail } });
+    const unknown = await app.request('POST', '/auth/forgot-password', { body: { email: unknownEmail } });
+    assert.equal(known.status, 503); assert.equal(unknown.status, 503);
+    assert.deepEqual(known.body, unknown.body);
+    assert.equal(known.body.code, 'PASSWORD_RESET_EMAIL_UNAVAILABLE');
+    for (const email of [knownEmail, unknownEmail]) {
+      assert.equal(await redisService.get(`otp:reset:${email}`), null);
+      assert.equal(await redisService.get(`otp_cd:reset:${email}`), null);
+    }
+  } finally { mailFailure = undefined; }
+
+  for (const email of [knownEmail, unknownEmail]) {
+    const retry = await app.request('POST', '/auth/forgot-password', { body: { email } });
+    assert.equal(retry.status, 200);
+    const cooldown = await app.request('POST', '/auth/forgot-password', { body: { email } });
+    samePublicSuccess(cooldown.body, retry.body);
+    assert.equal(deliveries.filter(message => message.to === email).length, 1);
+  }
+  assert.equal(await redisService.get(`otp:reset:${unknownEmail}`), null);
+  const otp = deliveries.find(message => message.to === knownEmail).subject.match(/^\d{6}/)[0];
+  const body = { email: knownEmail, otp, newPassword: 'Reset-Delivery-Fixture123' };
+  assert.equal((await app.request('POST', '/auth/reset-password', { body })).status, 200);
+  assert.equal((await app.login(knownEmail, body.newPassword)).status, 200);
+  assert.equal((await db.admin.findUnique({ where: { id: account.id } })).sessionVersion, 1);
+  assert.equal((await app.request('POST', '/auth/reset-password', { body })).status, 400);
+});
+
+test('concurrent registration and recovery requests cannot report success before SMTP acceptance', { timeout: 10000 }, async () => {
+  for (const kind of ['register', 'reset']) {
+    for (const fails of [false, true]) {
+      const email = `pending-${kind}-${fails}@example.test`;
+      if (kind === 'reset') await db.admin.create({ data: { name: 'Pending fixture', email, password: seed.passwordHash } });
+      const route = kind === 'register' ? '/auth/register/send-otp' : '/auth/forgot-password';
+      const body = { email, name: 'Pending fixture', password: 'Pending-Fixture-Password123' };
+      const started = Promise.withResolvers(), pending = Promise.withResolvers();
+      mailGate = () => { started.resolve(); return pending.promise; };
+      const first = app.request('POST', route, { body });
+      try {
+        await started.promise;
+        const concurrent = await app.request('POST', route, { body });
+        assert.equal(concurrent.status, 503);
+        assert.equal(deliveries.filter(message => message.to === email).length, 0);
+        if (fails) pending.reject(Object.assign(new Error('SMTP fixture rejected'), { code: 'EMESSAGE' }));
+        else pending.resolve();
+        assert.equal((await first).status, fails ? 503 : 200);
+      } finally { pending.resolve(); mailGate = undefined; await first; }
+      const retry = await app.request('POST', route, { body });
+      assert.equal(retry.status, 200);
+      assert.equal(deliveries.filter(message => message.to === email).length, 1);
+    }
+  }
+});
+
+test('resend responses report remaining cooldown without sending again or extending it', async () => {
+  for (const kind of ['register', 'reset']) {
+    const email = `remaining-${kind}@example.test`, reservedAt = Date.now() - 30000;
+    await reserveOtpDelivery(kind, email, redisService, reservedAt);
+    await completeOtpDelivery(kind, email, { reservedAt });
+    const route = kind === 'register' ? '/auth/register/send-otp' : '/auth/forgot-password';
+    const reply = await app.request('POST', route, { body: { email, name: 'Remaining fixture', password: 'Remaining-Fixture123' } });
+    assert.equal(reply.status, 200);
+    assert.ok(reply.body.resendIn > 25 && reply.body.resendIn <= 30);
+    assert.equal(reply.body.expiresIn, 540 + reply.body.resendIn);
+    assert.equal(mailAttempts.filter(message => message.to === email).length, 0);
+  }
+});
+
+test('failed OTP sends still count toward authentication abuse limits', async () => {
+  const previous = process.env.AUTH_ACCOUNT_ATTEMPTS;
+  process.env.AUTH_ACCOUNT_ATTEMPTS = '5';
+  mailFailure = 'EAUTH';
+  const body = { email: 'bounded-mail-retries@example.test', name: 'Bounded fixture', password: 'Mail-Fixture-Password123' };
+  try {
+    for (let i = 0; i < 5; i++) assert.equal((await app.request('POST', '/auth/register/send-otp', { body })).status, 503);
+    assert.equal((await app.request('POST', '/auth/register/send-otp', { body })).status, 429);
+    assert.equal(mailAttempts.filter(message => message.to === body.email).length, 5);
+  } finally {
+    mailFailure = undefined;
+    if (previous === undefined) delete process.env.AUTH_ACCOUNT_ATTEMPTS; else process.env.AUTH_ACCOUNT_ATTEMPTS = previous;
+  }
 });
 
 test('account restrictions prevent new sessions, authenticated me and socket connections until expiry', async () => {

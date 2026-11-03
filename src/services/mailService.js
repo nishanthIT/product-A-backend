@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { domainToASCII } from 'node:url';
 
 /**
  * Zoho Mail transporter for transactional Paymi email (OTP + password reset).
@@ -49,6 +50,25 @@ export async function verifyMailConfiguration() {
 
 const from = () => `"Paymi" <${process.env.MAIL_USER?.trim() || 'noreply@paymi.co.uk'}>`;
 
+const normalizeMailbox = address => {
+  if (typeof address !== 'string' || !/^[^\s@<>;,"]+@[^\s@<>;,"]+\.[^\s@<>;,"]+$/.test(address)) return '';
+  const [local, domain] = address.split('@');
+  const asciiDomain = domainToASCII(domain);
+  return asciiDomain ? `${local.toLowerCase()}@${asciiDomain.toLowerCase()}` : '';
+};
+
+async function sendTransactionalEmail(message) {
+  const recipient = normalizeMailbox(message.to);
+  if (!recipient) throw Object.assign(new Error('Invalid mail recipient'), { code: 'MAIL_INVALID_RECIPIENT' });
+  // A structured address prevents SMTP list/display-name parsing of API input.
+  const result = await getTransporter().sendMail({ ...message, to: { address: recipient } });
+  // A completed SMTP call is only successful if the intended recipient was
+  // accepted. This still does not guarantee inbox placement.
+  if (!result?.accepted?.some(address => normalizeMailbox(address) === recipient)) {
+    throw Object.assign(new Error('Mail provider did not accept the recipient'), { code: 'MAIL_NOT_ACCEPTED' });
+  }
+}
+
 function otpTemplate({ heading, intro, code, footer }) {
   return `
     <div style="font-family: -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; background:#F7F3EA; padding:32px 16px;">
@@ -71,7 +91,7 @@ function otpTemplate({ heading, intro, code, footer }) {
 }
 
 export async function sendRegistrationOtpEmail(to, code) {
-  await getTransporter().sendMail({
+  await sendTransactionalEmail({
     from: from(),
     to,
     subject: `${code} is your Paymi verification code`,
@@ -85,8 +105,28 @@ export async function sendRegistrationOtpEmail(to, code) {
   });
 }
 
+// Keep account existence private in the HTTP response. An existing account's
+// mailbox receives useful guidance instead of silently receiving nothing.
+export async function sendRegistrationSignInEmail(to) {
+  await sendTransactionalEmail({
+    from: from(),
+    to,
+    subject: 'Your Paymi registration request',
+    text: 'A Paymi account already uses this email address. Open the Paymi app and sign in, or use Forgot password to reset your password. No new account was created and your password has not changed. If you did not request registration, you can ignore this email.',
+  });
+}
+
+export async function sendMailTestEmail(to) {
+  await sendTransactionalEmail({
+    from: from(),
+    to,
+    subject: 'Paymi email delivery test',
+    text: 'This is a Paymi email delivery test requested by the server operator. It contains no verification code and does not create or change an account.',
+  });
+}
+
 export async function sendPasswordResetOtpEmail(to, code) {
-  await getTransporter().sendMail({
+  await sendTransactionalEmail({
     from: from(),
     to,
     subject: `${code} is your Paymi password reset code`,
@@ -97,5 +137,14 @@ export async function sendPasswordResetOtpEmail(to, code) {
       code,
       footer: "If you didn't request a password reset, you can safely ignore this email — your password has not been changed.",
     }),
+  });
+}
+
+export async function sendPasswordResetSignUpEmail(to) {
+  await sendTransactionalEmail({
+    from: from(),
+    to,
+    subject: 'Your Paymi password reset request',
+    text: 'There is no Paymi account using this email address. Check that you entered the email used to register, or open the Paymi app to create an account. No account or password has been changed. If you did not request a password reset, you can ignore this email.',
   });
 }

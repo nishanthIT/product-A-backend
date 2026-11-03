@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { issueOtp, verifyOtp, reserveOtpDelivery, OTP_TTL_SECONDS } from '../src/services/otpSecurity.js';
+import { issueOtp, verifyOtp, reserveOtpDelivery, cancelOtpDelivery, completeOtpDelivery, otpDeliveryWasSent, OTP_TTL_SECONDS, OTP_RESEND_COOLDOWN } from '../src/services/otpSecurity.js';
 import { authRateLimit } from '../src/middleware/authRateLimit.js';
 import { validateSessionClaims, sessionSignOptions, jwtSecret } from '../src/services/sessionSecurity.js';
 
@@ -31,6 +31,38 @@ test('OTP expiry, flow separation and resend reservation are enforced', async ()
   assert.equal((await verifyOtp('register', email, code, { cache, now: now + OTP_TTL_SECONDS * 1000 })).ok, false);
   const reserved = await Promise.all(Array.from({ length: 10 }, () => reserveOtpDelivery('register', email, cache, now)));
   assert.equal(reserved.filter(seconds => seconds === 0).length, 1);
+});
+test('a failed mail send invalidates its proof and permits a fresh delivery attempt', async () => {
+  const cache = cacheFixture(), email = 'mail-failure@example.test', reservedAt = Date.now();
+  assert.equal(await reserveOtpDelivery('register', email, cache, reservedAt), 0);
+  const code = await issueOtp('register', email, cache, reservedAt);
+  await cancelOtpDelivery('register', email, { code, reservedAt, cache });
+  assert.equal((await verifyOtp('register', email, code, { cache })).ok, false);
+  assert.equal(await reserveOtpDelivery('register', email, cache, reservedAt + 1), 0);
+});
+test('delivery stays pending until accepted and an old completion cannot mark a newer reservation sent', async () => {
+  const cache = cacheFixture(), email = 'pending@example.test', reservedAt = Date.now();
+  await reserveOtpDelivery('register', email, cache, reservedAt);
+  assert.equal(await otpDeliveryWasSent('register', email, cache, reservedAt), false);
+  assert.equal(await completeOtpDelivery('register', email, { reservedAt, cache }), true);
+  assert.equal(await otpDeliveryWasSent('register', email, cache, reservedAt), true);
+  const later = reservedAt + OTP_RESEND_COOLDOWN * 1000 + 1;
+  await reserveOtpDelivery('register', email, cache, later);
+  assert.equal(await completeOtpDelivery('register', email, { reservedAt, cache }), false);
+  assert.equal(await otpDeliveryWasSent('register', email, cache, later), false);
+});
+test('late mail failure cleanup preserves a newer code, cooldown and other OTP flows', async () => {
+  const cache = cacheFixture(), email = 'mail-race@example.test', reservedAt = Date.now();
+  await reserveOtpDelivery('register', email, cache, reservedAt);
+  const oldCode = await issueOtp('register', email, cache, reservedAt);
+  const resetCode = await issueOtp('reset', email, cache, reservedAt);
+  const later = reservedAt + OTP_RESEND_COOLDOWN * 1000 + 1;
+  assert.equal(await reserveOtpDelivery('register', email, cache, later), 0);
+  const newCode = await issueOtp('register', email, cache, later);
+  await cancelOtpDelivery('register', email, { code: oldCode, reservedAt, cache });
+  assert.equal(await reserveOtpDelivery('register', email, cache, later), OTP_RESEND_COOLDOWN);
+  assert.equal((await verifyOtp('register', email, newCode, { cache, now: later })).ok, true);
+  assert.equal((await verifyOtp('reset', email, resetCode, { cache, now: later })).ok, true);
 });
 function authFixture(limit = 3) {
   const counters = new Map(), events = [], restrictions = [];

@@ -11,13 +11,14 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import redisService from '../services/redisService.js';
-import { sendRegistrationOtpEmail, sendPasswordResetOtpEmail } from '../services/mailService.js';
+import { sendRegistrationOtpEmail, sendRegistrationSignInEmail, sendPasswordResetOtpEmail, sendPasswordResetSignUpEmail } from '../services/mailService.js';
 import { describeAccess, resolvePrincipal } from '../services/accessControl.js';
 import { findRegistrationRetry, normalizeRegistration, provisionRegistration, registrationRequestHash } from '../services/supermarketProvisioning.js';
+import { resetPasswordWithOtp } from '../services/passwordRecovery.js';
 
 const prisma = new PrismaClient();
 
-import { OTP_TTL_SECONDS, OTP_RESEND_COOLDOWN, otpKey, reserveOtpDelivery, issueOtp, verifyOtp } from '../services/otpSecurity.js';
+import { OTP_TTL_SECONDS, OTP_RESEND_COOLDOWN, otpKey, reserveOtpDelivery, cancelOtpDelivery, completeOtpDelivery, otpDeliveryWasSent, issueOtp, verifyOtp } from '../services/otpSecurity.js';
 import { sessionSignOptions } from '../services/sessionSecurity.js';
 import { recordSecurityEvent, activeSecurityRestriction } from '../services/securityProtection.js';
 import { sendSecurityRestriction } from '../middleware/securityProtection.js';
@@ -137,17 +138,41 @@ const sendRegistrationOtp = async (req, res) => {
       prisma.customer.findFirst({ where: { email: { equals: email, mode: 'insensitive' } } }),
     ]);
     // Reserve the same cooldown for every address, including existing accounts.
-    const cooldown = await reserveOtpDelivery('register', email);
-    if (!cooldown && !(existingAdmin || existingEmployee || existingCustomer)) {
-      const code = await issueOtp('register', email);
-      await sendRegistrationOtpEmail(email, code).catch(error => securityLog.warn('Registration email delivery unavailable', error));
+    const reservedAt = Date.now();
+    const cooldown = await reserveOtpDelivery('register', email, redisService, reservedAt);
+    if (!cooldown) {
+      let code;
+      try {
+        // Both account states use SMTP, so an outage cannot reveal account
+        // existence through a different public success/error response.
+        if (existingAdmin || existingEmployee || existingCustomer) {
+          await sendRegistrationSignInEmail(email);
+        } else {
+          code = await issueOtp('register', email, redisService, reservedAt);
+          await sendRegistrationOtpEmail(email, code);
+        }
+        if (!await completeOtpDelivery('register', email, { reservedAt })) {
+          throw Object.assign(new Error('Registration delivery reservation expired'), { code: 'OTP_DELIVERY_EXPIRED' });
+        }
+      } catch (error) {
+        securityLog.warn('Registration email delivery unavailable', error);
+        await cancelOtpDelivery('register', email, { code, reservedAt }).catch(cleanupError => {
+          securityLog.error('Registration email cleanup failed', cleanupError);
+        });
+        return res.status(503).json({
+          error: 'We could not send your registration email. Please try again shortly.',
+          code: 'REGISTRATION_EMAIL_UNAVAILABLE',
+        });
+      }
+    } else if (!await otpDeliveryWasSent('register', email)) {
+      return res.status(503).json({ code: 'REGISTRATION_EMAIL_UNAVAILABLE' });
     }
 
     return res.status(200).json({
       success: true,
-      message: 'If this email can be registered, a verification code has been sent.',
-      resendIn: OTP_RESEND_COOLDOWN,
-      expiresIn: OTP_TTL_SECONDS,
+      message: 'Check your email for a verification code or sign-in instructions, including your spam folder.',
+      resendIn: cooldown || OTP_RESEND_COOLDOWN,
+      expiresIn: cooldown ? OTP_TTL_SECONDS - OTP_RESEND_COOLDOWN + cooldown : OTP_TTL_SECONDS,
     });
   } catch (error) {
     securityLog.error('Send registration OTP error:', serviceError(error));
@@ -312,21 +337,41 @@ const forgotPassword = async (req, res) => {
       return res.status(400).json({ error: 'A valid email is required' });
     }
 
-    const genericResponse = {
-      success: true,
-      message: 'If this email is registered, a reset code has been sent.',
-      resendIn: OTP_RESEND_COOLDOWN,
-      expiresIn: OTP_TTL_SECONDS,
-    };
-
-    const cooldown = await reserveOtpDelivery('reset', email);
     const found = await findUserByEmail(email);
-    if (!cooldown && found) {
-      const code = await issueOtp('reset', email);
-      await sendPasswordResetOtpEmail(email, code).catch(error => securityLog.warn('Password recovery email delivery unavailable', error));
+    const reservedAt = Date.now();
+    const cooldown = await reserveOtpDelivery('reset', email, redisService, reservedAt);
+    if (!cooldown) {
+      let code;
+      try {
+        if (found) {
+          code = await issueOtp('reset', email, redisService, reservedAt);
+          await sendPasswordResetOtpEmail(email, code);
+        } else {
+          await sendPasswordResetSignUpEmail(email);
+        }
+        if (!await completeOtpDelivery('reset', email, { reservedAt })) {
+          throw Object.assign(new Error('Password reset delivery reservation expired'), { code: 'OTP_DELIVERY_EXPIRED' });
+        }
+      } catch (error) {
+        securityLog.warn('Password recovery email delivery unavailable', error);
+        await cancelOtpDelivery('reset', email, { code, reservedAt }).catch(cleanupError => {
+          securityLog.error('Password recovery email cleanup failed', cleanupError);
+        });
+        return res.status(503).json({
+          error: 'We could not send your password reset email. Please try again shortly.',
+          code: 'PASSWORD_RESET_EMAIL_UNAVAILABLE',
+        });
+      }
+    } else if (!await otpDeliveryWasSent('reset', email)) {
+      return res.status(503).json({ code: 'PASSWORD_RESET_EMAIL_UNAVAILABLE' });
     }
 
-    return res.status(200).json(genericResponse);
+    return res.status(200).json({
+      success: true,
+      message: 'Check your email for a reset code or account instructions, including your spam folder.',
+      resendIn: cooldown || OTP_RESEND_COOLDOWN,
+      expiresIn: cooldown ? OTP_TTL_SECONDS - OTP_RESEND_COOLDOWN + cooldown : OTP_TTL_SECONDS,
+    });
   } catch (error) {
     securityLog.error('Forgot password error:', serviceError(error));
     return res.status(500).json({ error: 'Failed to send reset code. Please try again.' });
@@ -347,34 +392,25 @@ const resetPassword = async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 8 characters and at most 72 UTF-8 bytes.' });
     }
 
-    const verification = await verifyOtp('reset', email, otp);
+    const verification = await verifyOtp('reset', email, otp, { consume: false });
     if (!verification.ok) {
       return res.status(400).json({ error: verification.error });
     }
 
-    const found = await findUserByEmail(email);
-    if (!found) {
-      return res.status(400).json({ error: 'Account not found' });
-    }
-
     const hashedPassword = await bcrypt.hash(newPassword, 12);
-    await prisma[found.userTable].update({
-      where: { id: found.user.id },
-      data: { password: hashedPassword, sessionVersion: { increment: 1 } },
-    });
-
+    const result = await resetPasswordWithOtp(prisma, { email, otp, passwordHash: hashedPassword });
+    if (!result.ok) return res.status(400).json({ error: result.error });
 
     for (const socket of req.io?.sockets?.sockets?.values() ?? []) {
-      const type = { admin: 'ADMIN', customer: 'CUSTOMER', empolyee: 'EMPLOYEE' }[found.userTable];
-      if (socket.claims?.id === found.user.id && socket.claims?.userType === type) socket.disconnect(true);
+      if (socket.claims?.id === result.userId && socket.claims?.userType === result.userType) socket.disconnect(true);
     }
     return res.status(200).json({
       success: true,
       message: 'Password has been reset successfully. You can now sign in with your new password.',
     });
   } catch (error) {
-    securityLog.error('Reset password error:', serviceError(error));
-    return res.status(500).json({ error: 'Failed to reset password' });
+    securityLog.error('Reset password error:', error);
+    return res.status(503).json({ code: 'PASSWORD_RESET_UNAVAILABLE' });
   }
 };
 

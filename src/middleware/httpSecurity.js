@@ -68,10 +68,24 @@ export function securityHeaders(req, res, next) {
   }
   // A controller must not expose ORM details or stack traces on failure.
   const json = res.json.bind(res);
-  res.json = body => json(res.statusCode >= 500 ? {
-    error: res.statusCode === 503 ? 'Service temporarily unavailable. Please retry.' : 'Internal server error',
-    ...(['CHAT_SCHEMA_NOT_READY', 'CHAT_STORAGE_UNAVAILABLE'].includes(body?.code) && { code: body.code }),
-  } : body);
+  res.json = body => {
+    if (res.statusCode < 500) return json(body);
+    // Preserve this fixed, user-actionable error without trusting controller
+    // text or returning provider responses, recipients, codes or credentials.
+    if (res.statusCode === 503 && body?.code === 'REGISTRATION_EMAIL_UNAVAILABLE') {
+      return json({ error: 'We could not send your registration email. Please try again shortly.', code: body.code });
+    }
+    if (res.statusCode === 503 && body?.code === 'PASSWORD_RESET_EMAIL_UNAVAILABLE') {
+      return json({ error: 'We could not send your password reset email. Please try again shortly.', code: body.code });
+    }
+    if (res.statusCode === 503 && body?.code === 'PASSWORD_RESET_UNAVAILABLE') {
+      return json({ error: 'Password reset is temporarily unavailable. Please retry with the same code.', code: body.code });
+    }
+    return json({
+      error: res.statusCode === 503 ? 'Service temporarily unavailable. Please retry.' : 'Internal server error',
+      ...(['CHAT_SCHEMA_NOT_READY', 'CHAT_STORAGE_UNAVAILABLE'].includes(body?.code) && { code: body.code }),
+    });
+  };
   next();
 }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import nodemailer from 'nodemailer';
 import { mailTransportOptions } from '../src/services/mailService.js';
 import { safeLogger } from '../src/services/safeLogger.js';
+import { mailFailureDetails } from '../src/services/mailDiagnostics.js';
 
 const configuration = {
   MAIL_HOST: ' smtp.example.test ', MAIL_PORT: '465',
@@ -42,16 +43,18 @@ test('registration and reset messages retain their recipient, code and expiry; v
   const previous = Object.fromEntries(Object.keys(configuration).map(key => [key, process.env[key]]));
   Object.assign(process.env, configuration);
   const messages = [];
-  let created = 0, verified = 0, rejectNext = false;
+  let created = 0, verified = 0, rejectNext = false, acceptNext = true;
   const transportMock = mock.method(nodemailer, 'createTransport', options => {
     created++;
     assert.equal(options.auth.user, 'noreply@example.test');
     return {
       verify: async () => { verified++; return true; },
       sendMail: async message => {
+        assert.equal(typeof message.to, 'object');
+        message = { ...message, to: message.to.address };
         if (rejectNext) throw Object.assign(new Error('SMTP rejected authentication'), { code: 'EAUTH' });
         messages.push(message);
-        return { accepted: [message.to] };
+        return { accepted: acceptNext ? [message.to] : [], rejected: acceptNext ? [] : [message.to] };
       },
     };
   });
@@ -74,6 +77,22 @@ test('registration and reset messages retain their recipient, code and expiry; v
     }
     assert.equal(messages[0].to, 'new-owner@example.test');
     assert.equal(messages[1].to, 'owner@example.test');
+    await service.sendRegistrationSignInEmail('existing@example.test');
+    assert.match(messages[2].text, /sign in/);
+    assert.doesNotMatch(messages[2].subject + messages[2].text, /\b\d{6}\b/);
+    await service.sendMailTestEmail('operator@example.test');
+    assert.equal(messages[3].subject, 'Paymi email delivery test');
+    assert.match(messages[3].text, /does not create or change an account/);
+    await service.sendPasswordResetSignUpEmail('no-account@example.test');
+    assert.match(messages[4].text, /no Paymi account/);
+    assert.doesNotMatch(messages[4].subject + messages[4].text, /\b\d{6}\b/);
+    await service.sendRegistrationOtpEmail('owner@bücher.example', '123456');
+    assert.equal(messages[5].to, 'owner@xn--bcher-kva.example');
+    await assert.rejects(service.sendRegistrationOtpEmail('display,<owner@example.test>', '123456'), { code: 'MAIL_INVALID_RECIPIENT' });
+    acceptNext = false;
+    for (const send of [service.sendRegistrationOtpEmail, service.sendPasswordResetOtpEmail, service.sendRegistrationSignInEmail, service.sendPasswordResetSignUpEmail, service.sendMailTestEmail]) {
+      await assert.rejects(send('new-owner@example.test', '123456'), { code: 'MAIL_NOT_ACCEPTED' });
+    }
     rejectNext = true;
     await assert.rejects(service.sendRegistrationOtpEmail('new-owner@example.test', '123456'), { code: 'EAUTH' });
   } finally {
@@ -93,4 +112,16 @@ test('SMTP diagnostics retain the error code without logging credentials, recipi
   ));
   assert.equal(output[0][1].error.code, 'EAUTH');
   assert.doesNotMatch(JSON.stringify(output), /fixture-only-password|new-owner@example\.test|123456|AUTH PLAIN/);
+});
+
+test('delivery diagnostics expose known rejection labels and protocol codes only', () => {
+  const details = mailFailureDetails({
+    code: 'EMESSAGE', command: 'DATA', responseCode: 554,
+    response: '554 Sender outgoing blocked: unusual sending activity for owner@example.test fixture-only-password 123456',
+  });
+  assert.deepEqual(details, {
+    code: 'EMESSAGE', smtpStatus: 554, stage: 'DATA',
+    reasons: ['UNUSUAL_SENDING_ACTIVITY', 'SENDING_BLOCKED'],
+  });
+  assert.deepEqual(mailFailureDetails({ code: 'secret@example.test', command: 'AUTH secret', responseCode: 'secret', response: 'private response' }), { code: 'UNKNOWN' });
 });
